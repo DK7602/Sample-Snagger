@@ -1,0 +1,793 @@
+#include "StudioPage.h"
+#include "../PluginProcessor.h"
+#include "../Actions.h"
+#include "../core/EditOps.h"
+
+namespace snag
+{
+using namespace theme;
+
+//==============================================================================
+SlicePads::SlicePads (SnaggerProcessor& p) : proc (p)
+{
+    startTimerHz (30);
+}
+
+int SlicePads::numPads() const
+{
+    if (clip == nullptr || clip->audio == nullptr) return 0;
+    return juce::jmin (32, (int) clip->sliceBoundaries().size() - 1);
+}
+
+juce::Rectangle<float> SlicePads::padBounds (int i, int count) const
+{
+    auto r = getLocalBounds().toFloat().reduced (1.0f);
+    const int perRow = juce::jmax (16, count);
+    const float gap = 5.0f;
+    const float w = (r.getWidth() - gap * (float) (perRow - 1)) / (float) perRow;
+    return { r.getX() + (float) i * (w + gap), r.getY(), w, r.getHeight() };
+}
+
+int SlicePads::padAt (juce::Point<int> p) const
+{
+    const int n = numPads();
+    for (int i = 0; i < n; ++i)
+        if (padBounds (i, n).contains (p.toFloat()))
+            return i;
+    return -1;
+}
+
+void SlicePads::paint (juce::Graphics& g)
+{
+    const int n = numPads();
+    const int root = proc.rootNote.load();
+    const bool chopsMode = proc.midiMode.load() == SnaggerProcessor::chops;
+
+    if (n <= 1)
+    {
+        auto r = getLocalBounds().toFloat();
+        glossPanel (g, r, 7.0f, col::bg2, col::bg1, false, 0.03f);
+        g.setColour (col::textDim);
+        g.setFont (ui (12.0f));
+        g.drawText (chopsMode ? "Chop the sample (AUTO CHOP or EQUAL) to get MIDI pads - pads start at " + noteName (root) + ". Drag any pad into your DAW."
+                              : "KEYS mode: play the sample (or selection) chromatically from your MIDI keyboard - " + noteName (root) + " = original pitch.",
+                    r.reduced (14.0f, 0.0f), juce::Justification::centredLeft);
+        return;
+    }
+
+    const auto now = juce::Time::getMillisecondCounter();
+    for (int i = 0; i < juce::jmax (16, n); ++i)
+    {
+        auto r = padBounds (i, n);
+        if (i >= n)
+        {
+            g.setColour (col::bg1);
+            g.fillRoundedRectangle (r, 6.0f);
+            g.setColour (col::lineSoft);
+            g.drawRoundedRectangle (r.reduced (0.5f), 6.0f, 1.0f);
+            continue;
+        }
+
+        const bool isLit = (i == lit && now < litUntil) || i == pressed;
+        if (isLit)
+        {
+            juce::Path p; p.addRoundedRectangle (r, 6.0f);
+            neonGlow (g, p, col::red, 10.0f, 0.9f);
+            g.setGradientFill (juce::ColourGradient (col::red, r.getX(), r.getY(), col::redDeep, r.getX(), r.getBottom(), false));
+            g.fillRoundedRectangle (r, 6.0f);
+        }
+        else
+        {
+            glossPanel (g, r, 6.0f, col::bg4, col::bg1, false, 0.07f);
+            goldBorder (g, r, 6.0f, 1.0f, 0.45f);
+        }
+
+        g.setColour (isLit ? juce::Colours::white : col::goldLight);
+        g.setFont (display (r.getHeight() * 0.36f, true));
+        g.drawText (juce::String (i + 1), r.withTrimmedBottom (r.getHeight() * 0.38f), juce::Justification::centred);
+        g.setColour (isLit ? juce::Colours::white.withAlpha (0.85f) : col::textDim);
+        g.setFont (ui (juce::jmin (10.0f, r.getWidth() * 0.26f), true));
+        g.drawText (noteName (root + i), r.withTrimmedTop (r.getHeight() * 0.55f), juce::Justification::centred);
+    }
+}
+
+void SlicePads::timerCallback()
+{
+    const auto c = proc.triggerCounter.load();
+    if (c != lastCounter)
+    {
+        lastCounter = c;
+        lit = proc.lastTriggeredSlice.load();
+        litUntil = juce::Time::getMillisecondCounter() + 160;
+        repaint();
+    }
+    else if (lit >= 0 && juce::Time::getMillisecondCounter() > litUntil)
+    {
+        lit = -1;
+        repaint();
+    }
+}
+
+void SlicePads::mouseDown (const juce::MouseEvent& e)
+{
+    pressed = padAt (e.getPosition());
+    dragStarted = false;
+    if (pressed >= 0)
+    {
+        proc.sendUiNote (proc.rootNote.load() + pressed, 0.9f);
+        if (onSliceSelected) onSliceSelected (pressed);
+    }
+    repaint();
+}
+
+void SlicePads::mouseDrag (const juce::MouseEvent& e)
+{
+    if (pressed < 0 || dragStarted || e.getDistanceFromDragStart() < 8 || clip == nullptr)
+        return;
+
+    dragStarted = true;
+    proc.sendUiNote (proc.rootNote.load() + pressed, 0.0f);
+    auto b = clip->sliceBoundaries();
+    const int idx = pressed;
+    pressed = -1;
+    repaint();
+    if (idx + 1 < (int) b.size())
+    {
+        auto f = actions::makeDragFile (proc, *clip, b[(size_t) idx], b[(size_t) idx + 1], " - chop " + juce::String (idx + 1));
+        DragHandle::startExternalDrag (*this, f);
+    }
+}
+
+void SlicePads::mouseUp (const juce::MouseEvent&)
+{
+    if (pressed >= 0)
+        proc.sendUiNote (proc.rootNote.load() + pressed, 0.0f);
+    pressed = -1;
+    repaint();
+}
+
+//==============================================================================
+StudioPage::StudioPage (EditorContext& c)
+    : ctx (c), proc (c.getProcessor()), wave (c.getProcessor()), pads (c.getProcessor())
+{
+    nameLabel.setFont (display (20.0f, true));
+    nameLabel.setColour (juce::Label::textColourId, col::goldLight);
+    nameLabel.setEditable (false, true, false);
+    nameLabel.setTooltip ("Double-click to rename");
+    nameLabel.onTextChange = [this] { rename(); };
+    nameLabel.setMinimumHorizontalScale (0.7f);
+    addAndMakeVisible (nameLabel);
+
+    infoLabel.setFont (ui (11.5f, true));
+    infoLabel.setColour (juce::Label::textColourId, col::textDim);
+    addAndMakeVisible (infoLabel);
+
+    bpmLabel.setFont (ui (12.0f, true));
+    bpmLabel.setColour (juce::Label::textColourId, col::goldPale);
+    bpmLabel.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (bpmLabel);
+
+    setStyle (detectBpmBtn, "chip");
+    detectBpmBtn.onClick = [this] { detectBpm(); };
+    addAndMakeVisible (detectBpmBtn);
+
+    undoBtn.setTooltip ("Undo (Cmd/Ctrl+Z)");
+    redoBtn.setTooltip ("Redo (Shift+Cmd/Ctrl+Z)");
+    undoBtn.onClick = [this] { undo(); };
+    redoBtn.onClick = [this] { redo(); };
+    addAndMakeVisible (undoBtn);
+    addAndMakeVisible (redoBtn);
+
+    addAndMakeVisible (overview);
+    addAndMakeVisible (wave);
+    wave.onSelectionChanged = [this] { refreshInfo(); syncSampler(); overview.repaint(); };
+    wave.onSlicesChanged = [this]
+    {
+        if (clip != nullptr) proc.session.clipChanged (clip.get(), false);
+        syncSampler();
+        pads.repaint();
+    };
+    wave.onViewChanged = [this] { overview.repaint(); };
+    wave.onPlayFrom = [this] (int from)
+    {
+        if (clip != nullptr) proc.previewClip (*clip, from, -1, loopBtn.getToggleState());
+    };
+
+    // transport
+    playBtn.setTooltip ("Play the selection (or from the cursor) - Space");
+    playBtn.onClick = [this] { play(); };
+    stopBtn.onClick = [this] { stop(); };
+    loopBtn.setClickingTogglesState (true);
+    loopBtn.setTooltip ("Loop playback");
+    for (auto* b : { static_cast<juce::Component*> (&playBtn), static_cast<juce::Component*> (&stopBtn), static_cast<juce::Component*> (&loopBtn) })
+        addAndMakeVisible (b);
+
+    selLabel.setFont (ui (11.5f, true));
+    selLabel.setColour (juce::Label::textColourId, col::textDim);
+    addAndMakeVisible (selLabel);
+
+    zoomInBtn.onClick  = [this] { wave.zoomBy (0.6, wave.getViewStart() + wave.getViewLength() * 0.5); };
+    zoomOutBtn.onClick = [this] { wave.zoomBy (1.6, wave.getViewStart() + wave.getViewLength() * 0.5); };
+    setStyle (fitBtn, "ghost");
+    fitBtn.onClick = [this] { wave.zoomToFit(); };
+    zoomInBtn.setTooltip ("Zoom in (or Cmd/Ctrl + scroll)");
+    zoomOutBtn.setTooltip ("Zoom out");
+    addAndMakeVisible (zoomInBtn);
+    addAndMakeVisible (zoomOutBtn);
+    addAndMakeVisible (fitBtn);
+
+    saveBtn.setTooltip ("Save the selection (or whole sample) as a WAV in your Sample Snagger library");
+    saveBtn.onClick = [this]
+    {
+        if (clip == nullptr) return;
+        actions::saveToLibrary (proc, *clip, selStartOrZero(), selEndOrAll(), wave.hasSelection() ? " (cut)" : "");
+    };
+    addAndMakeVisible (saveBtn);
+
+    dragHandle.makeFile = [this]
+    {
+        if (clip == nullptr) return juce::File();
+        return actions::makeDragFile (proc, *clip, selStartOrZero(), selEndOrAll(), wave.hasSelection() ? " (cut)" : "");
+    };
+    addAndMakeVisible (dragHandle);
+
+    pads.onSliceSelected = [this] (int idx)
+    {
+        if (clip == nullptr) return;
+        auto b = clip->sliceBoundaries();
+        if (idx + 1 < (int) b.size())
+            wave.setSelection (b[(size_t) idx], b[(size_t) idx + 1]);
+    };
+    addAndMakeVisible (pads);
+
+    // ---- panels ----
+    for (auto* p : { &editPanel, &pitchPanel, &tonePanel, &chopPanel })
+        addAndMakeVisible (p);
+
+    struct EditDef { const char* name; const char* tip; };
+    const EditDef defs[] = {
+        { "TRIM",      "Keep only the selection" },
+        { "CUT",       "Delete the selection" },
+        { "SILENCE",   "Silence the selection" },
+        { "NORMALIZE", "Make it as loud as possible without clipping (-0.3 dB peak)" },
+        { "FADE IN",   "Fade in over the selection (or the first 5%)" },
+        { "FADE OUT",  "Fade out over the selection (or the last 5%)" },
+        { "REVERSE",   "Reverse the selection (or whole sample)" },
+        { "MONO",      "Sum to mono" },
+    };
+    for (auto& d : defs)
+    {
+        auto* b = editButtons.add (new juce::TextButton (d.name));
+        b->setTooltip (d.tip);
+        addAndMakeVisible (b);
+    }
+
+    auto fadeRange = [this] (bool in, int& s, int& e)
+    {
+        const int n = clip->audio->getNumSamples();
+        if (wave.hasSelection()) { s = wave.getSelectionStart(); e = wave.getSelectionEnd(); return; }
+        const int len = juce::jlimit ((int) (0.01 * clip->audio->sampleRate), (int) (2.0 * clip->audio->sampleRate), n / 20);
+        if (in) { s = 0; e = len; } else { s = n - len; e = n; }
+    };
+
+    editButtons[0]->onClick = [this] { applyEdit ("Trim", true, SliceFix::crop, [] (const AudioData& a, int s, int e) { return edit::crop (a, s, e); }); };
+    editButtons[1]->onClick = [this] { applyEdit ("Cut", true, SliceFix::remove, [] (const AudioData& a, int s, int e) { return edit::removeRange (a, s, e); }); };
+    editButtons[2]->onClick = [this] { applyEdit ("Silence", true, SliceFix::keep, [] (const AudioData& a, int s, int e) { return edit::silence (a, s, e); }); };
+    editButtons[3]->onClick = [this] { applyEdit ("Normalize", false, SliceFix::keep, [] (const AudioData& a, int s, int e) { return edit::normalize (a, s, e); }); };
+    editButtons[4]->onClick = [this, fadeRange]
+    {
+        if (clip == nullptr) return;
+        int fs, fe; fadeRange (true, fs, fe);
+        applyEdit ("Fade in", false, SliceFix::keep, [fs, fe] (const AudioData& a, int, int) { return edit::fade (a, fs, fe, true); });
+    };
+    editButtons[5]->onClick = [this, fadeRange]
+    {
+        if (clip == nullptr) return;
+        int fs, fe; fadeRange (false, fs, fe);
+        applyEdit ("Fade out", false, SliceFix::keep, [fs, fe] (const AudioData& a, int, int) { return edit::fade (a, fs, fe, false); });
+    };
+    editButtons[6]->onClick = [this] { applyEdit ("Reverse", false, SliceFix::keep, [] (const AudioData& a, int s, int e) { return edit::reverse (a, s, e); }); };
+    editButtons[7]->onClick = [this] { applyEdit ("Mono", false, SliceFix::keep, [] (const AudioData& a, int, int) { return edit::toMono (a); }); };
+
+    // pitch & time
+    pitchKnob.formatter = [] (double v) { return (v > 0 ? "+" : "") + juce::String (v, std::abs (v - std::round (v)) < 0.05 ? 0 : 1) + " st"; };
+    bpmKnob.formatter = [] (double v) { return juce::String (v, 1); };
+    formantToggle.setToggleState (true, juce::dontSendNotification);
+    formantToggle.setTooltip ("Keep formants: voices stay natural when pitching (no chipmunk)");
+    tapeToggle.setTooltip ("Old-school varispeed: pitch and speed change together");
+    applyPitchBtn.setTooltip ("Apply pitch / length (high-quality Signalsmith engine)");
+    matchBpmBtn.setTooltip ("Stretch the sample from its detected BPM to the target BPM");
+    setStyle (applyPitchBtn, "red");
+    applyPitchBtn.onClick = [this]
+    {
+        if (clip == nullptr || pitchJobRunning) return;
+        const float st = (float) pitchKnob.slider.getValue();
+        const double len = stretchKnob.slider.getValue() / 100.0;
+        if (std::abs (st) < 0.01f && std::abs (len - 1.0) < 0.001) { ctx.toast ("Set PITCH or LENGTH first."); return; }
+        pitchJobRunning = true;
+        juce::Component::SafePointer<StudioPage> safe (this);
+        actions::pitchTime (proc, clip, st, len, formantToggle.getToggleState(), tapeToggle.getToggleState(), [safe] (bool ok)
+        {
+            if (safe == nullptr) return;
+            safe->pitchJobRunning = false;
+            if (! ok) return;
+            safe->pitchKnob.slider.setValue (0.0);
+            safe->stretchKnob.slider.setValue (100.0);
+            safe->wave.audioChanged();
+            safe->refreshInfo();
+        });
+    };
+    matchBpmBtn.onClick = [this] { matchBpm(); };
+    for (auto* comp : std::initializer_list<juce::Component*> { &pitchKnob, &stretchKnob, &bpmKnob, &formantToggle, &tapeToggle, &applyPitchBtn, &matchBpmBtn })
+        addAndMakeVisible (comp);
+
+    // tone
+    lowCutKnob.slider.setSkewFactorFromMidPoint (150.0);
+    highCutKnob.slider.setSkewFactorFromMidPoint (5000.0);
+    lowCutKnob.formatter  = [] (double v) { return v < 10.0 ? juce::String ("Off") : juce::String ((int) v) + " Hz"; };
+    highCutKnob.formatter = [] (double v) { return v > 19900.0 ? juce::String ("Off") : (v >= 1000.0 ? juce::String (v / 1000.0, 1) + " kHz" : juce::String ((int) v) + " Hz"); };
+    gainKnob.formatter = [] (double v) { return (v > 0 ? "+" : "") + juce::String (v, 1) + " dB"; };
+    applyGainBtn.setTooltip ("Apply gain to the selection (or whole sample)");
+    applyFilterBtn.setTooltip ("Apply the low / high cut filters (24 dB/oct)");
+    applyGainBtn.onClick = [this]
+    {
+        const float db = (float) gainKnob.slider.getValue();
+        if (std::abs (db) < 0.01f) { ctx.toast ("Turn the GAIN knob first."); return; }
+        applyEdit ("Gain", false, SliceFix::keep, [db] (const AudioData& a, int s, int e) { return edit::gain (a, s, e, db); });
+        gainKnob.slider.setValue (0.0);
+    };
+    applyFilterBtn.onClick = [this]
+    {
+        const float lo = (float) lowCutKnob.slider.getValue();
+        const float hi = (float) highCutKnob.slider.getValue();
+        if (lo < 10.0f && hi > 19900.0f) { ctx.toast ("Set LOW CUT or HIGH CUT first."); return; }
+        applyEdit ("Filter", false, SliceFix::keep, [lo, hi] (const AudioData& a, int, int)
+        {
+            return edit::filter (a, lo < 10.0f ? 0.0f : lo, hi > 19900.0f ? 0.0f : hi);
+        });
+    };
+    for (auto* comp : std::initializer_list<juce::Component*> { &gainKnob, &lowCutKnob, &highCutKnob, &applyGainBtn, &applyFilterBtn })
+        addAndMakeVisible (comp);
+
+    // chop & play
+    setStyle (autoChopBtn, "red");
+    autoChopBtn.setTooltip ("Find the hits and put a chop on each one");
+    autoChopBtn.onClick = [this]
+    {
+        if (clip == nullptr) return;
+        auto found = edit::detectTransients (*clip->audio, (float) sensKnob.slider.getValue() / 100.0f);
+        if (wave.hasSelection())
+        {
+            // only chop inside the selection, keep markers elsewhere
+            std::vector<int> keep;
+            for (auto s : clip->slices) if (s < wave.getSelectionStart() || s > wave.getSelectionEnd()) keep.push_back (s);
+            for (auto s : found) if (s > wave.getSelectionStart() && s < wave.getSelectionEnd()) keep.push_back (s);
+            keep.push_back (wave.getSelectionStart());
+            keep.push_back (wave.getSelectionEnd());
+            std::sort (keep.begin(), keep.end());
+            keep.erase (std::unique (keep.begin(), keep.end()), keep.end());
+            keep.erase (std::remove_if (keep.begin(), keep.end(), [n = clip->audio->getNumSamples()] (int v) { return v <= 0 || v >= n; }), keep.end());
+            found = keep;
+        }
+        clip->pushUndo ("Auto chop");
+        clip->slices = found;
+        proc.session.clipChanged (clip.get(), false);
+        syncSampler();
+        wave.repaint(); pads.repaint();
+        ctx.toast (juce::String ((int) clip->sliceBoundaries().size() - 1) + " chops - play them from pads " + noteName (proc.rootNote.load()) + " and up");
+    };
+
+    for (int n : { 2, 4, 8, 16, 32 })
+        equalCount.addItem (juce::String (n) + " slices", n);
+    equalCount.setSelectedId (8, juce::dontSendNotification);
+    equalBtn.setTooltip ("Chop into equal slices (great for loops)");
+    equalBtn.onClick = [this]
+    {
+        if (clip == nullptr) return;
+        clip->pushUndo ("Equal chop");
+        const int n = equalCount.getSelectedId();
+        if (wave.hasSelection())
+        {
+            std::vector<int> s;
+            const int a = wave.getSelectionStart(), b = wave.getSelectionEnd();
+            s.push_back (a);
+            for (int i = 1; i < n; ++i) s.push_back (a + (int) ((juce::int64) (b - a) * i / n));
+            s.push_back (b);
+            s.erase (std::remove_if (s.begin(), s.end(), [len = clip->audio->getNumSamples()] (int v) { return v <= 0 || v >= len; }), s.end());
+            clip->slices = s;
+        }
+        else
+            clip->slices = edit::equalSlices (clip->audio->getNumSamples(), n);
+        proc.session.clipChanged (clip.get(), false);
+        syncSampler();
+        wave.repaint(); pads.repaint();
+    };
+    clearChopsBtn.onClick = [this]
+    {
+        if (clip == nullptr || clip->slices.empty()) return;
+        clip->pushUndo ("Clear chops");
+        clip->slices.clear();
+        proc.session.clipChanged (clip.get(), false);
+        syncSampler();
+        wave.repaint(); pads.repaint();
+    };
+
+    midiModeBox.addItem ("MIDI: Chops", 1);
+    midiModeBox.addItem ("MIDI: Keys", 2);
+    midiModeBox.setTooltip ("Chops: each chop on its own key from " + noteName (proc.rootNote.load()) + ". Keys: play the sample chromatically.");
+    midiModeBox.setSelectedId (proc.midiMode.load() == SnaggerProcessor::keys ? 2 : 1, juce::dontSendNotification);
+    midiModeBox.onChange = [this]
+    {
+        proc.midiMode = midiModeBox.getSelectedId() == 2 ? SnaggerProcessor::keys : SnaggerProcessor::chops;
+        pads.repaint();
+    };
+    oneShotToggle.setToggleState (proc.oneShot.load(), juce::dontSendNotification);
+    oneShotToggle.setTooltip ("On: chops play to the end. Off: chops stop when you release the key.");
+    oneShotToggle.onClick = [this] { proc.oneShot = oneShotToggle.getToggleState(); };
+
+    for (auto* comp : std::initializer_list<juce::Component*> { &sensKnob, &autoChopBtn, &equalCount, &equalBtn, &clearChopsBtn, &midiModeBox, &oneShotToggle })
+        addAndMakeVisible (comp);
+
+    proc.session.addChangeListener (this);
+    setClip (proc.session.getSelected());
+    startTimerHz (4);
+}
+
+StudioPage::~StudioPage()
+{
+    proc.session.removeChangeListener (this);
+}
+
+void StudioPage::changeListenerCallback (juce::ChangeBroadcaster*)
+{
+    auto sel = proc.session.getSelected();
+    if (sel != clip)
+        setClip (sel);
+    else
+    {
+        refreshInfo();
+        pads.repaint();
+        wave.repaint();
+    }
+}
+
+void StudioPage::timerCallback()
+{
+    const double host = proc.hostBpm.load();
+    if (host > 0 && std::abs (host - bpmKnob.slider.getValue()) > 0.01 && ! bpmKnob.slider.isMouseButtonDown()
+        && bpmKnob.getProperties().getWithDefault ("followHost", true))
+        bpmKnob.slider.setValue (host, juce::dontSendNotification);
+
+    playBtn.setToggleState (proc.isPreviewing() && clip != nullptr && proc.getPreviewSource() == clip->audio.get(), juce::dontSendNotification);
+}
+
+void StudioPage::setClip (Clip::Ptr c)
+{
+    clip = c;
+    wave.setClip (c);
+    pads.setClip (c);
+    overview.repaint();
+    syncSampler();
+    refreshInfo();
+
+    const bool has = clip != nullptr;
+    for (auto* b : editButtons) b->setEnabled (has);
+    for (auto* comp : std::initializer_list<juce::Component*> { &applyPitchBtn, &matchBpmBtn, &applyGainBtn, &applyFilterBtn, &autoChopBtn,
+                                                                &equalBtn, &clearChopsBtn, &playBtn, &stopBtn, &saveBtn, &detectBpmBtn, &dragHandle })
+        comp->setEnabled (has);
+    dragHandle.setAlpha (has ? 1.0f : 0.4f);
+}
+
+void StudioPage::syncSampler()
+{
+    if (clip != nullptr)
+        proc.setSamplerClip (clip, wave.hasSelection() ? wave.getSelectionStart() : 0, wave.hasSelection() ? wave.getSelectionEnd() : -1);
+}
+
+int StudioPage::selStartOrZero() const  { return wave.hasSelection() ? wave.getSelectionStart() : 0; }
+int StudioPage::selEndOrAll() const     { return wave.hasSelection() ? wave.getSelectionEnd() : -1; }
+
+void StudioPage::refreshInfo()
+{
+    if (clip == nullptr || clip->audio == nullptr)
+    {
+        nameLabel.setText ("Studio", juce::dontSendNotification);
+        infoLabel.setText ("Nothing loaded yet", juce::dontSendNotification);
+        bpmLabel.setText ({}, juce::dontSendNotification);
+        selLabel.setText ({}, juce::dontSendNotification);
+        undoBtn.setEnabled (false);
+        redoBtn.setEnabled (false);
+        return;
+    }
+
+    const auto& a = *clip->audio;
+    nameLabel.setText (clip->name, juce::dontSendNotification);
+    juce::String info;
+    info << clip->kind.toUpperCase() << "   " << formatTime (a.lengthSeconds(), true) << "s   "
+         << juce::String (a.sampleRate / 1000.0, 1) << " kHz   " << (a.getNumChannels() > 1 ? "STEREO" : "MONO");
+    if (clip->slices.size() > 0)
+        info << "   " << (int) clip->sliceBoundaries().size() - 1 << " CHOPS";
+    infoLabel.setText (info, juce::dontSendNotification);
+    bpmLabel.setText (clip->bpm > 0 ? juce::String (clip->bpm, 1) + " BPM" : "BPM  -", juce::dontSendNotification);
+
+    const double sr = a.sampleRate;
+    if (wave.hasSelection())
+        selLabel.setText ("SEL  " + formatTime (wave.getSelectionStart() / sr, true) + "  -  " + formatTime (wave.getSelectionEnd() / sr, true)
+                          + "   (" + formatTime ((wave.getSelectionEnd() - wave.getSelectionStart()) / sr, true) + "s)", juce::dontSendNotification);
+    else
+        selLabel.setText ("CURSOR  " + formatTime (wave.getCursor() / sr, true) + "      drag to select - alt+click adds a chop", juce::dontSendNotification);
+
+    undoBtn.setEnabled (clip->canUndo());
+    redoBtn.setEnabled (clip->canRedo());
+    dragHandle.setCaption (wave.hasSelection() ? "DRAG SELECTION TO DAW" : "DRAG SAMPLE TO DAW");
+}
+
+void StudioPage::applyEdit (const juce::String& label, bool needsSelection, SliceFix fix,
+                            std::function<AudioData::Ptr (const AudioData&, int, int)> op)
+{
+    if (clip == nullptr || clip->audio == nullptr)
+        return;
+    if (needsSelection && ! wave.hasSelection())
+    {
+        ctx.toast ("Select a region first (drag across the waveform).");
+        return;
+    }
+
+    const int n = clip->audio->getNumSamples();
+    const int s = wave.hasSelection() ? wave.getSelectionStart() : 0;
+    const int e = wave.hasSelection() ? wave.getSelectionEnd() : n;
+
+    auto result = op (*clip->audio, s, e);
+    if (result == nullptr)
+        return;
+
+    clip->pushUndo (label);
+    clip->audio = result;
+
+    std::vector<int> fixed;
+    for (auto m : clip->slices)
+    {
+        if (fix == SliceFix::keep) fixed.push_back (m);
+        else if (fix == SliceFix::crop) { if (m > s && m < e) fixed.push_back (m - s); }
+        else if (fix == SliceFix::remove) { if (m < s) fixed.push_back (m); else if (m >= e) fixed.push_back (m - (e - s)); }
+    }
+    const int newLen = result->getNumSamples();
+    fixed.erase (std::remove_if (fixed.begin(), fixed.end(), [newLen] (int v) { return v <= 0 || v >= newLen; }), fixed.end());
+    clip->slices = fixed;
+
+    if (fix == SliceFix::crop || fix == SliceFix::remove)
+        wave.clearSelection();
+
+    proc.session.clipChanged (clip.get());
+    wave.audioChanged();
+    syncSampler();
+    refreshInfo();
+    pads.repaint();
+    overview.repaint();
+}
+
+void StudioPage::play()
+{
+    if (clip == nullptr) return;
+    if (wave.hasSelection())
+        proc.previewClip (*clip, wave.getSelectionStart(), wave.getSelectionEnd(), loopBtn.getToggleState());
+    else
+        proc.previewClip (*clip, wave.getCursor(), -1, loopBtn.getToggleState());
+}
+
+void StudioPage::stop()      { proc.stopPreview(); }
+
+void StudioPage::undo()
+{
+    if (clip == nullptr || ! clip->canUndo()) return;
+    auto what = clip->undo();
+    proc.session.clipChanged (clip.get());
+    wave.audioChanged();
+    syncSampler();
+    refreshInfo();
+    pads.repaint();
+    ctx.toast ("Undid " + what);
+}
+
+void StudioPage::redo()
+{
+    if (clip == nullptr || ! clip->canRedo()) return;
+    auto what = clip->redo();
+    proc.session.clipChanged (clip.get());
+    wave.audioChanged();
+    syncSampler();
+    refreshInfo();
+    pads.repaint();
+    ctx.toast ("Redid " + what);
+}
+
+void StudioPage::detectBpm()
+{
+    if (clip == nullptr) return;
+    const int s = selStartOrZero();
+    const int e = selEndOrAll() < 0 ? clip->audio->getNumSamples() : selEndOrAll();
+    auto part = wave.hasSelection() ? edit::crop (*clip->audio, s, e) : clip->audio;
+    const double bpm = edit::estimateBpm (*part);
+    if (bpm <= 0)
+    {
+        ctx.toast ("Couldn't find a steady tempo in this sample.", true);
+        return;
+    }
+    clip->bpm = bpm;
+    proc.session.clipChanged (clip.get(), false);
+    refreshInfo();
+    ctx.toast ("Tempo: " + juce::String (bpm, 1) + " BPM");
+}
+
+void StudioPage::matchBpm()
+{
+    if (clip == nullptr) return;
+    if (clip->bpm <= 0)
+        detectBpm();
+    if (clip->bpm <= 0)
+        return;
+    const double target = bpmKnob.slider.getValue();
+    const double ratio = clip->bpm / target;
+    if (std::abs (ratio - 1.0) < 0.002) { ctx.toast ("Already at " + juce::String (target, 1) + " BPM"); return; }
+    if (ratio < 0.25 || ratio > 4.0) { ctx.toast ("That's too big a tempo change.", true); return; }
+    juce::Component::SafePointer<StudioPage> safe (this);
+    actions::pitchTime (proc, clip, tapeToggle.getToggleState() ? (float) (12.0 * std::log2 (1.0 / ratio)) : 0.0f, ratio,
+                        true, tapeToggle.getToggleState(), [safe] (bool ok)
+    {
+        if (safe != nullptr && ok) { safe->wave.audioChanged(); safe->refreshInfo(); }
+    });
+}
+
+void StudioPage::rename()
+{
+    if (clip == nullptr) return;
+    auto t = nameLabel.getText().trim();
+    if (t.isEmpty()) { nameLabel.setText (clip->name, juce::dontSendNotification); return; }
+    clip->name = t;
+    proc.session.clipChanged (clip.get(), false);
+}
+
+bool StudioPage::handleKey (const juce::KeyPress& k)
+{
+    if (k == juce::KeyPress::spaceKey)
+    {
+        if (proc.isPreviewing()) stop(); else play();
+        return true;
+    }
+    if (k == juce::KeyPress ('z', juce::ModifierKeys::commandModifier, 0))                                  { undo(); return true; }
+    if (k == juce::KeyPress ('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { redo(); return true; }
+    if (k == juce::KeyPress::deleteKey || k == juce::KeyPress::backspaceKey)
+    {
+        if (wave.hasSelection()) editButtons[1]->triggerClick();
+        return true;
+    }
+    return false;
+}
+
+//==============================================================================
+void StudioPage::resized()
+{
+    auto r = getLocalBounds().reduced (14, 10);
+
+    auto head = r.removeFromTop (34);
+    redoBtn.setBounds (head.removeFromRight (30).reduced (2));
+    undoBtn.setBounds (head.removeFromRight (30).reduced (2));
+    head.removeFromRight (10);
+    detectBpmBtn.setBounds (head.removeFromRight (70).reduced (0, 6));
+    head.removeFromRight (6);
+    bpmLabel.setBounds (head.removeFromRight (90));
+    const int nameW = juce::jmin (460, head.getWidth() / 2);
+    nameLabel.setBounds (head.removeFromLeft (nameW));
+    infoLabel.setBounds (head.withTrimmedLeft (8));
+
+    r.removeFromTop (6);
+    overview.setBounds (r.removeFromTop (28));
+    r.removeFromTop (6);
+
+    auto tools = r.removeFromBottom (158);
+    r.removeFromBottom (8);
+    pads.setBounds (r.removeFromBottom (50));
+    r.removeFromBottom (8);
+    auto transport = r.removeFromBottom (38);
+    r.removeFromBottom (8);
+    wave.setBounds (r);
+
+    // transport row
+    playBtn.setBounds (transport.removeFromLeft (92));
+    transport.removeFromLeft (6);
+    stopBtn.setBounds (transport.removeFromLeft (40));
+    transport.removeFromLeft (6);
+    loopBtn.setBounds (transport.removeFromLeft (40));
+    transport.removeFromLeft (14);
+    dragHandle.setBounds (transport.removeFromRight (220));
+    transport.removeFromRight (8);
+    saveBtn.setBounds (transport.removeFromRight (92));
+    transport.removeFromRight (14);
+    fitBtn.setBounds (transport.removeFromRight (44).reduced (0, 4));
+    zoomInBtn.setBounds (transport.removeFromRight (32).reduced (2, 5));
+    zoomOutBtn.setBounds (transport.removeFromRight (32).reduced (2, 5));
+    transport.removeFromRight (8);
+    selLabel.setBounds (transport);
+
+    // tool panels
+    const int gap = 10;
+    const int totalW = tools.getWidth() - 3 * gap;
+    editPanel.setBounds (tools.removeFromLeft ((int) (totalW * 0.25)));
+    tools.removeFromLeft (gap);
+    pitchPanel.setBounds (tools.removeFromLeft ((int) (totalW * 0.29)));
+    tools.removeFromLeft (gap);
+    tonePanel.setBounds (tools.removeFromLeft ((int) (totalW * 0.21)));
+    tools.removeFromLeft (gap);
+    chopPanel.setBounds (tools);
+
+    // edit grid 2 x 4
+    {
+        auto c = editPanel.getContentBounds().translated (editPanel.getX(), editPanel.getY());
+        const int rows = 4, cols = 2;
+        const int bw = (c.getWidth() - 6) / cols, bh = (c.getHeight() - 3 * 6) / rows;
+        for (int i = 0; i < editButtons.size(); ++i)
+        {
+            const int row = i / cols, col = i % cols;
+            editButtons[i]->setBounds (c.getX() + col * (bw + 6), c.getY() + row * (bh + 6), bw, bh);
+        }
+    }
+
+    // pitch & time
+    {
+        auto c = pitchPanel.getContentBounds().translated (pitchPanel.getX(), pitchPanel.getY());
+        auto right = c.removeFromRight (juce::jmin (130, c.getWidth() / 3));
+        const int kw = c.getWidth() / 3;
+        pitchKnob.setBounds (c.removeFromLeft (kw));
+        stretchKnob.setBounds (c.removeFromLeft (kw));
+        bpmKnob.setBounds (c);
+        right.removeFromLeft (6);
+        formantToggle.setBounds (right.removeFromTop (26));
+        tapeToggle.setBounds (right.removeFromTop (26));
+        right.removeFromTop (4);
+        applyPitchBtn.setBounds (right.removeFromTop (juce::jmin (30, right.getHeight() / 2 - 3)));
+        right.removeFromTop (6);
+        matchBpmBtn.setBounds (right.removeFromTop (juce::jmin (30, right.getHeight())));
+    }
+
+    // tone
+    {
+        auto c = tonePanel.getContentBounds().translated (tonePanel.getX(), tonePanel.getY());
+        auto buttons = c.removeFromBottom (28);
+        const int kw = c.getWidth() / 3;
+        gainKnob.setBounds (c.removeFromLeft (kw));
+        lowCutKnob.setBounds (c.removeFromLeft (kw));
+        highCutKnob.setBounds (c);
+        applyGainBtn.setBounds (buttons.removeFromLeft (buttons.getWidth() / 2 - 3));
+        buttons.removeFromLeft (6);
+        applyFilterBtn.setBounds (buttons);
+    }
+
+    // chop & play
+    {
+        auto c = chopPanel.getContentBounds().translated (chopPanel.getX(), chopPanel.getY());
+        sensKnob.setBounds (c.removeFromLeft (juce::jmin (84, c.getWidth() / 4)));
+        c.removeFromLeft (8);
+        const int rowH = (c.getHeight() - 12) / 3;
+        auto row1 = c.removeFromTop (rowH);
+        c.removeFromTop (6);
+        auto row2 = c.removeFromTop (rowH);
+        c.removeFromTop (6);
+        auto row3 = c;
+
+        autoChopBtn.setBounds (row1.removeFromLeft (row1.getWidth() / 2 - 3));
+        row1.removeFromLeft (6);
+        clearChopsBtn.setBounds (row1);
+
+        equalCount.setBounds (row2.removeFromLeft (row2.getWidth() / 2 - 3));
+        row2.removeFromLeft (6);
+        equalBtn.setBounds (row2);
+
+        midiModeBox.setBounds (row3.removeFromLeft (row3.getWidth() - 116));
+        row3.removeFromLeft (6);
+        oneShotToggle.setBounds (row3);
+    }
+}
+
+void StudioPage::paint (juce::Graphics&) {}
+
+} // namespace snag

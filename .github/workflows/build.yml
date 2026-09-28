@@ -1,0 +1,149 @@
+name: Build Sample Snagger
+
+# Builds the plug-in (VST3 / AU / Standalone, + LV2 on Linux) for macOS, Windows and Linux,
+# runs the test suite, and produces ready-to-run installers:
+#   macOS   -> Sample-Snagger-<version>-macOS.pkg   (universal: Apple Silicon + Intel)
+#   Windows -> Sample-Snagger-<version>-Windows-Setup.exe
+#   Linux   -> Sample-Snagger-<version>-Linux.tar.gz
+# Push a tag like v1.0.0 to publish them as a GitHub Release.
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  macos:
+    name: macOS (universal)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja
+        run: brew install ninja
+
+      - name: Configure
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel 4
+
+      - name: Test
+        run: ./build/SnaggerTests_artefacts/${{ env.BUILD_TYPE }}/SnaggerTests
+
+      - name: Ad-hoc sign bundles
+        run: |
+          ART="build/SampleSnagger_artefacts/${{ env.BUILD_TYPE }}"
+          codesign --force --deep -s - "$ART/AU/Sample Snagger.component"
+          codesign --force --deep -s - "$ART/VST3/Sample Snagger.vst3"
+          codesign --force --deep -s - "$ART/Standalone/Sample Snagger.app"
+
+      - name: Validate Audio Unit (auval)
+        continue-on-error: true
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R "build/SampleSnagger_artefacts/${{ env.BUILD_TYPE }}/AU/Sample Snagger.component" ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar || true
+          auval -v aumu SnG1 Sngr
+
+      - name: Build installer
+        run: bash packaging/mac/build_pkg.sh "build/SampleSnagger_artefacts/${{ env.BUILD_TYPE }}" dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Sample-Snagger-macOS
+          path: dist/*
+
+  windows:
+    name: Windows (x64)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (the WebView2 SDK is fetched automatically)
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel 4
+
+      - name: Test
+        run: build\SnaggerTests_artefacts\${{ env.BUILD_TYPE }}\SnaggerTests.exe
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+            $env:PATH += ";${env:ProgramFiles(x86)}\Inno Setup 6"
+          }
+          $version = (Select-String -Path CMakeLists.txt -Pattern 'project\(SampleSnagger VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          iscc /DAppVersion=$version /DArtefacts="$PWD\build\SampleSnagger_artefacts\${{ env.BUILD_TYPE }}" /O"$PWD\dist" packaging\windows\SampleSnagger.iss
+          Compress-Archive -Path "build\SampleSnagger_artefacts\${{ env.BUILD_TYPE }}\VST3\Sample Snagger.vst3", "build\SampleSnagger_artefacts\${{ env.BUILD_TYPE }}\Standalone\Sample Snagger.exe" -DestinationPath "dist\Sample-Snagger-$version-Windows-portable.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Sample-Snagger-Windows
+          path: dist/*
+
+  linux:
+    name: Linux (x64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libasound2-dev libjack-jackd2-dev libx11-dev libxext-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxcomposite-dev libfreetype-dev libfontconfig1-dev \
+            libcurl4-openssl-dev libwebkit2gtk-4.1-dev libgtk-3-dev xvfb ffmpeg
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+
+      - name: Build
+        run: cmake --build build --parallel 4
+
+      - name: Test
+        run: xvfb-run -a ./build/SnaggerTests_artefacts/${{ env.BUILD_TYPE }}/SnaggerTests
+
+      - name: Package
+        run: |
+          VERSION=$(grep -oP 'project\(SampleSnagger VERSION \K[0-9.]+' CMakeLists.txt)
+          ART="build/SampleSnagger_artefacts/${{ env.BUILD_TYPE }}"
+          mkdir -p dist stage
+          cp -R "$ART/VST3/Sample Snagger.vst3" "$ART/LV2/Sample Snagger.lv2" "$ART/Standalone/Sample Snagger" stage/
+          cp packaging/linux/install.sh stage/
+          tar -C stage -czf "dist/Sample-Snagger-$VERSION-Linux.tar.gz" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Sample-Snagger-Linux
+          path: dist/*
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [ macos, windows, linux ]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

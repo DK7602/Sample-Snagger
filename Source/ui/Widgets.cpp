@@ -1,0 +1,373 @@
+#include "Widgets.h"
+
+namespace snag
+{
+using namespace theme;
+
+//==============================================================================
+IconButton::IconButton (const juce::String& name, juce::Path iconPath, const juce::String& captionIn,
+                        const juce::String& styleName)
+    : juce::Button (name), icon (std::move (iconPath)), caption (captionIn)
+{
+    setStyle (*this, styleName);
+    setMouseCursor (juce::MouseCursor::PointingHandCursor);
+}
+
+void IconButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
+{
+    getLookAndFeel().drawButtonBackground (g, *this, {}, highlighted, down);
+
+    const auto style = getProperties().getWithDefault ("style", "gold").toString();
+    const bool on = getToggleState();
+    auto r = getLocalBounds().toFloat();
+
+    juce::Colour c = col::goldPale;
+    if (style == "red" || style == "redFill") c = (on || style == "redFill") ? juce::Colours::white : col::redHot;
+    else if (style == "ghost" || style == "icon") c = highlighted ? col::goldLight : col::gold.withAlpha (0.85f);
+    else if (on) c = col::bg0;
+    else if (highlighted) c = col::goldLight;
+    if (hasIconColour && ! on) c = iconColour;
+    if (! isEnabled()) c = c.withAlpha (0.35f);
+
+    const float iconSize = juce::jmin (r.getHeight() * 0.42f, 16.0f);
+    juce::Rectangle<float> iconArea;
+    juce::Rectangle<float> textArea;
+
+    if (caption.isEmpty())
+        iconArea = r.withSizeKeepingCentre (iconSize, iconSize);
+    else
+    {
+        auto font = ui (juce::jmin (12.0f, r.getHeight() * 0.4f), true).withExtraKerningFactor (0.1f);
+        const float tw = juce::GlyphArrangement::getStringWidth (font, caption.toUpperCase());
+        const float total = iconSize + 8.0f + tw;
+        auto content = r.withSizeKeepingCentre (juce::jmin (total, r.getWidth() - 12.0f), r.getHeight());
+        iconArea = content.removeFromLeft (iconSize).withSizeKeepingCentre (iconSize, iconSize);
+        content.removeFromLeft (8.0f);
+        textArea = content;
+        g.setFont (font);
+        g.setColour (c);
+        g.drawFittedText (caption.toUpperCase(), textArea.toNearestInt(), juce::Justification::centredLeft, 1, 0.8f);
+    }
+
+    if (! icon.isEmpty())
+    {
+        auto p = icon;
+        p.applyTransform (p.getTransformToScaleToFit (iconArea, true));
+        if (style == "red" && ! on && getName().containsIgnoreCase ("rec"))
+        {
+            neonGlow (g, p, col::red, 7.0f, 0.9f);
+            c = col::red;
+        }
+        g.setColour (c);
+        g.fillPath (p);
+    }
+}
+
+//==============================================================================
+Knob::Knob (const juce::String& captionIn, double min, double max, double def, double step, const juce::String& suffixIn)
+    : caption (captionIn), suffix (suffixIn)
+{
+    slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+    slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    slider.setRange (min, max, step);
+    slider.setValue (def, juce::dontSendNotification);
+    slider.setDoubleClickReturnValue (true, def);
+    slider.setRotaryParameters (juce::MathConstants<float>::pi * 1.25f, juce::MathConstants<float>::pi * 2.75f, true);
+    slider.setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
+    slider.onValueChange = [this] { repaint(); };
+    addAndMakeVisible (slider);
+}
+
+void Knob::resized()
+{
+    auto r = getLocalBounds();
+    r.removeFromBottom (28);
+    slider.setBounds (r);
+}
+
+void Knob::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat();
+    auto bottom = r.removeFromBottom (28.0f);
+
+    auto valueText = formatter ? formatter (slider.getValue())
+                               : juce::String (slider.getValue(), slider.getInterval() >= 1.0 ? 0 : 1) + suffix;
+    g.setColour (col::goldPale);
+    g.setFont (ui (11.0f, true));
+    g.drawText (valueText, bottom.removeFromTop (14.0f), juce::Justification::centred);
+    g.setColour (col::textDim);
+    g.setFont (ui (9.5f, true).withExtraKerningFactor (0.14f));
+    g.drawText (caption.toUpperCase(), bottom, juce::Justification::centred);
+}
+
+//==============================================================================
+juce::Rectangle<int> Panel::getContentBounds() const
+{
+    auto r = getLocalBounds().reduced (10, 8);
+    if (title.isNotEmpty())
+        r.removeFromTop (18);
+    return r;
+}
+
+void Panel::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat();
+    glossPanel (g, r, 8.0f, col::bg2.brighter (0.03f), col::bg1, goldEdge, 0.035f);
+    if (title.isNotEmpty())
+    {
+        auto t = r.reduced (12.0f, 7.0f).removeFromTop (14.0f);
+        sectionLabel (g, title, t);
+        // small neon tick before the next section
+        g.setColour (col::red.withAlpha (0.9f));
+        const float tw = juce::GlyphArrangement::getStringWidth (ui (10.5f, true).withExtraKerningFactor (0.18f), title.toUpperCase());
+        g.fillRect (juce::Rectangle<float> (t.getX() + tw + 8.0f, t.getCentreY() - 0.5f, 18.0f, 1.0f));
+    }
+}
+
+//==============================================================================
+void LevelMeter::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat();
+    g.setColour (col::bg0);
+    g.fillRoundedRectangle (r, 2.0f);
+    const float db = juce::Decibels::gainToDecibels (level, -60.0f);
+    const float frac = juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 60.0f);
+    auto f = r.withWidth (r.getWidth() * frac);
+    juce::ColourGradient cg (col::goldDark, r.getX(), 0, col::red, r.getRight(), 0, false);
+    cg.addColour (0.7, col::gold);
+    cg.addColour (0.9, col::goldLight);
+    g.setGradientFill (cg);
+    g.fillRoundedRectangle (f, 2.0f);
+}
+
+//==============================================================================
+DragHandle::DragHandle (const juce::String& c) : caption (c)
+{
+    setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+    setTooltip ("Drag onto a track in your DAW, or onto your desktop / sample folder");
+}
+
+void DragHandle::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat().reduced (0.5f);
+    const bool hover = isMouseOver (true);
+
+    juce::Path shape; shape.addRoundedRectangle (r, 7.0f);
+    if (hover || dragging)
+        neonGlow (g, shape, col::gold, 10.0f, 0.5f);
+
+    g.setGradientFill (goldGradient (r));
+    g.fillRoundedRectangle (r, 7.0f);
+    g.setGradientFill (juce::ColourGradient (juce::Colours::white.withAlpha (0.3f), r.getX(), r.getY(),
+                                             juce::Colours::white.withAlpha (0.0f), r.getX(), r.getCentreY(), false));
+    g.fillRoundedRectangle (r.reduced (1.0f).withHeight (r.getHeight() * 0.5f), 7.0f);
+
+    auto content = r.reduced (10.0f, 4.0f);
+    auto iconArea = content.removeFromLeft (juce::jmin (18.0f, content.getHeight())).withSizeKeepingCentre (16.0f, 16.0f);
+    auto icon = icons::drag();
+    icon.applyTransform (icon.getTransformToScaleToFit (iconArea, true));
+    g.setColour (col::bg0);
+    g.fillPath (icon);
+
+    content.removeFromLeft (8.0f);
+    g.setFont (ui (juce::jmin (12.0f, r.getHeight() * 0.36f), true).withExtraKerningFactor (0.12f));
+    g.drawFittedText (caption, content.toNearestInt(), juce::Justification::centredLeft, 2, 0.8f);
+}
+
+void DragHandle::mouseDown (const juce::MouseEvent&) { pressed = true; }
+void DragHandle::mouseUp (const juce::MouseEvent&)   { pressed = false; dragging = false; repaint(); }
+
+bool DragHandle::startExternalDrag (juce::Component& source, const juce::File& file)
+{
+    if (! file.existsAsFile())
+        return false;
+    return juce::DragAndDropContainer::performExternalDragDropOfFiles ({ file.getFullPathName() }, false, &source);
+}
+
+void DragHandle::mouseDrag (const juce::MouseEvent& e)
+{
+    if (dragging || ! pressed || e.getDistanceFromDragStart() < 4 || ! makeFile)
+        return;
+
+    dragging = true;
+    repaint();
+    auto f = makeFile();
+    if (f.existsAsFile())
+        startExternalDrag (*this, f);
+    dragging = false;
+    pressed = false;
+    repaint();
+}
+
+//==============================================================================
+void drawWaveform (juce::Graphics& g, juce::Rectangle<float> r, const AudioData& audio, int start, int end,
+                   juce::Colour colour, bool glossy, float displayGain)
+{
+    const int n = audio.getNumSamples();
+    if (end < 0 || end > n) end = n;
+    start = juce::jlimit (0, n, start);
+    if (end <= start || r.getWidth() < 1.0f)
+        return;
+
+    const int w = (int) r.getWidth();
+    const float mid = r.getCentreY();
+    const float half = r.getHeight() * 0.5f * displayGain;
+    const double spp = (double) (end - start) / (double) w;
+    const int chans = audio.getNumChannels();
+
+    juce::Path peak, rms;
+    std::vector<float> tops ((size_t) w), bots ((size_t) w), rmsv ((size_t) w);
+
+    for (int x = 0; x < w; ++x)
+    {
+        const int s0 = start + (int) (x * spp);
+        const int s1 = juce::jmin (end, start + (int) ((x + 1) * spp) + 1);
+        float mn = 0, mx = 0;
+        double sq = 0;
+        const int stride = juce::jmax (1, (s1 - s0) / 256);
+        int count = 0;
+        for (int c = 0; c < chans; ++c)
+        {
+            const float* d = audio.buffer.getReadPointer (c);
+            for (int i = s0; i < s1; i += stride)
+            {
+                mn = juce::jmin (mn, d[i]);
+                mx = juce::jmax (mx, d[i]);
+                sq += (double) d[i] * d[i];
+                ++count;
+            }
+        }
+        tops[(size_t) x] = mx;
+        bots[(size_t) x] = mn;
+        rmsv[(size_t) x] = count > 0 ? (float) std::sqrt (sq / count) : 0.0f;
+    }
+
+    peak.startNewSubPath (r.getX(), mid);
+    for (int x = 0; x < w; ++x)
+        peak.lineTo (r.getX() + (float) x, mid - juce::jlimit (0.0f, 1.0f / displayGain, tops[(size_t) x]) * half);
+    for (int x = w; --x >= 0;)
+        peak.lineTo (r.getX() + (float) x, mid - juce::jlimit (-1.0f / displayGain, 0.0f, bots[(size_t) x]) * half);
+    peak.closeSubPath();
+
+    rms.startNewSubPath (r.getX(), mid);
+    for (int x = 0; x < w; ++x)
+        rms.lineTo (r.getX() + (float) x, mid - juce::jmin (1.0f / displayGain, rmsv[(size_t) x] * 1.4f) * half);
+    for (int x = w; --x >= 0;)
+        rms.lineTo (r.getX() + (float) x, mid + juce::jmin (1.0f / displayGain, rmsv[(size_t) x] * 1.4f) * half);
+    rms.closeSubPath();
+
+    if (glossy)
+    {
+        juce::ColourGradient full (colour.brighter (0.35f), 0, r.getY(), colour.brighter (0.35f), 0, r.getBottom(), false);
+        full.addColour (0.5, colour.darker (0.5f));
+        g.setGradientFill (full);
+        g.setOpacity (0.55f);
+        g.fillPath (peak);
+        g.setOpacity (1.0f);
+        g.setGradientFill (full);
+        g.fillPath (rms);
+    }
+    else
+    {
+        g.setColour (colour.withAlpha (0.6f));
+        g.fillPath (peak);
+        g.setColour (colour);
+        g.fillPath (rms);
+    }
+}
+
+void WaveThumb::draw (juce::Graphics& g, juce::Rectangle<float> r, const AudioData* audio,
+                      juce::Colour colour, int start, int end, bool normalise)
+{
+    if (audio == nullptr || r.isEmpty())
+        return;
+
+    const auto scale = g.getInternalContext().getPhysicalPixelScaleFactor();
+    auto size = (r * scale).toNearestInt().withZeroOrigin();
+
+    if (cache.isNull() || cachedFor != audio || cachedColour != colour || cachedStart != start || cachedEnd != end || cachedSize != size)
+    {
+        cache = juce::Image (juce::Image::ARGB, juce::jmax (1, size.getWidth()), juce::jmax (1, size.getHeight()), true);
+        juce::Graphics ig (cache);
+        float gain = 1.0f;
+        if (normalise)
+        {
+            float pk = 0.0f;
+            const int e = end < 0 ? audio->getNumSamples() : end;
+            for (int c = 0; c < audio->getNumChannels(); ++c)
+                pk = juce::jmax (pk, audio->buffer.getMagnitude (c, start, juce::jmax (0, e - start)));
+            gain = pk > 1.0e-5f ? juce::jlimit (1.0f, 10.0f, 0.92f / pk) : 1.0f;
+        }
+        drawWaveform (ig, size.toFloat(), *audio, start, end, colour, true, gain);
+        cachedFor = audio; cachedColour = colour; cachedStart = start; cachedEnd = end; cachedSize = size;
+    }
+    g.drawImage (cache, r, juce::RectanglePlacement::stretchToFit);
+}
+
+//==============================================================================
+void ToastOverlay::show (const juce::String& text, bool isError, int ms)
+{
+    toasts.push_back ({ text, isError, juce::Time::getMillisecondCounter() + (juce::uint32) ms });
+    if (toasts.size() > 4)
+        toasts.erase (toasts.begin());
+    startTimerHz (20);
+    repaint();
+}
+
+void ToastOverlay::timerCallback()
+{
+    const auto now = juce::Time::getMillisecondCounter();
+    toasts.erase (std::remove_if (toasts.begin(), toasts.end(), [now] (const Toast& t) { return now > t.until; }), toasts.end());
+    if (toasts.empty())
+        stopTimer();
+    repaint();
+}
+
+void ToastOverlay::paint (juce::Graphics& g)
+{
+    auto area = getLocalBounds().toFloat().reduced (18.0f);
+    float y = area.getBottom();
+    const auto now = juce::Time::getMillisecondCounter();
+    auto font = ui (13.0f, true);
+
+    for (auto it = toasts.rbegin(); it != toasts.rend(); ++it)
+    {
+        const float tw = juce::jmin (460.0f, juce::GlyphArrangement::getStringWidth (font, it->text) + 44.0f);
+        const int lines = juce::GlyphArrangement::getStringWidth (font, it->text) + 44.0f > 460.0f ? 2 : 1;
+        const float h = lines == 1 ? 40.0f : 58.0f;
+        auto r = juce::Rectangle<float> (area.getRight() - tw, y - h, tw, h);
+        y -= h + 8.0f;
+
+        const float remaining = (float) ((juce::int64) it->until - (juce::int64) now);
+        const float alpha = juce::jlimit (0.0f, 1.0f, remaining / 400.0f);
+        g.setOpacity (alpha);
+
+        juce::Path shape; shape.addRoundedRectangle (r, 8.0f);
+        neonGlow (g, shape, it->error ? col::red : col::gold, 14.0f, 0.35f * alpha);
+        glossPanel (g, r, 8.0f, col::bg3, col::bg1, ! it->error, 0.06f);
+        if (it->error)
+        {
+            g.setColour (col::red);
+            g.drawRoundedRectangle (r.reduced (0.5f), 8.0f, 1.2f);
+        }
+        auto dot = r.withWidth (26.0f).withSizeKeepingCentre (7.0f, 7.0f).translated (6.0f, 0.0f);
+        g.setColour (it->error ? col::red : col::gold);
+        g.fillEllipse (dot);
+        g.setColour (col::text.withAlpha (alpha));
+        g.setFont (font);
+        g.drawFittedText (it->text, r.withTrimmedLeft (30.0f).reduced (6.0f, 4.0f).toNearestInt(), juce::Justification::centredLeft, 2);
+        g.setOpacity (1.0f);
+    }
+}
+
+void drawSpinner (juce::Graphics& g, juce::Rectangle<float> r, juce::Colour c)
+{
+    const float t = (float) (juce::Time::getMillisecondCounter() % 1000) / 1000.0f;
+    const float start = t * juce::MathConstants<float>::twoPi;
+    juce::Path p;
+    p.addCentredArc (r.getCentreX(), r.getCentreY(), r.getWidth() * 0.4f, r.getHeight() * 0.4f, 0.0f, start, start + 4.2f, true);
+    g.setColour (c);
+    g.strokePath (p, juce::PathStrokeType (2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+}
+
+} // namespace snag
