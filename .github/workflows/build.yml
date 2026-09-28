@@ -5,7 +5,8 @@ name: Build Sample Snagger
 #   macOS   -> Sample-Snagger-<version>-macOS.pkg   (universal: Apple Silicon + Intel)
 #   Windows -> Sample-Snagger-<version>-Windows-Setup.exe
 #   Linux   -> Sample-Snagger-<version>-Linux.tar.gz
-# Push a tag like v1.0.0 to publish them as a GitHub Release.
+# To publish them as a GitHub Release, either push a tag like v1.0.0 or put [release] in the
+# commit message; the release is named after the version in CMakeLists.txt.
 
 on:
   push:
@@ -133,17 +134,34 @@ jobs:
 
   release:
     name: Publish release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release]'))
     needs: [ macos, windows, linux ]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: echo "tag=v$(grep -oP 'project\(SampleSnagger VERSION \K[0-9.]+' CMakeLists.txt)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || steps.version.outputs.tag }}
+          name: Sample Snagger ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: dist/*
-          generate_release_notes: true
+          make_latest: true
+          body: |
+            **Mac:** download `Sample-Snagger-*-macOS.pkg` (AU + VST3 + app, Apple Silicon and Intel).
+            **Windows:** download `Sample-Snagger-*-Windows-Setup.exe` (VST3 + app).
+            **Linux:** `Sample-Snagger-*-Linux.tar.gz`, then run `./install.sh`.
+
+            After installing, rescan plug-ins in your DAW. Sample Snagger is an instrument, so put it on an instrument / MIDI track.
+            Open Settings (gear icon) once and click INSTALL ALL for HQ downloads.
