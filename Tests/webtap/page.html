@@ -1,0 +1,19 @@
+<!doctype html><html><body>
+<button id="wa">webaudio</button><button id="det">detached</button><button id="mes">mes</button><button id="dom">dom</button>
+<audio id="domaudio" loop></audio>
+<script>
+// a short WAV generated in page (sine 440) so media elements have same-origin data: audio
+function wavDataUrl(freq, secs){ const sr=44100,n=sr*secs; const b=new ArrayBuffer(44+n*2), v=new DataView(b);
+ const w=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i))};
+ w(0,'RIFF');v.setUint32(4,36+n*2,true);w(8,'WAVE');w(12,'fmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
+ v.setUint32(24,sr,true);v.setUint32(28,sr*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);w(36,'data');v.setUint32(40,n*2,true);
+ for(let i=0;i<n;i++)v.setInt16(44+i*2,Math.sin(2*Math.PI*freq*i/sr)*12000,true);
+ let s='';const u=new Uint8Array(b);for(let i=0;i<u.length;i++)s+=String.fromCharCode(u[i]);return 'data:audio/wav;base64,'+btoa(s);}
+window.pctx=null;
+document.getElementById('wa').onclick=()=>{ // Howler-style: page context, oscillator -> gain -> destination
+  window.pctx=new AudioContext(); const o=pctx.createOscillator(), g=pctx.createGain(); g.gain.value=0.5; o.connect(g); g.connect(pctx.destination); o.start(); };
+document.getElementById('det').onclick=()=>{ window.a=new Audio(wavDataUrl(660,5)); a.loop=true; a.play(); };
+document.getElementById('mes').onclick=()=>{ // WaveSurfer-webaudio style: element routed through page web audio
+  window.c2=new AudioContext(); window.m=new Audio(wavDataUrl(330,5)); m.loop=true; const s=c2.createMediaElementSource(m); s.connect(c2.destination); m.play(); };
+document.getElementById('dom').onclick=()=>{ const d=document.getElementById('domaudio'); d.src=wavDataUrl(550,5); d.play(); };
+</script></body></html>

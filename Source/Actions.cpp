@@ -111,9 +111,15 @@ void importFiles (SnaggerProcessor& p, const juce::StringArray& files)
 }
 
 //==============================================================================
-static juce::String friendlyDownloadError (const juce::StringArray& errors, int code)
+static juce::String friendlyDownloadError (const juce::StringArray& errors, int code, const juce::String& url)
 {
     auto all = errors.joinIntoString (" ");
+    const auto host = juce::URL (url).getDomain().toLowerCase();
+    const bool youtube = host.endsWith ("youtube.com") || host.endsWith ("youtu.be");
+
+    // yt-dlp has no extractor for this site and its generic fallback got turned away
+    if (! youtube && (all.containsIgnoreCase ("[generic]") || all.containsIgnoreCase ("Unsupported URL")))
+        return "HQ Snag can't download from this site. Play the sound here and use LIVE REC or GRAB LAST instead.";
     if (all.containsIgnoreCase ("confirm your age") || all.containsIgnoreCase ("age-restricted"))
         return "This video is age-restricted. In Settings, choose your browser under 'Use cookies from' (you must be signed in there), then try again.";
     if (all.containsIgnoreCase ("not a bot") || all.containsIgnoreCase ("Sign in to confirm"))
@@ -126,7 +132,8 @@ static juce::String friendlyDownloadError (const juce::StringArray& errors, int 
         return "That video is private or unavailable.";
     if (all.containsIgnoreCase ("HTTP Error 403") || all.containsIgnoreCase ("Requested format is not available")
         || all.containsIgnoreCase ("n challenge") || all.containsIgnoreCase ("JavaScript runtime"))
-        return "The site blocked the download. Update yt-dlp and install Deno in Settings, then try again (or use LIVE REC).";
+        return youtube ? "YouTube blocked the download. Update yt-dlp and install Deno in Settings, then try again (or use LIVE REC)."
+                       : "This site blocked the download. Play the sound here and use LIVE REC or GRAB LAST instead.";
     if (all.containsIgnoreCase ("ffmpeg") && all.containsIgnoreCase ("not found"))
         return "FFmpeg is missing. Install it in Settings.";
     if (errors.size() > 0)
@@ -243,7 +250,7 @@ void downloadUrl (SnaggerProcessor& p, const juce::String& urlIn, double inSec, 
         if (code != 0 || wavs.isEmpty())
         {
             dir.deleteRecursively();
-            job.fail (friendlyDownloadError (errors, code));
+            job.fail (friendlyDownloadError (errors, code, url));
             return;
         }
 

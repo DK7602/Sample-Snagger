@@ -148,6 +148,12 @@ jobs:
             libxrandr-dev libxinerama-dev libxcursor-dev libxcomposite-dev libfreetype-dev libfontconfig1-dev \
             libcurl4-openssl-dev libwebkit2gtk-4.1-dev libgtk-3-dev xvfb ffmpeg
 
+      - name: Test the page audio tap (headless Chromium)
+        run: |
+          npm install --no-save --no-audit --no-fund playwright@1.56.0
+          npx playwright install --with-deps chromium
+          node Tests/webtap/run.js
+
       - name: Configure
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
 

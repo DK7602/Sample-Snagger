@@ -1,10 +1,18 @@
 // Sample Snagger - web audio tap.
-// Injected into the page shown in the built-in browser. It listens to whatever <video>/<audio>
-// is playing and hands the raw audio to the plug-in (which polls __snag.drain()).
-// Safety rules: never re-route a media element through Web Audio unless the AudioContext is
-// running and the media is same-origin, so page audio can never go silent because of us.
+// Runs in the page shown in the built-in browser (installed before the page's own scripts, and
+// injected again later as a fallback). It listens to whatever the page plays and hands the raw
+// audio to the plug-in, which polls __snag.drain().
+//
+// Two kinds of page audio are captured:
+//  * <video> / <audio> elements - in the document or created in script (new Audio()) - through
+//    captureStream(), or on WebKit by re-routing same-origin media through our AudioContext.
+//  * Web Audio: anything a page sends to its speakers (SoundCloud-style players, sound-effect
+//    sites, Howler / WaveSurfer, games...). Connections to an AudioContext's destination are
+//    mirrored into a MediaStream destination that we listen to.
+// Safety rules: page audio is never re-routed away from the speakers, and a media element that
+// the page already plays through Web Audio is captured once (at the speakers), not twice.
 (function () {
-  var VERSION = 3;
+  var VERSION = 4;
   if (window.__snag && window.__snag.version === VERSION) return 'ok';
 
   var S = window.__snag = {
@@ -13,7 +21,9 @@
     ctx: null,
     proc: null,
     sink: null,
-    taps: [],            // { el, src, mode, track }
+    taps: [],            // media element taps: { el, src, mode, stream, track }
+    known: [],           // media elements seen via play(), including ones not in the document
+    pageTaps: [],        // Web Audio taps: { ctx, node, src }
     q: [],               // queued Float32Array chunks (interleaved stereo)
     qFrames: 0,
     maxFrames: 48000 * 10,
@@ -63,8 +73,30 @@
       try { return new URL(src, location.href).origin === location.origin; } catch (e) { return false; }
     },
 
+    remember: function (el) {
+      if (!el || S.known.indexOf(el) >= 0) return;
+      S.known.push(el);
+      if (S.known.length > 64) S.known.shift();
+    },
+
+    mediaElements: function () {
+      var list = [];
+      try { list = Array.prototype.slice.call(document.querySelectorAll('video, audio')); } catch (e) {}
+      for (var i = 0; i < S.known.length; i++) if (list.indexOf(S.known[i]) < 0) list.push(S.known[i]);
+      return list;
+    },
+
+    detach: function (el) {
+      for (var i = S.taps.length - 1; i >= 0; i--) {
+        if (S.taps[i].el !== el) continue;
+        try { if (S.taps[i].src) S.taps[i].src.disconnect(); } catch (e) {}
+        S.taps.splice(i, 1);
+      }
+    },
+
     attach: function (el) {
       if (!S.armed || !el) return;
+      if (el.__snagViaWebAudio) return;   // the page plays it through Web Audio: captured at its speakers
       for (var i = 0; i < S.taps.length; i++) if (S.taps[i].el === el) return;
       var ctx = S.ensureCtx(); if (!ctx) return;
 
@@ -108,11 +140,36 @@
       }
     },
 
+    // ---- Web Audio ------------------------------------------------------------------------
+    pageTapFor: function (pctx, create) {
+      for (var i = 0; i < S.pageTaps.length; i++) if (S.pageTaps[i].ctx === pctx) return S.pageTaps[i];
+      if (!create || !pctx || pctx === S.ctx || typeof pctx.createMediaStreamDestination !== 'function') return null;   // e.g. OfflineAudioContext
+      var t = { ctx: pctx, node: null, src: null };
+      try { t.node = pctx.createMediaStreamDestination(); } catch (e) { S.err = 'webaudio: ' + e; return null; }
+      S.pageTaps.push(t);
+      S.hookPageTap(t);
+      return t;
+    },
+
+    hookPageTap: function (t) {
+      if (!S.armed || t.src || !t.node) return;
+      if (t.ctx.state === 'closed') return;
+      var ctx = S.ensureCtx(); if (!ctx) return;
+      try { t.src = ctx.createMediaStreamSource(t.node.stream); t.src.connect(S.proc); } catch (e) { S.err = 'webaudio: ' + e; }
+    },
+
+    activeTaps: function () {
+      var n = S.taps.length;
+      for (var i = 0; i < S.pageTaps.length; i++) if (S.pageTaps[i].src && S.pageTaps[i].ctx.state !== 'closed') n++;
+      return n;
+    },
+
     scan: function () {
       if (!S.armed) return 0;
-      var els = document.querySelectorAll('video, audio');
+      var els = S.mediaElements();
       for (var i = 0; i < els.length; i++) S.attach(els[i]);
-      return S.taps.length;
+      for (var j = 0; j < S.pageTaps.length; j++) S.hookPageTap(S.pageTaps[j]);
+      return S.activeTaps();
     },
 
     arm: function (on) {
@@ -123,9 +180,9 @@
     },
 
     playing: function () {
-      var els = document.querySelectorAll('video, audio');
+      var els = S.mediaElements();
       for (var i = 0; i < els.length; i++) if (!els[i].paused && !els[i].ended && els[i].readyState > 2) return true;
-      return false;
+      return S.level > 0.002;   // Web Audio players have no element to ask
     },
 
     b64: function (f32) {
@@ -139,7 +196,7 @@
     drain: function () {
       if (S.armed) { S.scan(); if (S.ctx) S.refreshStreams(); }
       var out = { sr: S.ctx ? S.ctx.sampleRate : 0, n: 0, b64: '', lvl: S.level,
-                  st: S.ctx ? S.ctx.state : 'none', taps: S.taps.length, playing: S.playing(), err: S.err };
+                  st: S.ctx ? S.ctx.state : 'none', taps: S.activeTaps(), playing: S.playing(), err: S.err };
       if (S.q.length) {
         var all = new Float32Array(S.qFrames * 2), off = 0;
         for (var i = 0; i < S.q.length; i++) { all.set(S.q[i], off); off += S.q[i].length; }
@@ -154,7 +211,7 @@
 
     current: function () {
       // the element that is actually playing wins; otherwise the first video / audio
-      var els = document.querySelectorAll('video, audio');
+      var els = S.mediaElements();
       for (var i = 0; i < els.length; i++) if (!els[i].paused && !els[i].ended) return els[i];
       return document.querySelector('video') || document.querySelector('audio');
     },
@@ -170,7 +227,7 @@
     },
 
     pauseAll: function () {
-      var els = document.querySelectorAll('video, audio');
+      var els = S.mediaElements();
       for (var i = 0; i < els.length; i++) { try { els[i].pause(); } catch (e) {} }
       return true;
     },
@@ -182,13 +239,84 @@
     }
   };
 
+  // ---- hooks into the page's audio APIs (installed once per document) -----------------------
+  function looksNative (fn, name) {
+    try { fn.toString = function () { return 'function ' + name + '() { [native code] }'; }; } catch (e) {}
+    return fn;
+  }
+  function snag () { return window.__snag; }
+  function isSpeakers (node) {
+    return typeof AudioDestinationNode !== 'undefined' && node instanceof AudioDestinationNode;
+  }
+
+  try {
+    var AN = window.AudioNode;
+    if (AN && AN.prototype && !AN.prototype.__snagHooked) {
+      Object.defineProperty(AN.prototype, '__snagHooked', { value: true });
+      var connect = AN.prototype.connect, disconnect = AN.prototype.disconnect;
+
+      AN.prototype.connect = looksNative(function (dest) {
+        var result = connect.apply(this, arguments);
+        try {
+          var s = snag();
+          if (s && isSpeakers(dest) && this.context !== s.ctx) {
+            var t = s.pageTapFor(this.context, true);
+            if (t && t.node) connect.call(this, t.node);
+          }
+        } catch (e) {}
+        return result;
+      }, 'connect');
+
+      AN.prototype.disconnect = looksNative(function (dest) {
+        try {
+          var s = snag();
+          if (s && arguments.length && isSpeakers(dest) && this.context !== s.ctx) {
+            var t = s.pageTapFor(this.context, false);
+            if (t && t.node) disconnect.call(this, t.node);
+          }
+        } catch (e) {}
+        return disconnect.apply(this, arguments);
+      }, 'disconnect');
+    }
+
+    // media the page plays through Web Audio is captured at the speakers instead
+    // (createMediaElementSource lives on AudioContext, not BaseAudioContext)
+    [window.AudioContext, window.webkitAudioContext].forEach(function (AC) {
+      if (!AC || !AC.prototype || !AC.prototype.createMediaElementSource) return;
+      if (Object.prototype.hasOwnProperty.call(AC.prototype, '__snagHooked')) return;
+      Object.defineProperty(AC.prototype, '__snagHooked', { value: true });
+      var cmes = AC.prototype.createMediaElementSource;
+      AC.prototype.createMediaElementSource = looksNative(function (el) {
+        var s = snag();
+        if (s && el && this !== s.ctx) {
+          try { el.__snagViaWebAudio = true; s.detach(el); } catch (e) {}
+        }
+        return cmes.apply(this, arguments);
+      }, 'createMediaElementSource');
+    });
+
+    // media elements that are never added to the document (new Audio(), players' hidden elements)
+    var HME = window.HTMLMediaElement;
+    if (HME && HME.prototype && !HME.prototype.__snagHooked) {
+      Object.defineProperty(HME.prototype, '__snagHooked', { value: true });
+      var play = HME.prototype.play;
+      HME.prototype.play = looksNative(function () {
+        try {
+          var s = snag();
+          if (s) { s.remember(this); if (s.armed) { s.resume(); s.attach(this); } }
+        } catch (e) {}
+        return play.apply(this, arguments);
+      }, 'play');
+    }
+  } catch (e) { S.err = 'hooks: ' + e; }
+
   // Any real user gesture on the page lets us start the AudioContext.
   ['pointerdown', 'mousedown', 'keydown', 'touchstart'].forEach(function (ev) {
-    document.addEventListener(ev, function () { if (S.armed) { S.ensureCtx(); S.resume(); } }, true);
+    document.addEventListener(ev, function () { var s = snag(); if (s && s.armed) { s.ensureCtx(); s.resume(); } }, true);
   });
   // Pick up media as soon as it starts playing.
-  document.addEventListener('play', function (e) { if (S.armed) { S.resume(); S.attach(e.target); } }, true);
-  document.addEventListener('playing', function (e) { if (S.armed) S.attach(e.target); }, true);
+  document.addEventListener('play', function (e) { var s = snag(); if (s && s.armed) { s.resume(); s.attach(e.target); } }, true);
+  document.addEventListener('playing', function (e) { var s = snag(); if (s && s.armed) s.attach(e.target); }, true);
 
   return 'ok';
 })();

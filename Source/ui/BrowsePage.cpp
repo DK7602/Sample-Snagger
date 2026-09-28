@@ -232,6 +232,8 @@ void BrowsePage::createBrowserIfNeeded()
     auto opts = Opts{}
                   .withBackend (Opts::Backend::webview2)
                   .withKeepPageLoadedWhenBrowserIsHidden()
+                  // installed before each page's own scripts, so Web Audio players are heard too
+                  .withUserScript (WebCapture::getTapScript())
                   .withWinWebView2Options (Opts::WinWebView2{}
                                               .withUserDataFolder (paths::webDataDir())
                                               .withBackgroundColour (col::bg0)
