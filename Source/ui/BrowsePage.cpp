@@ -36,7 +36,10 @@ public:
         {
             owner.currentUrl = url;
             if (! owner.urlField.hasKeyboardFocus (true))
+            {
                 owner.urlField.setText (url, false);
+                owner.urlEditedByUser = false;
+            }
         }
         if (owner.capture != nullptr)
             owner.capture->pageChanged();
@@ -81,6 +84,7 @@ BrowsePage::BrowsePage (EditorContext& c) : ctx (c), proc (c.getProcessor())
     urlField.setIndents (12, 0);
     urlField.setJustification (juce::Justification::centredLeft);
     urlField.onReturnKey = [this] { goTo (urlField.getText()); };
+    urlField.onTextChange = [this] { urlEditedByUser = true; };   // only user edits: setText (..., false) is silent
     addAndMakeVisible (urlField);
 
     setStyle (goBtn, "gold");
@@ -322,7 +326,7 @@ void BrowsePage::setOpensExternally (bool shouldOpenExternally)
 {
     proc.getSettings().setString ("openSitesExternally", shouldOpenExternally ? "1" : "0");
     updateOpenModeButton();
-    ctx.toast (shouldOpenExternally ? "Sites now open in your own browser. Copy a video's link back here and hit HQ SNAG."
+    ctx.toast (shouldOpenExternally ? "Sites now open in your own browser. Copy a video's link there, then hit HQ SNAG here."
                                     : "Sites now open inside Sample Snagger (LIVE REC and hindsight work here).");
 }
 
@@ -338,7 +342,7 @@ void BrowsePage::openInSystemBrowser (const juce::String& url)
     auto u = normaliseUrl (url);
     if (u.isEmpty()) return;
     if (juce::URL (u).launchInDefaultBrowser())
-        ctx.toast ("Opened in your browser. To grab audio from there: copy the video's link, paste it in the address bar here and hit HQ SNAG.");
+        ctx.toast ("Opened in your browser. To grab audio from there: copy the video's link, then hit HQ SNAG here.");
     else
         ctx.toast ("Couldn't open your browser.", true);
 }
@@ -348,6 +352,7 @@ void BrowsePage::goTo (juce::String url)
     url = normaliseUrl (url);
     if (url.isEmpty())
         return;
+    urlEditedByUser = false;
 
     if (opensExternally())
     {
@@ -492,17 +497,34 @@ void BrowsePage::markPoint (bool isIn)
 
 void BrowsePage::snagHq()
 {
-    // A link typed / pasted into the address bar (e.g. copied from Chrome or Safari) wins.
     auto typed = urlField.getText().trim();
-    if (typed.isEmpty() && opensExternally())
+
+    if (opensExternally())
     {
+        // Sites are open in the user's own browser, so the link they just copied there is what they
+        // mean - unless they've typed / pasted a link into our address bar since it was last set.
         auto clip = juce::SystemClipboard::getTextFromClipboard().trim();
-        if (clip.startsWithIgnoreCase ("http") && ! clip.containsChar ('\n'))
+        const bool clipIsLink = clip.startsWithIgnoreCase ("http") && ! clip.containsAnyOf (" \r\n\t");
+        const bool fieldIsFresh = urlEditedByUser && typed.startsWithIgnoreCase ("http");
+        if (clipIsLink && ! fieldIsFresh)
             typed = clip;
+
+        if (! typed.startsWithIgnoreCase ("http"))
+        {
+            ctx.toast ("Copy the video's link in your browser (click the address bar, then Ctrl+C / Cmd+C), then hit HQ SNAG.", true);
+            return;
+        }
+        urlField.setText (typed, false);
+        urlEditedByUser = false;
+        actions::downloadUrl (proc, typed);
+        return;
     }
-    if (typed.startsWithIgnoreCase ("http") && (opensExternally() || typed != currentUrl || ! hasEmbeddedBrowser()))
+
+    // A link typed / pasted into the address bar wins over the page that's open.
+    if (typed.startsWithIgnoreCase ("http") && (typed != currentUrl || ! hasEmbeddedBrowser()))
     {
         urlField.setText (typed, false);
+        urlEditedByUser = false;
         actions::downloadUrl (proc, typed);
         return;
     }
@@ -569,7 +591,10 @@ void BrowsePage::timerCallback()
             {
                 currentUrl = u;
                 if (! urlField.hasKeyboardFocus (true))
+                {
                     urlField.setText (u, false);
+                    urlEditedByUser = false;
+                }
                 markIn = markOut = -1.0;
             }
         });

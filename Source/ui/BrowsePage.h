@@ -77,6 +77,7 @@ private:
     IconButton recInputBtn { "recinput", theme::icons::mic(), "REC INPUT" };
 
     juce::String currentUrl, currentTitle, pendingUrl;
+    bool urlEditedByUser = false;   // typed / pasted into the address bar since it was last set
     double markIn = -1.0, markOut = -1.0;
     bool pageVisible = false;
     juce::uint32 liveRecStarted = 0;

@@ -134,12 +134,33 @@ static juce::String friendlyDownloadError (const juce::StringArray& errors, int 
     return "Download failed (code " + juce::String (code) + ")";
 }
 
+/** A site's home / search page rather than a video or song: yt-dlp would either fail with a
+    confusing error or grab something random from the feed. */
+juce::String whyNotAMediaPage (const juce::String& url)
+{
+    const juce::URL u (url);
+    const auto host = u.getDomain().toLowerCase();
+    const auto path = u.getSubPath().toLowerCase().trimCharactersAtEnd ("/");
+    const bool youtube = host.endsWith ("youtube.com");
+
+    if (youtube && (path.isEmpty() || path == "results" || path.startsWith ("feed")))
+        return "That's the YouTube home / search page, not a video. Open a video (or copy its link in your browser), then hit HQ SNAG.";
+    if (path.isEmpty())
+        return "That's the site's home page. Open the video or song itself (or copy its link), then hit HQ SNAG.";
+    return {};
+}
+
 void downloadUrl (SnaggerProcessor& p, const juce::String& urlIn, double inSec, double outSec, const juce::String& titleHint)
 {
     auto url = urlIn.trim();
     if (! url.startsWithIgnoreCase ("http"))
     {
         notify (p, "Open a video page first (or paste a link into the address bar).", true);
+        return;
+    }
+    if (auto why = whyNotAMediaPage (url); why.isNotEmpty())
+    {
+        notify (p, why, true);
         return;
     }
 
@@ -165,7 +186,8 @@ void downloadUrl (SnaggerProcessor& p, const juce::String& urlIn, double inSec, 
         dir.createDirectory();
 
         juce::StringArray args { ytdlp.getFullPathName(),
-                                 "--no-playlist", "--newline", "--progress", "--no-simulate", "--no-mtime",
+                                 "--no-playlist", "--playlist-items", "1",   // a playlist / channel link: just its first item
+                                 "--newline", "--progress", "--no-simulate", "--no-mtime",
                                  "--color", "never", "--encoding", "utf-8",
                                  "-f", "bestaudio/best", "-x", "--audio-format", "wav",
                                  "--ffmpeg-location", ffmpeg.getFullPathName(),

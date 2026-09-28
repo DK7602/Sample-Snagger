@@ -12,6 +12,9 @@ namespace snag::actions
     void importFiles (SnaggerProcessor&, const juce::StringArray& paths);
 
     /** Grab high-quality audio for a web page with yt-dlp. inSec/outSec < 0 = whole thing. */
+    /** Non-empty (a friendly message) when the link is a site's home / search page, not a video or song. */
+    juce::String whyNotAMediaPage (const juce::String& url);
+
     void downloadUrl (SnaggerProcessor&, const juce::String& url, double inSec = -1.0, double outSec = -1.0,
                       const juce::String& titleHint = {});
 

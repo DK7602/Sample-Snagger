@@ -389,6 +389,18 @@ static void testProcessor()
     CHECK (p2.session.getClips().size() == 1 && p2.session.getClips()[0]->slices == c->slices, "session survives save / reload of the DAW project");
 }
 
+static void testLinks()
+{
+    std::cout << "\n[HQ snag links]\n";
+    CHECK (actions::whyNotAMediaPage ("https://www.youtube.com/").isNotEmpty(), "YouTube home page is not a video");
+    CHECK (actions::whyNotAMediaPage ("https://www.youtube.com/results?search_query=soul").isNotEmpty(), "YouTube search page is not a video");
+    CHECK (actions::whyNotAMediaPage ("https://soundcloud.com").isNotEmpty(), "a site's home page is not a song");
+    CHECK (actions::whyNotAMediaPage ("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RD").isEmpty(), "YouTube watch link is a video");
+    CHECK (actions::whyNotAMediaPage ("https://youtu.be/dQw4w9WgXcQ").isEmpty(), "youtu.be short link is a video");
+    CHECK (actions::whyNotAMediaPage ("https://www.youtube.com/shorts/abc123").isEmpty(), "YouTube Shorts link is a video");
+    CHECK (actions::whyNotAMediaPage ("https://soundcloud.com/artist/track").isEmpty(), "SoundCloud track link is a song");
+}
+
 static void testNetwork()
 {
     std::cout << "\n[helper tool installers - network]\n";
@@ -685,6 +697,7 @@ int main (int argc, char** argv)
     testFileIO (tmp);
     testWebCapture();
     testProcessor();
+    testLinks();
     if (args.contains ("--network"))
         testNetwork();
     if (args.contains ("--ai"))
