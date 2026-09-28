@@ -1,7 +1,7 @@
 # Sample Snagger
 
-**Capture · Chop · Separate.** A sampling plug-in and standalone app: a brushed 24k gold faceplate with black glass
-displays, satin black controls and neon red lights.
+**Capture · Chop · Separate.** A sampling plug-in and standalone app: black glass flecked with gold and red glitter,
+a polished 24k gold title bar, gold-rimmed glass windows, brushed black knobs with neon red rings.
 Browse YouTube (or any site) inside the plug-in, grab the audio the moment you hear something,
 chop it, pitch it, split vocals from music, and drag the result straight onto a DAW track.
 
@@ -24,9 +24,12 @@ chop it, pitch it, split vocals from music, and drag the result straight onto a 
 - **Built-in web browser.** YouTube opens by default; one-click links for SoundCloud, TikTok, Instagram,
   Vimeo, Bandcamp, Internet Archive and Freesound. Type search words in the address bar to search YouTube.
 - **LIVE REC** records whatever is playing on the page, like a tape deck. Press it, play the video, press again.
+  On Windows 11 it records the built-in browser's own sound output, so it works on every site - including
+  sound-effect libraries whose players a web page isn't allowed to listen to.
 - **Hindsight: GRAB LAST 10s / 20s / 30s / 60s.** Sample Snagger quietly keeps the last minute of audio that played,
   so when you hear something great you can grab it *after* it happened.
 - **HQ SNAG** downloads the page's audio in full quality (via yt-dlp - works with YouTube and 1,000+ sites).
+  On sites yt-dlp doesn't know, it grabs the audio file the page is actually playing instead.
   Use **SET IN / SET OUT** while the video plays to snag just a section.
 - **IMPORT** any audio or video file (mp3, wav, flac, aiff, ogg, m4a, mp4, mov, mkv, webm, avi...) - or just drop
   files anywhere on the window.
@@ -56,7 +59,9 @@ Every capture lands in the **Session tray** at the bottom. Tray clips are saved 
   - *AI 6 Stems:* adds guitar and piano.
 - **Quick Split:** instant and rough - handy for a quick preview on stereo mixes.
 - **AI via Python (optional):** the same models through PyTorch - only worth it if you have an NVIDIA graphics card.
-- Solo / mute each stem, play the mix, open any stem in STUDIO to chop it, save it, or drag it into your DAW.
+- Play / stop each stem, or the mix. Click or drag in any stem to move the playhead - playback starts there,
+  or jumps there if it's already playing.
+- Solo / mute each stem, open any stem in STUDIO to chop it, save it, or drag it into your DAW.
   **DRAG MIX** exports just the stems you left un-muted (e.g. drums + bass only).
 
 ### 4. LIBRARY

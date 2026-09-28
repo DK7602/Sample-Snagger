@@ -62,12 +62,11 @@ void SlicePads::paint (juce::Graphics& g)
         r = r.reduced (1.5f);
         if (i >= n)
         {
-            // empty slot: a dark recess in the gold
-            g.setGradientFill (juce::ColourGradient (juce::Colour (0xff1f1403).withAlpha (0.55f), 0.0f, r.getY(),
-                                                     juce::Colour (0xfffff0bf).withAlpha (0.45f), 0.0f, r.getBottom(), false));
-            g.fillRoundedRectangle (r.expanded (1.0f), 7.0f);
-            g.setGradientFill (juce::ColourGradient (juce::Colour (0xff0c0c0e), 0.0f, r.getY(), juce::Colour (0xff050506), 0.0f, r.getBottom(), false));
+            // empty slot: a dark recess in the glass, with a faint gold edge
+            g.setGradientFill (juce::ColourGradient (juce::Colour (0xff030304), 0.0f, r.getY(), juce::Colour (0xff0b0b0d), 0.0f, r.getBottom(), false));
             g.fillRoundedRectangle (r, 6.0f);
+            g.setColour (col::gold.withAlpha (0.22f));
+            g.drawRoundedRectangle (r.reduced (0.5f), 6.0f, 1.0f);
             continue;
         }
 

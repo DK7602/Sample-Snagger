@@ -80,6 +80,7 @@ Source/
     QuickSplit.*       instant STFT stem separator (centre extraction + harmonic/percussive masks)
     AiStems.*          built-in AI stems: model downloads, resampling, 4 / 6 stem and vocal modes
     WebCapture.*       receives audio from the browser page (hindsight ring + recorder)
+    ProcessAudioCapture.*  Windows: records the browser processes' own audio (process loopback)
     Tools.*            finds / installs FFmpeg, yt-dlp, Deno, the AI models and the optional Python AI
     Jobs.*, Process.h  background job runner, command-line process runner
     AudioFileIO.*      loading any audio/video (FFmpeg fallback), WAV export
@@ -88,5 +89,5 @@ Source/
 Resources/
   Scripts/webtap.js     injected into web pages to tap <video>/<audio> audio
   Scripts/snagger_ai.py  optional Python AI engine (GPU): installs Demucs in a private venv
-  gold_plate.jpg         the faceplate texture, rendered by Design/make_gold.py
+  glitter_glass.jpg, gold_smooth.jpg, glitter_text.jpg   UI textures, rendered by Design/make_textures.py
 ```

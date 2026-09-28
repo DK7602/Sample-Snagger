@@ -13,8 +13,10 @@
 #include "../Source/core/AudioFileIO.h"
 #include "../Source/core/WebCapture.h"
 #include "../Source/core/AiStems.h"
+#include "../Source/core/ProcessAudioCapture.h"
 #include <iostream>
 #include <thread>
+#include <atomic>
 
 using namespace snag;
 
@@ -167,6 +169,61 @@ static double correlation (const AudioData& a, const AudioData& b)
 }
 
 //==============================================================================
+/** Lag (in samples, -maxLag..maxLag) at which b best lines up with a, on channel 0. */
+static int bestLag (const AudioData& a, const AudioData& b, int maxLag)
+{
+    const int n = juce::jmin (a.getNumSamples(), b.getNumSamples());
+    const float* x = a.buffer.getReadPointer (0);
+    const float* y = b.buffer.getReadPointer (0);
+    int best = 0; double bestV = -1e30;
+    for (int lag = -maxLag; lag <= maxLag; ++lag)
+    {
+        double s = 0;
+        for (int i = maxLag; i < n - maxLag; ++i)
+            s += (double) x[i] * y[i + lag];
+        if (s > bestV) { bestV = s; best = lag; }
+    }
+    return best;
+}
+
+static void testResample()
+{
+    std::cout << "\n[resampling]\n";
+    auto demo = makeDemoMix (48000.0, 3.0);
+    auto down = edit::resample (*demo.mix, 44100.0);
+    auto back = edit::resample (*down, 48000.0);
+    CHECK (std::abs (down->getNumSamples() - juce::roundToInt (demo.mix->getNumSamples() * 44100.0 / 48000.0)) <= 1,
+           "48k -> 44.1k keeps the length");
+    CHECK (back->getNumSamples() == demo.mix->getNumSamples(), "and back again gives the same length");
+    const int lag = bestLag (*demo.mix, *back, 16);
+    CHECK (lag == 0, "48k -> 44.1k -> 48k adds no delay (lag " + juce::String (lag) + " samples)");
+
+    // What the AI stems rely on: original minus the round-tripped copy must be (nearly) silent.
+    // Test signal: 60 random tones up to 18 kHz (everything a voice has, and more).
+    {
+        const int n = 48000 * 2;
+        juce::AudioBuffer<float> sig (1, n);
+        sig.clear();
+        juce::Random rng (7);
+        for (int t = 0; t < 60; ++t)
+        {
+            const double f = 60.0 + rng.nextDouble() * 17940.0, ph = rng.nextDouble() * 6.283;
+            for (int i = 0; i < n; ++i)
+                sig.addSample (0, i, 0.01f * (float) std::sin (ph + 6.283185307 * f * i / 48000.0));
+        }
+        auto orig = AudioData::make (std::move (sig), 48000.0);
+        auto rt = edit::resample (*edit::resample (*orig, 44100.0), 48000.0);
+        double err = 0, ref = 0;
+        for (int i = 4000; i < n - 4000; ++i)
+        {
+            const double d = orig->buffer.getSample (0, i) - rt->buffer.getSample (0, i);
+            err += d * d; ref += (double) orig->buffer.getSample (0, i) * orig->buffer.getSample (0, i);
+        }
+        const double db = 10.0 * std::log10 (err / juce::jmax (1e-12, ref));
+        CHECK (db < -50.0, "original minus round trip is " + juce::String (db, 1) + " dB below 18 kHz (vocals cancel out of the music)");
+    }
+}
+
 static void testEditOps()
 {
     std::cout << "\n[edit ops]\n";
@@ -380,6 +437,17 @@ static void testProcessor()
     render (2);
     CHECK (! p.isPreviewing(), "preview stops");
 
+    // stems playhead: playback starts where the playhead is
+    {
+        const int from = c->audio->getNumSamples() / 2;
+        p.previewClip (*c, from, -1, false);
+        render (4);
+        const double pos = p.getPreviewPosition();
+        CHECK (p.isPreviewing() && pos >= from && pos < from + 44100, "preview starts at the playhead (" + juce::String ((int) pos) + " >= " + juce::String (from) + ")");
+        p.stopPreview();
+        render (2);
+    }
+
     // state round trip
     juce::MemoryBlock state;
     p.getStateInformation (state);
@@ -387,6 +455,31 @@ static void testProcessor()
     SnaggerProcessor p2;
     p2.setStateInformation (state.getData(), (int) state.getSize());
     CHECK (p2.session.getClips().size() == 1 && p2.session.getClips()[0]->slices == c->slices, "session survives save / reload of the DAW project");
+}
+
+static void testProcessAudio()
+{
+    std::cout << "\n[browser process audio]\n";
+    if (! ProcessAudioCapture::isSupported())
+    {
+        std::cout << "  (not on this system - the page script capture is used)\n";
+        return;
+    }
+    // Build machines have no sound card, so this only proves it opens / closes cleanly.
+    ProcessAudioCapture cap;
+    std::atomic<int> frames { 0 };
+    const auto t0 = juce::Time::getMillisecondCounterHiRes();
+    const bool ok = cap.start (ProcessAudioCapture::currentProcessId(), [&frames] (const float*, int n) { frames += n; });
+    const double openMs = juce::Time::getMillisecondCounterHiRes() - t0;
+    std::cout << "  start: " << (ok ? "ok" : ("unavailable - " + cap.getLastError()).toStdString()) << " (" << (int) openMs << " ms)\n";
+    if (ok)
+    {
+        juce::Thread::sleep (600);
+        cap.stop();
+        std::cout << "  frames in 0.6 s: " << frames.load() << "\n";
+        CHECK (frames.load() > 48000 / 4, "browser process audio keeps real time (silence is filled in)");
+    }
+    CHECK (openMs < 9000.0 && ! cap.isRunning(), "browser process audio opens and closes cleanly");
 }
 
 static void testLinks()
@@ -467,12 +560,40 @@ static void testNetwork()
 
     actions::downloadUrl (p, "http://127.0.0.1:8765/does-not-exist.mp4");
     waitForJobs (120000);
-    CHECK (messages.size() > 0 && messages[messages.size() - 1].startsWith ("ERR"), "a bad link gives an error message: " + messages[messages.size() - 1]);
+    CHECK (messages.size() > 0 && messages[messages.size() - 1].startsWith ("ERR") && messages[messages.size() - 1].contains ("404"), "a bad link gives an error message: " + messages[messages.size() - 1]);
 
     // import a video file through the job system too
     actions::importFiles (p, { www.getChildFile ("music-video.mp4").getFullPathName() });
     waitForJobs (60000);
     CHECK (p.session.getClips().size() == 3 && p.session.getClips()[2]->kind == "Video", "IMPORT FILE of an mp4 through the job system");
+
+    // A site yt-dlp doesn't know (like a sound-effects library): the page itself fails, so HQ SNAG
+    // grabs the audio file the page loaded / is playing instead.
+    www.getChildFile ("sounds.html").replaceWithText ("<html><head><title>Sound effects - yodel</title></head><body><h1>Results</h1></body></html>");
+    {
+        actions::MediaHints hints;
+        hints.others.add ("http://127.0.0.1:8765/music-video.mp4");
+        const int before = p.session.getClips().size();
+        actions::downloadUrl (p, "http://127.0.0.1:8765/sounds.html?q=yodel", -1.0, -1.0, "Sound effects - yodel", hints);
+        waitForJobs (180000);
+        const bool got = p.session.getClips().size() == before + 1;
+        CHECK (got && std::abs (p.session.getClips().getLast()->audio->lengthSeconds() - 6.0) < 0.2,
+               "HQ SNAG on a site yt-dlp can't do falls back to the page's audio file -> "
+               + (got ? "'" + p.session.getClips().getLast()->name + "'" : messages[messages.size() - 1]));
+    }
+    {
+        actions::MediaHints hints;
+        hints.playing.add ("http://127.0.0.1:8765/music-video.mp4");
+        const int before = p.session.getClips().size();
+        actions::downloadUrl (p, "http://127.0.0.1:8765/sounds.html?q=yodel", 1.0, 3.0, "Sound effects - yodel", hints);
+        waitForJobs (180000);
+        const bool got = p.session.getClips().size() == before + 1;
+        CHECK (got && std::abs (p.session.getClips().getLast()->audio->lengthSeconds() - 2.0) < 0.35,
+               "HQ SNAG IN/OUT of the file that's playing -> " + (got ? juce::String (p.session.getClips().getLast()->audio->lengthSeconds(), 2) + "s" : messages[messages.size() - 1]));
+    }
+    actions::downloadUrl (p, "http://127.0.0.1:8765/sounds.html?q=nothing");
+    waitForJobs (120000);
+    CHECK (messages[messages.size() - 1].containsIgnoreCase ("LIVE REC"), "a site with nothing to grab says to use LIVE REC: " + messages[messages.size() - 1]);
 
     server.kill();
     p.onNotify = nullptr;
@@ -511,6 +632,7 @@ static void testBuiltinAi()
             CHECK (stems.size() == 4, "4 stems returned");
             auto d = find ("drums"), b = find ("bass");
             if (d != nullptr) CHECK (correlation (*d, *demo.drums) > 0.4, "AI drum stem matches the drums (corr " + juce::String (correlation (*d, *demo.drums), 3) + ")");
+            if (d != nullptr) CHECK (bestLag (*demo.drums, *d, 32) == 0, "AI drum stem lines up with the original to the sample (lag " + juce::String (bestLag (*demo.drums, *d, 32)) + ")");
             if (b != nullptr) CHECK (correlation (*b, *demo.bass) > 0.4, "AI bass stem matches the bass (corr " + juce::String (correlation (*b, *demo.bass), 3) + ")");
             std::vector<AudioData::Ptr> layers;
             for (auto& st : stems) layers.push_back (st.audio);
@@ -692,12 +814,14 @@ int main (int argc, char** argv)
     tmp.createDirectory();
 
     testEditOps();
+    testResample();
     testChopping();
     testQuickSplit();
     testFileIO (tmp);
     testWebCapture();
     testProcessor();
     testLinks();
+    testProcessAudio();
     if (args.contains ("--network"))
         testNetwork();
     if (args.contains ("--ai"))

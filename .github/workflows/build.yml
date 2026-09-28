@@ -230,5 +230,6 @@ jobs:
             After installing, rescan plug-ins in your DAW. Sample Snagger is an instrument, so put it on an instrument / MIDI track.
             Open Settings (gear icon) once and click INSTALL ALL for HQ downloads and the AI stem models.
 
-            **New in 1.1:** built-in AI stem separation (no Python needed), a brushed 24k gold / black glass look,
-            and an "Opens in: My browser" option to open sites in Chrome, Safari or whatever your default browser is.
+            **New in 1.2:** a new look (glitter glass, polished gold title, gold-rimmed glass windows, brushed black knobs),
+            LIVE REC on every site on Windows 11, HQ SNAG falls back to the file a page is playing, cleaner AI music
+            stems (vocals now cancel out properly), and a playhead with play / stop on every stem.

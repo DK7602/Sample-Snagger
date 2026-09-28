@@ -26,8 +26,8 @@ public:
         muteBtn.setTooltip ("Mute in the mix");
         soloBtn.setTooltip ("Solo in the mix");
 
-        playBtn.setTooltip ("Play this stem on its own");
-        playBtn.onClick = [this] { owner.playStem (clip); };
+        playBtn.setTooltip ("Play this stem on its own (click again to stop)");
+        playBtn.onClick = [this] { owner.toggleStem (clip); };
         addAndMakeVisible (playBtn);
 
         editBtn.setTooltip ("Open this stem in STUDIO to chop / edit it");
@@ -44,6 +44,46 @@ public:
 
         drag.makeFile = [this] { return actions::makeDragFile (owner.getProcessor(), *clip); };
         addAndMakeVisible (drag);
+    }
+
+    void setPlaying (bool isPlaying)
+    {
+        if (isPlaying == showingStop) return;
+        showingStop = isPlaying;
+        playBtn.setIcon (isPlaying ? icons::stop() : icons::play());
+        playBtn.setTooltip (isPlaying ? "Stop" : "Play this stem on its own (click again to stop)");
+    }
+
+    // click / drag on the waveform: move the playhead (and jump there while playing)
+    double sampleAt (float x) const
+    {
+        const auto wr = waveArea.reduced (4.0f, 0.0f);
+        const double frac = juce::jlimit (0.0, 1.0, (double) ((x - wr.getX()) / juce::jmax (1.0f, wr.getWidth())));
+        return frac * clip->audio->getNumSamples();
+    }
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (! waveArea.contains (e.position)) return;
+        scrubbing = true;
+        owner.seekTo (sampleAt (e.position.x));
+    }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (! scrubbing) return;
+        dragSample = sampleAt (e.position.x);
+        for (auto* l : owner.getLanes()) l->repaint();
+    }
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        if (scrubbing && e.getDistanceFromDragStart() > 2)
+            owner.seekTo (sampleAt (e.position.x));
+        scrubbing = false;
+        dragSample = -1.0;
+        for (auto* l : owner.getLanes()) l->repaint();
+    }
+    void mouseMove (const juce::MouseEvent& e) override
+    {
+        setMouseCursor (waveArea.contains (e.position) ? juce::MouseCursor::IBeamCursor : juce::MouseCursor::NormalCursor);
     }
 
     bool isMuted() const  { return muteBtn.getToggleState(); }
@@ -97,16 +137,35 @@ public:
         glassWell (g, wr, 6.0f);
         thumb.draw (g, wr.reduced (4.0f, 4.0f), clip->audio.get(), audible ? colour : colour.withSaturation (0.1f).darker (0.6f), 0, -1, true);
 
-        // playhead when this stem (or the mix) is playing
+        // playhead: moving while this stem (or the mix) plays, otherwise where playback will start
         auto& proc = owner.getProcessor();
-        if (proc.isPreviewing())
+        const int n = clip->audio->getNumSamples();
+        auto xFor = [&] (double sample) { return wr.getX() + 4.0f + (float) (sample / juce::jmax (1, n)) * (wr.getWidth() - 8.0f); };
+
+        const bool live = proc.isPreviewing() && (owner.isMixPlaying || owner.isStemPlaying (*clip));
+        const double cursorSample = dragSample >= 0.0 ? dragSample : owner.getCursor();
+        const float cx = xFor (cursorSample);
+
+        // start marker
+        juce::Path flag;
+        flag.addTriangle (cx - 5.0f, wr.getY() + 1.0f, cx + 5.0f, wr.getY() + 1.0f, cx, wr.getY() + 8.0f);
+        g.setColour ((live ? col::gold.withAlpha (0.55f) : col::goldLight));
+        g.fillPath (flag);
+        g.setColour (live ? col::gold.withAlpha (0.35f) : col::goldLight.withAlpha (0.8f));
+        g.fillRect (juce::Rectangle<float> (cx - 0.5f, wr.getY() + 6.0f, 1.0f, wr.getHeight() - 7.0f));
+
+        if (live)
         {
-            auto* src = proc.getPreviewSource();
-            if (src != nullptr && src->getNumSamples() > 0 && (src == clip->audio.get() || owner.isMixPlaying))
-            {
-                const float x = wr.getX() + 4.0f + (float) (proc.getPreviewPosition() / src->getNumSamples()) * (wr.getWidth() - 8.0f);
-                neonLine (g, { x, wr.getY(), x, wr.getBottom() }, col::red, 1.2f, 6.0f);
-            }
+            const float x = xFor (proc.getPreviewPosition());
+            neonLine (g, { x, wr.getY(), x, wr.getBottom() }, col::red, 1.4f, 7.0f);
+        }
+
+        if (dragSample < 0.0 && ! live)
+        {
+            g.setColour (col::textFaint);
+            g.setFont (ui (9.5f, true));
+            g.drawText (formatTime (cursorSample / clip->audio->sampleRate, true), juce::Rectangle<float> (cx + 5.0f, wr.getBottom() - 16.0f, 70.0f, 14.0f),
+                        juce::Justification::centredLeft);
         }
     }
 
@@ -130,6 +189,8 @@ private:
     DragHandle drag { "DRAG" };
     WaveThumb thumb;
     juce::Rectangle<float> waveArea;
+    bool showingStop = false, scrubbing = false;
+    double dragSample = -1.0;
 };
 
 //==============================================================================
@@ -173,8 +234,10 @@ StemsPage::StemsPage (EditorContext& c) : ctx (c), proc (c.getProcessor())
     laneViewport.setScrollBarsShown (true, false);
     addAndMakeVisible (laneViewport);
 
-    playMixBtn.onClick = [this] { playMix(); };
-    stopBtn.onClick = [this] { proc.stopPreview(); isMixPlaying = false; };
+    playMixBtn.onClick = [this] { toggleMix(); };
+    playMixBtn.setTooltip ("Play the stems you haven't muted, from the playhead (click again to stop)");
+    stopBtn.onClick = [this] { proc.stopPreview(); isMixPlaying = false; updatePlayButtons(); };
+    stopBtn.setTooltip ("Stop");
     saveAllBtn.onClick = [this]
     {
         int n = 0;
@@ -232,6 +295,8 @@ void StemsPage::rebuild()
 
     if (src != shownParent || ids != shownStemIds)
     {
+        if (src != shownParent)
+            cursor = 0.0;
         shownParent = src;
         shownStemIds = ids;
         lanes.clear();
@@ -314,6 +379,42 @@ void StemsPage::timerCallback()
         isMixPlaying = false;
         for (auto* l : lanes) l->repaint();
     }
+    updatePlayButtons();
+}
+
+void StemsPage::updatePlayButtons()
+{
+    for (auto* l : lanes)
+        l->setPlaying (isStemPlaying (*l->clip));
+    const bool mixOn = proc.isPreviewing() && isMixPlaying;
+    playMixBtn.setIcon (mixOn ? icons::stop() : icons::play());
+    playMixBtn.setCaption (mixOn ? "STOP MIX" : "PLAY MIX");
+}
+
+bool StemsPage::isStemPlaying (const Clip& c) const
+{
+    return proc.isPreviewing() && ! isMixPlaying && c.audio != nullptr && proc.getPreviewSource() == c.audio.get();
+}
+
+void StemsPage::seekTo (double sample)
+{
+    const int n = lanes.isEmpty() ? 0 : lanes.getFirst()->clip->audio->getNumSamples();
+    cursor = juce::jlimit (0.0, (double) juce::jmax (0, n - 1), sample);
+
+    if (proc.isPreviewing())
+    {
+        if (isMixPlaying)
+            startMix();
+        else
+            for (auto* l : lanes)
+                if (isStemPlaying (*l->clip))
+                {
+                    proc.previewClip (*l->clip, (int) cursor);
+                    break;
+                }
+    }
+    for (auto* l : lanes) l->repaint();
+    updatePlayButtons();
 }
 
 void StemsPage::separateNow()
@@ -339,21 +440,42 @@ void StemsPage::updateGains()
     for (auto* l : lanes) l->repaint();
 }
 
-void StemsPage::playMix()
+void StemsPage::toggleMix()
+{
+    if (proc.isPreviewing() && isMixPlaying)
+    {
+        proc.stopPreview();
+        isMixPlaying = false;
+    }
+    else
+        startMix();
+    for (auto* l : lanes) l->repaint();
+    updatePlayButtons();
+}
+
+void StemsPage::startMix()
 {
     if (lanes.isEmpty()) return;
     std::vector<AudioData::Ptr> layers;
     for (auto* l : lanes) layers.push_back (l->clip->audio);
     isMixPlaying = true;
     updateGains();
-    proc.preview (layers, 0, -1, false);
+    proc.preview (layers, (int) cursor, -1, false);
 }
 
-void StemsPage::playStem (Clip::Ptr c)
+void StemsPage::toggleStem (Clip::Ptr c)
 {
-    isMixPlaying = false;
-    for (auto& g : proc.layerGains) g = 1.0f;
-    proc.previewClip (*c);
+    if (c == nullptr) return;
+    if (isStemPlaying (*c))
+        proc.stopPreview();
+    else
+    {
+        isMixPlaying = false;
+        for (auto& g : proc.layerGains) g = 1.0f;
+        proc.previewClip (*c, (int) cursor);
+    }
+    for (auto* l : lanes) l->repaint();
+    updatePlayButtons();
 }
 
 //==============================================================================

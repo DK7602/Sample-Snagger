@@ -12,7 +12,7 @@
 // Safety rules: page audio is never re-routed away from the speakers, and a media element that
 // the page already plays through Web Audio is captured once (at the speakers), not twice.
 (function () {
-  var VERSION = 4;
+  var VERSION = 5;
   if (window.__snag && window.__snag.version === VERSION) return 'ok';
 
   var S = window.__snag = {
@@ -22,6 +22,7 @@
     proc: null,
     sink: null,
     taps: [],            // media element taps: { el, src, mode, stream, track }
+    blocked: [],         // media we may not listen to (cross-origin files without CORS)
     known: [],           // media elements seen via play(), including ones not in the document
     pageTaps: [],        // Web Audio taps: { ctx, node, src }
     q: [],               // queued Float32Array chunks (interleaved stereo)
@@ -108,12 +109,17 @@
           var tap = { el: el, src: null, mode: 'stream', stream: stream, track: tracks[0] || null };
           if (tap.track) { tap.src = ctx.createMediaStreamSource(new MediaStream([tap.track])); tap.src.connect(S.proc); }
           S.taps.push(tap);
+          S.unblock(el);
           return;
-        } catch (e) { S.err = 'captureStream: ' + e; }
+        } catch (e) {
+          S.err = 'captureStream: ' + e;
+          if (String(e).indexOf('cross-origin') >= 0 || (e && e.name === 'SecurityError')) { S.block(el); return; }
+        }
       }
 
       // WebKit path: re-route the element through our context, only when it's safe.
-      if (ctx.state !== 'running' || !S.sameOrigin(el)) return;
+      if (!S.sameOrigin(el)) { S.block(el); return; }
+      if (ctx.state !== 'running') return;
       try {
         var src = ctx.createMediaElementSource(el);
         src.connect(ctx.destination);   // keep it audible
@@ -122,10 +128,43 @@
       } catch (e) { S.err = 'mediaElementSource: ' + e; }
     },
 
+    block: function (el) { if (S.blocked.indexOf(el) < 0) S.blocked.push(el); },
+    unblock: function (el) { var i = S.blocked.indexOf(el); if (i >= 0) S.blocked.splice(i, 1); },
+    blockedPlaying: function () {
+      var n = 0;
+      for (var i = 0; i < S.blocked.length; i++) { var el = S.blocked[i]; if (!el.paused && !el.ended) n++; }
+      return n;
+    },
+
+    // Direct links to the audio / video files this page is playing or has loaded, best first.
+    // HQ SNAG falls back to these on sites its downloader doesn't support.
+    mediaUrls: function () {
+      var out = [];
+      function add(u) {
+        if (!u || typeof u !== 'string') return;
+        if (u.indexOf('http') !== 0) return;               // blob: / data: / mediastream: can't be fetched
+        if (out.indexOf(u) < 0) out.push(u);
+      }
+      var els = S.mediaElements(), i;
+      for (i = 0; i < els.length; i++) if (!els[i].paused && !els[i].ended) add(els[i].currentSrc || els[i].src);
+      for (i = S.known.length - 1; i >= 0; i--) add(S.known[i].currentSrc || S.known[i].src);
+      for (i = 0; i < els.length; i++) add(els[i].currentSrc || els[i].src);
+      try {
+        var res = performance.getEntriesByType('resource');
+        var ext = /\.(mp3|wav|wave|ogg|oga|opus|m4a|aac|flac|weba|webm|mp4|aif|aiff)(\?|#|$)/i;
+        for (i = res.length - 1; i >= 0 && out.length < 12; i--) {
+          var r = res[i];
+          if (r.initiatorType === 'audio' || r.initiatorType === 'video' || ext.test(r.name)) add(r.name);
+        }
+      } catch (e) {}
+      return JSON.stringify(out.slice(0, 12));
+    },
+
     refreshStreams: function () {
-      for (var i = 0; i < S.taps.length; i++) {
+      for (var i = S.taps.length - 1; i >= 0; i--) {
         var t = S.taps[i];
         if (t.mode !== 'stream') continue;
+        if (t.el.__snagViaWebAudio) { S.detach(t.el); continue; }
         var tr = t.stream.getAudioTracks()[0] || null;
         if (tr !== t.track || (tr && tr.readyState === 'ended')) {
           try { if (t.src) t.src.disconnect(); } catch (e) {}
@@ -135,7 +174,11 @@
             t.stream = fresh;
             t.track = fresh.getAudioTracks()[0] || null;
             if (t.track) { t.src = S.ctx.createMediaStreamSource(new MediaStream([t.track])); t.src.connect(S.proc); }
-          } catch (e) { S.err = 'refresh: ' + e; }
+          } catch (e) {
+            S.err = 'refresh: ' + e;
+            // the file turned out to come from another site that doesn't allow listening
+            if (String(e).indexOf('cross-origin') >= 0 || (e && e.name === 'SecurityError')) { S.taps.splice(i, 1); S.block(t.el); }
+          }
         }
       }
     },
@@ -196,7 +239,8 @@
     drain: function () {
       if (S.armed) { S.scan(); if (S.ctx) S.refreshStreams(); }
       var out = { sr: S.ctx ? S.ctx.sampleRate : 0, n: 0, b64: '', lvl: S.level,
-                  st: S.ctx ? S.ctx.state : 'none', taps: S.activeTaps(), playing: S.playing(), err: S.err };
+                  st: S.ctx ? S.ctx.state : 'none', taps: S.activeTaps(), playing: S.playing(), err: S.err,
+                  blocked: S.blockedPlaying() };
       if (S.q.length) {
         var all = new Float32Array(S.qFrames * 2), off = 0;
         for (var i = 0; i < S.q.length; i++) { all.set(S.q[i], off); off += S.q[i].length; }
@@ -221,9 +265,16 @@
       var title = document.title || '';
       var meta = document.querySelector('meta[property="og:title"]');
       if (meta && meta.content) title = meta.content;
+      var media = [], playingMedia = [];
+      try { media = JSON.parse(S.mediaUrls()); } catch (e) {}
+      var els = S.mediaElements();
+      for (var i = 0; i < els.length; i++) {
+        var u = els[i].currentSrc || els[i].src || '';
+        if (!els[i].paused && !els[i].ended && u.indexOf('http') === 0 && playingMedia.indexOf(u) < 0) playingMedia.push(u);
+      }
       return JSON.stringify({ url: location.href, title: title,
                               time: v ? v.currentTime : -1, duration: v ? v.duration : -1,
-                              paused: v ? v.paused : true, hasMedia: !!v });
+                              paused: v ? v.paused : true, hasMedia: !!v, media: media, playingMedia: playingMedia });
     },
 
     pauseAll: function () {

@@ -1,4 +1,6 @@
 #include "EditOps.h"
+#include <thread>
+#include <vector>
 #include <juce_dsp/juce_dsp.h>
 #include <signalsmith-stretch/signalsmith-stretch.h>
 #include <numeric>
@@ -188,21 +190,102 @@ static AudioData::Ptr varispeed (const AudioData& a, double ratio)
     return AudioData::make (std::move (b), a.sampleRate);
 }
 
+namespace
+{
+    /** Kaiser-windowed sinc, tabulated. Symmetric, so resampling adds no delay at all - which
+        matters when stems are subtracted from the original (music = mix - vocals). */
+    struct SincTable
+    {
+        static constexpr int zeroCrossings = 24;   // each side, at full bandwidth
+        static constexpr int phases = 512;         // table resolution per input sample
+
+        SincTable (double cutoffIn) : cutoff (cutoffIn)
+        {
+            halfWidth = (double) zeroCrossings / cutoff;
+            const int size = (int) std::ceil (halfWidth * phases) + 2;
+            table.resize ((size_t) size);
+            const double beta = 8.6;   // ~ -90 dB side lobes
+            const double i0b = besselI0 (beta);
+            for (int k = 0; k < size; ++k)
+            {
+                const double x = (double) k / phases;
+                double v = 0.0;
+                if (x < halfWidth)
+                {
+                    const double r = x / halfWidth;
+                    const double w = besselI0 (beta * std::sqrt (juce::jmax (0.0, 1.0 - r * r))) / i0b;
+                    const double t = juce::MathConstants<double>::pi * cutoff * x;
+                    v = cutoff * (x < 1.0e-9 ? 1.0 : std::sin (t) / t) * w;
+                }
+                table[(size_t) k] = (float) v;
+            }
+        }
+
+        static double besselI0 (double x)
+        {
+            double sum = 1.0, term = 1.0;
+            for (int k = 1; k < 40; ++k)
+            {
+                term *= (x / (2.0 * k)) * (x / (2.0 * k));
+                sum += term;
+                if (term < 1.0e-12 * sum) break;
+            }
+            return sum;
+        }
+
+        float at (double distance) const noexcept   // kernel value at |distance| input samples
+        {
+            const double p = std::abs (distance) * phases;
+            const int i = (int) p;
+            if (i + 1 >= (int) table.size()) return 0.0f;
+            const float f = (float) (p - i);
+            return table[(size_t) i] + f * (table[(size_t) i + 1] - table[(size_t) i]);
+        }
+
+        double cutoff, halfWidth = 0.0;
+        std::vector<float> table;
+    };
+}
+
 AudioData::Ptr resample (const AudioData& a, double newRate)
 {
     if (newRate <= 0 || std::abs (newRate - a.sampleRate) < 0.5)
         return AudioData::make (copyOf (a), a.sampleRate);
 
-    const double ratio = a.sampleRate / newRate;
+    const double ratio = a.sampleRate / newRate;   // input samples per output sample
     const int n = a.getNumSamples();
-    const int outLen = juce::jmax (1, (int) std::floor ((double) n / ratio));
-    juce::AudioBuffer<float> b (a.getNumChannels(), outLen);
+    const int outLen = juce::jmax (1, juce::roundToInt ((double) n / ratio));
+    const int chans = a.getNumChannels();
+    juce::AudioBuffer<float> b (chans, outLen);
 
-    for (int c = 0; c < a.getNumChannels(); ++c)
+    // Low-pass just below the lower of the two Nyquist frequencies (no aliasing when going down).
+    const SincTable k (juce::jmin (1.0, 1.0 / ratio) * 0.96);
+    const int hw = (int) std::ceil (k.halfWidth);
+
+    auto render = [&] (int c)
     {
-        juce::LagrangeInterpolator interp;
-        interp.process (ratio, a.buffer.getReadPointer (c), b.getWritePointer (c), outLen, n, 0);
-    }
+        const float* x = a.buffer.getReadPointer (c);
+        float* y = b.getWritePointer (c);
+        for (int i = 0; i < outLen; ++i)
+        {
+            const double t = (double) i * ratio;           // exact position in the input
+            const int centre = (int) std::floor (t);
+            const int k0 = juce::jmax (0, centre - hw + 1), k1 = juce::jmin (n - 1, centre + hw);
+            float acc = 0.0f;
+            for (int j = k0; j <= k1; ++j)
+                acc += x[j] * k.at (t - (double) j);
+            y[i] = acc;
+        }
+    };
+
+    // channels in parallel - long files are resampled before AI separation
+    std::vector<std::thread> workers;
+    for (int c = 1; c < chans; ++c)
+        workers.emplace_back (render, c);
+    render (0);
+    for (auto& w : workers)
+        w.join();
+
     return AudioData::make (std::move (b), newRate);
 }
 

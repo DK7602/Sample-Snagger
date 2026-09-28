@@ -49,23 +49,33 @@ namespace snag::theme
                      bool goldEdge = false, float highlight = 0.06f);
 
     // ---- materials -----------------------------------------------------------------------
-    /** The brushed 24k gold faceplate texture, scaled to cover `area`. */
-    const juce::Image& goldPlateImage();
+    /** Black glass with gold and red glitter (the plate everything sits on, and the title's fill). */
+    const juce::Image& glitterImage();
+    /** Smooth polished 24k gold (the title panel). */
+    const juce::Image& goldSmoothImage();
 
-    /** Keeps a copy of the gold plate pre-scaled to a component's size, so repaints are a plain blit. */
-    class GoldPlate
+    /** Keeps a copy of a texture pre-scaled to an area, so repaints are a plain blit. */
+    class ScaledTexture
     {
     public:
-        void draw (juce::Graphics&, juce::Rectangle<int> area);
+        void draw (juce::Graphics&, juce::Rectangle<int> area, const juce::Image& source);
     private:
         juce::Image cache;
         juce::Rectangle<int> cachedArea;
         float cachedScale = 0.0f;
+        const juce::Image* cachedSource = nullptr;
     };
 
-    /** A window of polished black glass set into the gold plate (bevelled cut, reflections, glare).
-        `rim` draws the cut in the surrounding gold (needs ~3 px of space around r). */
+    /** A window of plain, polished black glass with a glowing gold rim (rim = false: no rim, e.g.
+        for a floating card that draws its own border). Rendered once per size and cached. */
     void glassWindow (juce::Graphics&, juce::Rectangle<float> r, float corner, float glare = 1.0f, bool rim = true);
+
+    /** Smooth gold panel with bevelled edges (the title bar). */
+    void goldPanel (juce::Graphics&, juce::Rectangle<float> r, float corner, ScaledTexture& texture);
+
+    /** Text in black glass with gold and red glitter, set into gold. */
+    void glitterText (juce::Graphics&, const juce::String& text, juce::Rectangle<float> r,
+                      const juce::Font& f, juce::Justification j = juce::Justification::centredLeft);
 
     /** Just the reflection on the glass - for drawing over a window's content. */
     void glassGlare (juce::Graphics&, juce::Rectangle<float> r, float corner, float strength = 1.0f);

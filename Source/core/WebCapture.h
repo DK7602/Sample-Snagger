@@ -1,8 +1,11 @@
 #pragma once
 
 #include "AudioData.h"
+#include "ProcessAudioCapture.h"
 #include <juce_events/juce_events.h>
 #include <functional>
+#include <mutex>
+#include <vector>
 
 namespace snag
 {
@@ -42,6 +45,15 @@ public:
     juce::String getContextState() const        { return contextState; }
     double getSampleRate() const noexcept       { return sampleRate; }
 
+    /** Windows: record the built-in browser's own processes instead of listening inside the page.
+        That hears every site, including players a page script may not listen to. `findProcess`
+        returns the browser's process id, or 0 while it isn't running yet. */
+    void setProcessSource (std::function<juce::uint32()> findProcess);
+    bool isUsingProcessAudio() const            { return processCapture != nullptr && processCapture->isRunning(); }
+
+    /** Playing media the page script may not listen to (cross-origin files) - use HQ SNAG for those. */
+    int getBlockedCount() const noexcept        { return blocked; }
+
     /** Must be called when the browser navigates to a new document. */
     void pageChanged()                          { injected = false; }
 
@@ -58,6 +70,7 @@ public:
 private:
     void timerCallback() override;
     void poll();
+    void pollProcessAudio();
 
     Evaluator evaluate;
     bool armed = false, recording = false, injected = false, waiting = false;
@@ -71,8 +84,14 @@ private:
 
     float level = 0.0f;
     bool mediaPlaying = false;
-    int numTaps = 0;
+    int numTaps = 0, blocked = 0;
     juce::String contextState;
+
+    std::function<juce::uint32()> findProcess;
+    juce::uint32 processRetryAt = 0;
+    std::mutex pendingLock;
+    std::vector<float> pending;                              // filled by the capture thread
+    std::unique_ptr<ProcessAudioCapture> processCapture;     // declared last: stops before `pending` goes
 
     JUCE_DECLARE_WEAK_REFERENCEABLE (WebCapture)
 };

@@ -20,7 +20,10 @@ public:
     void paint (juce::Graphics&) override;
 
     void updateGains();
-    void playStem (Clip::Ptr);
+    void toggleStem (Clip::Ptr);                    // play from the cursor, or stop if it's already playing
+    bool isStemPlaying (const Clip&) const;
+    void seekTo (double sample);                    // move the cursor; jumps there if something is playing
+    double getCursor() const { return cursor; }     // start / seek position, in source samples
     SnaggerProcessor& getProcessor() { return proc; }
     EditorContext& getContext()      { return ctx; }
     const juce::OwnedArray<StemLane>& getLanes() const { return lanes; }
@@ -31,8 +34,11 @@ private:
     void timerCallback() override;
     void rebuild();
     void separateNow();
-    void playMix();
+    void toggleMix();
+    void startMix();
+    void updatePlayButtons();
     Clip::Ptr sourceClip() const;
+    double cursor = 0.0;
 
     EditorContext& ctx;
     SnaggerProcessor& proc;

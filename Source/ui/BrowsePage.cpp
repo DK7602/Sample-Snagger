@@ -1,4 +1,5 @@
 #include "BrowsePage.h"
+#include "../core/ProcessAudioCapture.h"
 #include "../PluginProcessor.h"
 #include "../Actions.h"
 #include "../core/EditOps.h"
@@ -163,6 +164,13 @@ BrowsePage::BrowsePage (EditorContext& c) : ctx (c), proc (c.getProcessor())
     homeBtn.onClick = [this] { goTo (homeUrl); };
 
     capture = std::make_unique<WebCapture> ([this] (const juce::String& js, WebCapture::ResultCallback cb) { evaluate (js, std::move (cb)); });
+   #if JUCE_WINDOWS && JUCE_WEB_BROWSER
+    // Record the built-in browser's own audio output: works on every site, whatever its player does.
+    capture->setProcessSource ([this]() -> juce::uint32
+    {
+        return browser != nullptr ? ProcessAudioCapture::findWebViewBrowserProcess (paths::webDataDir()) : 0;
+    });
+   #endif
 
     // ---- capture bar ----
     liveRecBtn.setClickingTogglesState (false);
@@ -420,7 +428,9 @@ void BrowsePage::toggleLiveRec()
         auto audio = capture->stopRecording();
         if (audio == nullptr || edit::peakLevel (*audio) < 1.0e-4f)
         {
-            ctx.toast ("Nothing was captured. Make sure the video is playing (and not muted on the page), then try again.", true);
+            ctx.toast (capture->getBlockedCount() > 0
+                           ? "This site's player can't be recorded from the page. Hit HQ SNAG while it plays - it grabs the file itself."
+                           : "Nothing was captured. Make sure the video is playing (and not muted on the page), then try again.", true);
         }
         else
         {
@@ -466,7 +476,9 @@ void BrowsePage::grabLast (double seconds)
     auto audio = raw != nullptr ? trimSilence (*raw) : nullptr;
     if (audio == nullptr)
     {
-        ctx.toast ("Nothing has played yet. Press play on a video - Sample Snagger keeps the last 60 s so you can grab it after you hear it.", true);
+        ctx.toast (capture->getBlockedCount() > 0
+                       ? "This site's player can't be recorded from the page. Hit HQ SNAG while it plays - it grabs the file itself."
+                       : "Nothing has played yet. Press play on a video - Sample Snagger keeps the last 60 s so you can grab it after you hear it.", true);
         return;
     }
 
@@ -542,7 +554,19 @@ void BrowsePage::snagHq()
             if (t > in) out = t;              // IN set, no OUT: snag up to where the video is now
         }
         if (in < 0 && out > 0) in = 0.0;
-        actions::downloadUrl (proc, url, in, out, info.getProperty ("title", "").toString());
+
+        // the files the page is actually playing: HQ SNAG falls back to these on sites yt-dlp can't do
+        actions::MediaHints hints;
+        auto toArray = [] (const juce::var& v, juce::StringArray& out)
+        {
+            if (auto* arr = v.getArray())
+                for (auto& item : *arr)
+                    if (item.toString().startsWithIgnoreCase ("http"))
+                        out.addIfNotAlreadyThere (item.toString());
+        };
+        toArray (info.getProperty ("playingMedia", {}), hints.playing);
+        toArray (info.getProperty ("media", {}), hints.others);
+        actions::downloadUrl (proc, url, in, out, info.getProperty ("title", "").toString(), hints);
     });
 }
 
@@ -614,6 +638,11 @@ void BrowsePage::updateCaptureUi()
         info = "Browser not available in this build";
     else if (capture == nullptr || ! capture->isArmed())
         info = "Capture paused";
+    else if (capture->isUsingProcessAudio())
+        info = rec ? "Recording everything the browser plays"
+                   : "Listening to the browser - " + juce::String ((int) capture->getAvailableHindsight()) + "s in hindsight";
+    else if (capture->getBlockedCount() > 0)
+        info = "This player can't be recorded here - use HQ SNAG";
     else if (capture->getNumTaps() == 0)
         info = "Press play on a video to start listening";
     else if (capture->getContextState() == "suspended")
@@ -735,7 +764,6 @@ void BrowsePage::paint (juce::Graphics& g)
     // browser frame
     auto frame = browserArea.toFloat().expanded (1.0f);
     glassWindow (g, frame, 8.0f, 0.0f);
-    goldBorder (g, frame, 8.0f, 1.0f, 0.5f);
 
 #if ! JUCE_WEB_BROWSER
     auto inner = browserArea.toFloat().reduced (40.0f);

@@ -15,8 +15,16 @@ namespace snag::actions
     /** Non-empty (a friendly message) when the link is a site's home / search page, not a video or song. */
     juce::String whyNotAMediaPage (const juce::String& url);
 
+    /** Direct links to the audio / video files a page is playing (from the built-in browser).
+        HQ SNAG tries what's playing first, then the page itself, then anything else the page loaded -
+        so it also works on sites its downloader doesn't know. */
+    struct MediaHints
+    {
+        juce::StringArray playing, others;
+    };
+
     void downloadUrl (SnaggerProcessor&, const juce::String& url, double inSec = -1.0, double outSec = -1.0,
-                      const juce::String& titleHint = {});
+                      const juce::String& titleHint = {}, const MediaHints& hints = {});
 
     /** quick = built-in DSP; ai / aiMax / ai6 = built-in AI (no Python); python = optional Python engine. */
     enum class Engine { quick, ai, aiMax, ai6, python };

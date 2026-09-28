@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(SampleSnagger VERSION 1.1.1 LANGUAGES C CXX)
+project(SampleSnagger VERSION 1.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -135,7 +135,9 @@ juce_add_binary_data(SnaggerBinaryData
         Resources/Scripts/snagger_ai.py
         Resources/Scripts/webtap.js
         Resources/logo_256.png
-        Resources/gold_plate.jpg)
+        Resources/glitter_glass.jpg
+        Resources/gold_smooth.jpg
+        Resources/glitter_text.jpg)
 
 set(SNAGGER_SOURCES
     Source/PluginProcessor.cpp
@@ -150,6 +152,7 @@ set(SNAGGER_SOURCES
     Source/core/Tools.cpp
     Source/core/Jobs.cpp
     Source/core/WebCapture.cpp
+    Source/core/ProcessAudioCapture.cpp
     Source/core/AiStems.cpp
     Source/ui/Theme.cpp
     Source/ui/Widgets.cpp

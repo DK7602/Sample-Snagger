@@ -117,6 +117,9 @@ static juce::String friendlyDownloadError (const juce::StringArray& errors, int 
     const auto host = juce::URL (url).getDomain().toLowerCase();
     const bool youtube = host.endsWith ("youtube.com") || host.endsWith ("youtu.be");
 
+    if (all.containsIgnoreCase ("HTTP Error 404"))
+        return "That link wasn't found (404). Check the address, or open the video page itself.";
+
     // yt-dlp has no extractor for this site and its generic fallback got turned away
     if (! youtube && (all.containsIgnoreCase ("[generic]") || all.containsIgnoreCase ("Unsupported URL")))
         return "HQ Snag can't download from this site. Play the sound here and use LIVE REC or GRAB LAST instead.";
@@ -126,8 +129,6 @@ static juce::String friendlyDownloadError (const juce::StringArray& errors, int 
         return "YouTube asked for a sign-in check. In Settings, choose your browser under 'Use cookies from', or use LIVE REC.";
     if (all.containsIgnoreCase ("Unsupported URL"))
         return "HQ Snag doesn't recognise this page. Open the video itself, or use LIVE REC to record what's playing.";
-    if (all.containsIgnoreCase ("HTTP Error 404"))
-        return "That link wasn't found (404). Check the address, or open the video page itself.";
     if (all.containsIgnoreCase ("Private video") || all.containsIgnoreCase ("unavailable"))
         return "That video is private or unavailable.";
     if (all.containsIgnoreCase ("HTTP Error 403") || all.containsIgnoreCase ("Requested format is not available")
@@ -157,7 +158,8 @@ juce::String whyNotAMediaPage (const juce::String& url)
     return {};
 }
 
-void downloadUrl (SnaggerProcessor& p, const juce::String& urlIn, double inSec, double outSec, const juce::String& titleHint)
+void downloadUrl (SnaggerProcessor& p, const juce::String& urlIn, double inSec, double outSec, const juce::String& titleHint,
+                  const MediaHints& hints)
 {
     auto url = urlIn.trim();
     if (! url.startsWithIgnoreCase ("http"))
@@ -165,7 +167,7 @@ void downloadUrl (SnaggerProcessor& p, const juce::String& urlIn, double inSec, 
         notify (p, "Open a video page first (or paste a link into the address bar).", true);
         return;
     }
-    if (auto why = whyNotAMediaPage (url); why.isNotEmpty())
+    if (auto why = whyNotAMediaPage (url); why.isNotEmpty() && hints.playing.isEmpty())
     {
         notify (p, why, true);
         return;
@@ -186,71 +188,128 @@ void downloadUrl (SnaggerProcessor& p, const juce::String& urlIn, double inSec, 
     const auto cookies = p.getSettings().getCookiesBrowser();
     const bool section = inSec >= 0.0 && outSec > inSec;
 
+    // What to try, in order. On sites yt-dlp knows well, the page itself comes first (best quality,
+    // proper titles); elsewhere the file that's playing right now wins; then anything else it loaded.
+    const auto host = juce::URL (url).getDomain().toLowerCase();
+    const bool knownSite = [&host]
+    {
+        for (auto* d : { "youtube.com", "youtu.be", "soundcloud.com", "tiktok.com", "instagram.com", "vimeo.com",
+                         "bandcamp.com", "twitch.tv", "x.com", "twitter.com", "facebook.com", "dailymotion.com",
+                         "reddit.com", "mixcloud.com", "audiomack.com", "bilibili.com" })
+            if (host == d || host.endsWith (juce::String (".") + d))
+                return true;
+        return false;
+    }();
+
+    struct Attempt { juce::String target; bool direct; };
+    std::vector<Attempt> attempts;
+    const bool pageOk = whyNotAMediaPage (url).isEmpty();
+    if (knownSite && pageOk)
+        attempts.push_back ({ url, false });
+    for (auto& u : hints.playing)
+        attempts.push_back ({ u, true });
+    if (! knownSite && pageOk)
+        attempts.push_back ({ url, false });
+    for (auto& u : hints.others)
+        if (! hints.playing.contains (u) && attempts.size() < 6)
+            attempts.push_back ({ u, true });
+
     p.jobs.start (section ? "Snagging HQ section" : "Snagging HQ audio",
                   [=] (Job& job)
     {
         auto dir = paths::tempDir().getChildFile ("dl_" + juce::String::toHexString (juce::Random::getSystemRandom().nextInt64()));
         dir.createDirectory();
 
-        juce::StringArray args { ytdlp.getFullPathName(),
-                                 "--no-playlist", "--playlist-items", "1",   // a playlist / channel link: just its first item
-                                 "--newline", "--progress", "--no-simulate", "--no-mtime",
-                                 "--color", "never", "--encoding", "utf-8",
-                                 "-f", "bestaudio/best", "-x", "--audio-format", "wav",
-                                 "--ffmpeg-location", ffmpeg.getFullPathName(),
-                                 "-o", dir.getChildFile ("snag.%(ext)s").getFullPathName(),
-                                 "--print", "before_dl:SNAGTITLE %(title)s" };
-        if (deno.existsAsFile())
-            args.addArray ({ "--js-runtimes", "deno:" + deno.getFullPathName() });
-        if (cookies.isNotEmpty())
-            args.addArray ({ "--cookies-from-browser", cookies });
-        if (section)
-            args.addArray ({ "--download-sections", "*" + juce::String (inSec, 3) + "-" + juce::String (outSec, 3),
-                             "--force-keyframes-at-cuts" });
-        args.add (url);
-
         juce::String title = titleHint;
-        juce::StringArray errors;
-        job.setStatus ("Connecting");
+        juce::StringArray pageErrors;
+        int code = -1;
+        juce::Array<juce::File> wavs;
 
-        const int code = job.runner.run (args, [&] (const juce::String& line)
+        for (size_t a = 0; a < attempts.size(); ++a)
         {
-            if (line.startsWith ("SNAGTITLE "))
+            const auto& attempt = attempts[a];
+            juce::StringArray args { ytdlp.getFullPathName(),
+                                     "--no-playlist", "--playlist-items", "1",   // a playlist / channel link: just its first item
+                                     "--newline", "--progress", "--no-simulate", "--no-mtime",
+                                     "--color", "never", "--encoding", "utf-8",
+                                     "-f", "bestaudio/best", "-x", "--audio-format", "wav",
+                                     "--ffmpeg-location", ffmpeg.getFullPathName(),
+                                     "-o", dir.getChildFile ("snag.%(ext)s").getFullPathName(),
+                                     "--print", "before_dl:SNAGTITLE %(title)s" };
+            if (deno.existsAsFile())
+                args.addArray ({ "--js-runtimes", "deno:" + deno.getFullPathName() });
+            if (cookies.isNotEmpty())
+                args.addArray ({ "--cookies-from-browser", cookies });
+            if (attempt.direct)
+                args.addArray ({ "--referer", url, "--force-generic-extractor" });   // fetch the file as the page did
+            if (section)
+                args.addArray ({ "--download-sections", "*" + juce::String (inSec, 3) + "-" + juce::String (outSec, 3),
+                                 "--force-keyframes-at-cuts" });
+            args.add (attempt.target);
+
+            juce::StringArray errors;
+            juce::String attemptTitle;
+            job.setStatus (attempt.direct ? "Grabbing the file that's playing" : "Connecting");
+
+            code = job.runner.run (args, [&] (const juce::String& line)
             {
-                title = line.substring (10).trim();
-                job.setStatus (niceTitle (title));
-            }
-            else if (line.startsWith ("[download]") && line.contains ("%"))
-            {
-                auto pct = line.fromFirstOccurrenceOf ("]", false, false).trim().upToFirstOccurrenceOf ("%", false, false).trim();
-                if (pct.containsOnly ("0123456789."))
+                if (line.startsWith ("SNAGTITLE "))
                 {
-                    job.setProgress (0.85f * pct.getFloatValue() / 100.0f);
-                    job.setStatus ("Downloading " + pct + "%");
+                    attemptTitle = line.substring (10).trim();
+                    job.setStatus (niceTitle (attemptTitle));
                 }
-            }
-            else if (line.startsWith ("[ExtractAudio]") || line.startsWith ("[ffmpeg]"))
-            {
-                job.setProgress (0.9f);
-                job.setStatus ("Converting to WAV");
-            }
-            else if (line.startsWith ("ERROR") || line.containsIgnoreCase ("error:"))
-            {
-                errors.add (line);
-            }
-        }, 45 * 60 * 1000, job.cancelCheck());
+                else if (line.startsWith ("[download]") && line.contains ("%"))
+                {
+                    auto pct = line.fromFirstOccurrenceOf ("]", false, false).trim().upToFirstOccurrenceOf ("%", false, false).trim();
+                    if (pct.containsOnly ("0123456789."))
+                    {
+                        job.setProgress (0.85f * pct.getFloatValue() / 100.0f);
+                        job.setStatus ("Downloading " + pct + "%");
+                    }
+                }
+                else if (line.startsWith ("[ExtractAudio]") || line.startsWith ("[ffmpeg]"))
+                {
+                    job.setProgress (0.9f);
+                    job.setStatus ("Converting to WAV");
+                }
+                else if (line.startsWith ("ERROR") || line.containsIgnoreCase ("error:"))
+                {
+                    errors.add (line);
+                }
+            }, 45 * 60 * 1000, job.cancelCheck());
 
-        if (code == -2 || job.isCancelled())
-        {
-            dir.deleteRecursively();
-            return;
+            if (code == -2 || job.isCancelled())
+            {
+                dir.deleteRecursively();
+                return;
+            }
+
+            wavs = dir.findChildFiles (juce::File::findFiles, false, "*.wav");
+            if (code == 0 && ! wavs.isEmpty())
+            {
+                // a direct file's "title" is its file name - the page title (or a tidied file name) reads better
+                if (attempt.direct)
+                {
+                    auto fileName = juce::URL::removeEscapeChars (juce::URL (attempt.target).getFileName())
+                                        .upToLastOccurrenceOf (".", false, false).replaceCharacters ("_-+", "   ").trim();
+                    title = fileName.length() >= 4 ? fileName : (titleHint.isNotEmpty() ? titleHint : attemptTitle);
+                }
+                else if (attemptTitle.isNotEmpty())
+                    title = attemptTitle;
+                break;
+            }
+
+            if (! attempt.direct)
+                pageErrors = errors;
+            for (auto& f : dir.findChildFiles (juce::File::findFiles, false))
+                f.deleteFile();   // leftovers of a failed attempt
+            wavs.clear();
         }
 
-        auto wavs = dir.findChildFiles (juce::File::findFiles, false, "*.wav");
-        if (code != 0 || wavs.isEmpty())
+        if (wavs.isEmpty())
         {
             dir.deleteRecursively();
-            job.fail (friendlyDownloadError (errors, code, url));
+            job.fail (friendlyDownloadError (pageErrors, code, url));
             return;
         }
 

@@ -7,7 +7,7 @@
 using namespace snag;
 using namespace snag::theme;
 
-static constexpr int headerHeight = 66;
+static constexpr int headerHeight = 78;
 static constexpr int trayHeight = 118;
 static int openEditors = 0;   // message thread only
 
@@ -237,59 +237,104 @@ void SnaggerEditor::resized()
 
 void SnaggerEditor::layoutHeader (juce::Rectangle<int> r)
 {
-    r = r.reduced (18, 0);
-    logoArea = r.removeFromLeft (290);
+    headerPanel = r.reduced (10, 0).withTrimmedTop (10).withTrimmedBottom (6);
+    r = headerPanel.reduced (14, 0);
+    logoArea = r.removeFromLeft (300);
 
     gearBtn.setBounds (r.removeFromRight (40).withSizeKeepingCentre (38, 38));
-    r.removeFromRight (16);
+    r.removeFromRight (14);
 
     // status display: job HUD + output meter behind one glass window
     // the tabs get room for their full names first; the status display takes what's left
     auto hudBox = r.removeFromRight (juce::jlimit (240, 438, r.getWidth() - 4 * 112 - 36));
-    hudGlass = hudBox.withSizeKeepingCentre (hudBox.getWidth(), 44);
+    hudGlass = hudBox.withSizeKeepingCentre (hudBox.getWidth(), 42);
     auto inner = hudBox.reduced (12, 0);
     outMeter.setBounds (inner.removeFromRight (64).withSizeKeepingCentre (64, 5));
     inner.removeFromRight (12);
-    hudArea = inner;
+    hudArea = inner.withSizeKeepingCentre (inner.getWidth(), 42);
     cancelBtn.setBounds (hudArea.withLeft (hudArea.getRight() - 26).withSizeKeepingCentre (22, 22));
     r.removeFromRight (12);
 
     const int tabW = juce::jmin (130, (r.getWidth() - 24) / 4);
-    auto tabs = r.withSizeKeepingCentre (tabW * 4, headerHeight);
-    tabsArea = tabs.expanded (8, 0).reduced (0, 10);
+    auto tabs = r.withSizeKeepingCentre (tabW * 4, 42);
+    tabsArea = tabs.expanded (8, 0);
     for (auto* b : tabButtons)
-        b->setBounds (tabs.removeFromLeft (tabW).reduced (4, 12));
+        b->setBounds (tabs.removeFromLeft (tabW).reduced (4, 1));
+}
+
+void SnaggerEditor::renderPlate (float scale)
+{
+    const auto size = getLocalBounds();
+    plateCache = juce::Image (juce::Image::ARGB, juce::jmax (1, juce::roundToInt ((float) size.getWidth() * scale)),
+                              juce::jmax (1, juce::roundToInt ((float) size.getHeight() * scale)), true);
+    plateScale = scale;
+    juce::Graphics g (plateCache);
+    g.addTransform (juce::AffineTransform::scale (scale));
+
+    // black glass full of gold and red glitter, with rounded corners and a glowing gold rim
+    g.fillAll (juce::Colours::black);
+    const auto plate = size.toFloat().reduced (2.0f);
+    const float corner = 18.0f;
+    juce::Path shape;
+    shape.addRoundedRectangle (plate, corner);
+    {
+        juce::Graphics::ScopedSaveState save (g);
+        g.reduceClipRegion (shape);
+        g.setImageResamplingQuality (juce::Graphics::highResamplingQuality);
+        g.drawImage (glitterImage(), size.toFloat(), juce::RectanglePlacement::fillDestination);
+
+        // polished glass edge catching the light
+        for (int i = 0; i < 10; ++i)
+        {
+            const float inset = 2.0f + (float) i * 1.6f;
+            g.setColour (juce::Colour (0xffece6dc).withAlpha (0.07f * std::pow (1.0f - (float) i / 10.0f, 1.6f)));
+            g.drawRoundedRectangle (plate.reduced (inset), corner - inset * 0.8f, 1.6f);
+        }
+        g.setGradientFill (juce::ColourGradient (juce::Colours::white.withAlpha (0.10f), plate.getX(), plate.getBottom(),
+                                                 juce::Colours::white.withAlpha (0.0f), plate.getX() + 220.0f, plate.getBottom(), true));
+        g.fillRect (plate);
+    }
+
+    juce::Path rim;
+    rim.addRoundedRectangle (plate.reduced (0.8f), corner);
+    juce::Path stroked;
+    juce::PathStrokeType (2.0f).createStrokedPath (stroked, rim);
+    neonGlow (g, stroked, col::gold, 8.0f, 0.6f);
+    juce::ColourGradient rg (juce::Colour (0xfffff0c0), plate.getX(), plate.getY(), col::goldDark, plate.getRight(), plate.getBottom(), false);
+    rg.addColour (0.3, col::goldLight);
+    rg.addColour (0.6, col::gold);
+    g.setGradientFill (rg);
+    g.fillPath (stroked);
 }
 
 void SnaggerEditor::paint (juce::Graphics& g)
 {
-    // the whole instrument is a brushed 24k gold plate; everything else is set into it
-    goldPlate.draw (g, getLocalBounds());
+    const float scale = juce::jlimit (1.0f, 3.0f, g.getInternalContext().getPhysicalPixelScaleFactor());
+    if (plateCache.isNull() || ! juce::approximatelyEqual (plateScale, scale)
+        || plateCache.getWidth() != juce::roundToInt ((float) getWidth() * scale)
+        || plateCache.getHeight() != juce::roundToInt ((float) getHeight() * scale))
+        renderPlate (scale);
+    g.setOpacity (1.0f);
+    g.drawImage (plateCache, getLocalBounds().toFloat());
 
-    // engraved groove under the header
-    auto h = headerArea.toFloat();
-    g.setColour (juce::Colour (0xff1c1102).withAlpha (0.6f));
-    g.fillRect (h.getX(), h.getBottom() - 2.0f, h.getWidth(), 1.0f);
-    g.setColour (juce::Colour (0xfffff4cf).withAlpha (0.5f));
-    g.fillRect (h.getX(), h.getBottom() - 1.0f, h.getWidth(), 1.0f);
+    // title panel: smooth polished gold
+    goldPanel (g, headerPanel.toFloat(), 14.0f, goldTexture);
 
-    // logo badge with a soft shadow on the plate, engraved name plate
+    // logo badge + SAMPLE SNAGGER in glittering black glass
     auto logo = logoArea.toFloat();
-    auto badge = logo.removeFromLeft (46.0f).withSizeKeepingCentre (44.0f, 44.0f);
+    auto badge = logo.removeFromLeft (48.0f).withSizeKeepingCentre (46.0f, 46.0f);
     for (int i = 5; i >= 1; --i)
     {
-        g.setColour (juce::Colours::black.withAlpha (0.08f));
+        g.setColour (juce::Colours::black.withAlpha (0.10f));
         g.fillEllipse (badge.reduced (1.5f).expanded ((float) i * 0.9f).translated (0.0f, (float) i * 0.8f));
     }
     drawLogoMark (g, badge);
     logo.removeFromLeft (12.0f);
-    engravedText (g, "SAMPLE SNAGGER", logo.withTrimmedBottom (20.0f).withTrimmedTop (12.0f), display (22.0f, true));
-    engravedText (g, "CAPTURE  -  CHOP  -  SEPARATE", logo.withTrimmedTop (38.0f).withHeight (14.0f),
-                  ui (9.0f, true).withExtraKerningFactor (0.42f));
+    glitterText (g, "SAMPLE SNAGGER", logo, display (32.0f, true));
 
     // the tab bar and the status display are black glass windows
-    glassWindow (g, tabsArea.toFloat(), 10.0f, 0.8f);
-    glassWindow (g, hudGlass.toFloat(), 9.0f, 0.6f);
+    glassWindow (g, tabsArea.toFloat(), 12.0f, 0.8f);
+    glassWindow (g, hudGlass.toFloat(), 10.0f, 0.6f);
 
     // job HUD
     auto hud = hudArea.toFloat();

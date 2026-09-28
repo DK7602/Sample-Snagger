@@ -9,6 +9,67 @@ WebCapture::WebCapture (Evaluator e) : evaluate (std::move (e)) {}
 WebCapture::~WebCapture()
 {
     stopTimer();
+    processCapture.reset();
+}
+
+void WebCapture::setProcessSource (std::function<juce::uint32()> finder)
+{
+    findProcess = std::move (finder);
+    processRetryAt = 0;
+}
+
+void WebCapture::pollProcessAudio()
+{
+    if (! findProcess || ! ProcessAudioCapture::isSupported())
+        return;
+
+    if (! (armed || recording))
+    {
+        processCapture.reset();   // nothing to listen for
+        return;
+    }
+
+    if (processCapture == nullptr || ! processCapture->isRunning())
+    {
+        const auto now = juce::Time::getMillisecondCounter();
+        if (now < processRetryAt)
+            return;
+        processRetryAt = now + 4000;
+
+        const auto pid = findProcess();
+        if (pid == 0)
+            return;
+
+        auto cap = std::make_unique<ProcessAudioCapture>();
+        const bool ok = cap->start (pid, [this] (const float* frames, int n)
+        {
+            const std::lock_guard<std::mutex> lock (pendingLock);
+            if (pending.size() < (size_t) (48000 * 2 * 20))   // never hold more than 20 s
+                pending.insert (pending.end(), frames, frames + (size_t) n * 2);
+        });
+        if (ok)
+            processCapture = std::move (cap);
+        else
+        {
+            DBG ("Browser process audio unavailable: " << cap->getLastError());
+            processRetryAt = now + 30000;   // e.g. Windows 10: use the page script instead, check again later
+            return;
+        }
+    }
+
+    std::vector<float> take;
+    {
+        const std::lock_guard<std::mutex> lock (pendingLock);
+        take.swap (pending);
+    }
+    if (take.empty())
+        return;
+
+    float peak = 0.0f;
+    for (auto v : take)
+        peak = juce::jmax (peak, std::abs (v));
+    level = juce::jmax (peak, level * 0.7f);
+    pushFrames (take.data(), (int) (take.size() / 2), processCapture->getSampleRate());
 }
 
 juce::String WebCapture::getTapScript()
@@ -26,7 +87,10 @@ void WebCapture::setArmed (bool shouldListen)
     if (armed || recording)
         startTimerHz (8);
     else
+    {
         stopTimer();
+        processCapture.reset();
+    }
 
     if (onStateChanged) onStateChanged();
 }
@@ -142,10 +206,16 @@ void WebCapture::ingest (const juce::var& result)
     if (! obj.isObject())
         return;
 
-    level        = (float) (double) obj.getProperty ("lvl", 0.0);
+    const bool viaProcess = isUsingProcessAudio();
+    if (! viaProcess)
+        level    = (float) (double) obj.getProperty ("lvl", 0.0);
     mediaPlaying = (bool) obj.getProperty ("playing", false);
     numTaps      = (int) obj.getProperty ("taps", 0);
+    blocked      = (int) obj.getProperty ("blocked", 0);
     contextState = obj.getProperty ("st", "").toString();
+
+    if (viaProcess)
+        return;   // the browser's own audio is recorded directly - the page's copy isn't needed
 
     const int n = (int) obj.getProperty ("n", 0);
     const double sr = (double) obj.getProperty ("sr", 0.0);
@@ -166,6 +236,7 @@ void WebCapture::ingest (const juce::var& result)
 
 void WebCapture::timerCallback()
 {
+    pollProcessAudio();
     poll();
     if (onStateChanged) onStateChanged();
 }

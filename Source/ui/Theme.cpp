@@ -1,6 +1,8 @@
 #include "Theme.h"
 #include <juce_audio_basics/juce_audio_basics.h>
 #include "SnaggerBinaryData.h"
+#include <deque>
+#include <map>
 
 namespace snag::theme
 {
@@ -135,18 +137,24 @@ namespace
     }
 }
 
-const juce::Image& goldPlateImage()
+const juce::Image& glitterImage()
 {
-    static const juce::Image img = juce::ImageCache::getFromMemory (SnaggerBinary::gold_plate_jpg, SnaggerBinary::gold_plate_jpgSize);
+    static const juce::Image img = juce::ImageCache::getFromMemory (SnaggerBinary::glitter_glass_jpg, SnaggerBinary::glitter_glass_jpgSize);
     return img;
 }
 
-void GoldPlate::draw (juce::Graphics& g, juce::Rectangle<int> area)
+const juce::Image& goldSmoothImage()
+{
+    static const juce::Image img = juce::ImageCache::getFromMemory (SnaggerBinary::gold_smooth_jpg, SnaggerBinary::gold_smooth_jpgSize);
+    return img;
+}
+
+void ScaledTexture::draw (juce::Graphics& g, juce::Rectangle<int> area, const juce::Image& src)
 {
     const float scale = juce::jlimit (1.0f, 3.0f, g.getInternalContext().getPhysicalPixelScaleFactor());
-    if (cache.isNull() || cachedArea != area || ! juce::approximatelyEqual (cachedScale, scale))
+    if (cache.isNull() || cachedArea.getWidth() != area.getWidth() || cachedArea.getHeight() != area.getHeight()
+        || ! juce::approximatelyEqual (cachedScale, scale) || cachedSource != &src)
     {
-        const auto& src = goldPlateImage();
         cache = juce::Image (juce::Image::RGB, juce::jmax (1, juce::roundToInt ((float) area.getWidth() * scale)),
                              juce::jmax (1, juce::roundToInt ((float) area.getHeight() * scale)), false);
         juce::Graphics cg (cache);
@@ -154,105 +162,253 @@ void GoldPlate::draw (juce::Graphics& g, juce::Rectangle<int> area)
         if (src.isValid())
             cg.drawImage (src, cache.getBounds().toFloat(), juce::RectanglePlacement::fillDestination);
         else
-        {
-            cg.setGradientFill (goldGradient (cache.getBounds().toFloat(), false));
-            cg.fillAll();
-        }
+            cg.fillAll (juce::Colours::black);
         cachedArea = area;
         cachedScale = scale;
+        cachedSource = &src;
     }
-    g.setOpacity (1.0f);
+    g.setOpacity (1.0f);   // drawImage uses the current colour's alpha
     g.drawImage (cache, area.toFloat());
 }
 
 void glassGlare (juce::Graphics& g, juce::Rectangle<float> r, float corner, float glare)
 {
+    // plain glass: only a faint reflection along the top
     juce::Path shape;
     shape.addRoundedRectangle (r, corner);
     juce::Graphics::ScopedSaveState save (g);
     g.reduceClipRegion (shape);
+    const float h = juce::jmin (r.getHeight() * 0.4f, 60.0f);
+    g.setGradientFill (juce::ColourGradient (juce::Colours::white.withAlpha (0.045f * glare), 0.0f, r.getY(),
+                                             juce::Colours::white.withAlpha (0.0f), 0.0f, r.getY() + h, false));
+    g.fillRect (r.withHeight (h));
+}
 
-    // a broad, crisp-edged reflection across the upper left, like a window in polished glass
-    const float h = r.getHeight();
-    const float edgeTop = r.getX() + juce::jmin (r.getWidth() * 0.46f, h * 2.2f + 180.0f);
-    const float slant = h * 0.55f;
-    juce::Path wedge;
-    wedge.startNewSubPath (r.getX(), r.getY());
-    wedge.lineTo (edgeTop, r.getY());
-    wedge.lineTo (edgeTop - slant, r.getBottom());
-    wedge.lineTo (r.getX(), r.getBottom());
-    wedge.closeSubPath();
-    juce::ColourGradient gl (juce::Colours::white.withAlpha (0.075f * glare), r.getX(), r.getY(),
-                             juce::Colours::white.withAlpha (0.022f * glare), r.getX(), r.getBottom(), false);
-    g.setGradientFill (gl);
-    g.fillPath (wedge);
+namespace
+{
+    /** A soft star-like highlight where light catches the gold rim. */
+    void rimFlare (juce::Graphics& g, juce::Point<float> c, float size, bool vertical)
+    {
+        auto core = vertical ? juce::Rectangle<float> (size * 0.28f, size * 1.6f).withCentre (c)
+                             : juce::Rectangle<float> (size * 1.6f, size * 0.28f).withCentre (c);
+        g.setGradientFill (juce::ColourGradient (juce::Colour (0xfffff1c8).withAlpha (0.95f), c.x, c.y,
+                                                 col::gold.withAlpha (0.0f), c.x + size, c.y, true));
+        g.fillEllipse (juce::Rectangle<float> (size * 2.0f, size * 2.0f).withCentre (c));
+        g.setColour (juce::Colours::white.withAlpha (0.9f));
+        g.fillEllipse (core);
+    }
 
-    // a thin secondary streak
-    juce::Path streak;
-    const float s0 = edgeTop + juce::jmin (40.0f, h * 0.35f);
-    const float sw = juce::jmin (16.0f, 4.0f + h * 0.08f);
-    streak.startNewSubPath (s0, r.getY());
-    streak.lineTo (s0 + sw, r.getY());
-    streak.lineTo (s0 + sw - slant, r.getBottom());
-    streak.lineTo (s0 - slant, r.getBottom());
-    streak.closeSubPath();
-    g.setColour (juce::Colours::white.withAlpha (0.028f * glare));
-    g.fillPath (streak);
+    void renderGlassWindow (juce::Graphics& g, juce::Rectangle<float> r, float corner, float glare, bool rim)
+    {
+        juce::Path shape;
+        shape.addRoundedRectangle (r, corner);
+
+        if (rim)
+        {
+            // soft shadow onto the glitter plate
+            for (int i = 4; i >= 1; --i)
+            {
+                g.setColour (juce::Colours::black.withAlpha (0.16f));
+                g.fillRoundedRectangle (r.expanded ((float) i * 1.1f).translated (0.0f, (float) i * 0.7f), corner + (float) i);
+            }
+        }
+
+        // the glass: black, a breath lighter at the top
+        juce::ColourGradient body (juce::Colour (0xff0d0d10), 0.0f, r.getY(), juce::Colour (0xff020203), 0.0f,
+                                   r.getY() + juce::jmin (r.getHeight(), 140.0f), false);
+        g.setGradientFill (body);
+        g.fillPath (shape);
+
+        {
+            juce::Graphics::ScopedSaveState save (g);
+            g.reduceClipRegion (shape);
+
+            // the polished bevel inside the rim catches light all the way round...
+            const int rings = 8;
+            for (int i = 0; i < rings; ++i)
+            {
+                const float a = 0.085f * std::pow (1.0f - (float) i / (float) rings, 1.6f);
+                const float inset = 1.8f + (float) i * 1.35f;
+                g.setColour (juce::Colour (0xffece6dc).withAlpha (a));
+                g.drawRoundedRectangle (r.reduced (inset), juce::jmax (0.0f, corner - inset), 1.4f);
+            }
+
+            // ...most of all in the lower-left and upper-right corners
+            const float reach = juce::jmin (r.getWidth(), r.getHeight()) * 0.55f + 10.0f;
+            auto cornerGlow = [&] (juce::Point<float> p, float alpha)
+            {
+                g.setGradientFill (juce::ColourGradient (juce::Colours::white.withAlpha (alpha), p.x, p.y,
+                                                         juce::Colours::white.withAlpha (0.0f), p.x + reach, p.y, true));
+                g.fillRect (r);
+            };
+            cornerGlow (r.getBottomLeft().translated (2.0f, -2.0f), 0.10f);
+            cornerGlow (r.getTopRight().translated (-2.0f, 2.0f), 0.07f);
+            cornerGlow (r.getTopLeft().translated (2.0f, 2.0f), 0.04f);
+
+            if (glare > 0.0f)
+            {
+                const float h = juce::jmin (r.getHeight() * 0.4f, 60.0f);
+                g.setGradientFill (juce::ColourGradient (juce::Colours::white.withAlpha (0.04f * glare), 0.0f, r.getY(),
+                                                         juce::Colours::white.withAlpha (0.0f), 0.0f, r.getY() + h, false));
+                g.fillRect (r.withHeight (h));
+            }
+        }
+        fillGrain (g, shape, 0.2f);
+
+        if (! rim)
+        {
+            g.setColour (juce::Colours::black.withAlpha (0.9f));
+            g.drawRoundedRectangle (r.reduced (0.25f), corner, 0.8f);
+            return;
+        }
+
+        // glowing gold rim
+        juce::Path rimPath;
+        rimPath.addRoundedRectangle (r.reduced (0.6f), corner);
+        juce::Path stroked;
+        juce::PathStrokeType (1.7f).createStrokedPath (stroked, rimPath);
+        neonGlow (g, stroked, col::gold, 7.0f, 0.55f);
+        juce::ColourGradient rg (juce::Colour (0xfffff0c0), r.getX(), r.getY(), col::goldDark, r.getRight(), r.getBottom(), false);
+        rg.addColour (0.25, col::goldLight);
+        rg.addColour (0.55, col::gold);
+        rg.addColour (0.8, col::goldLight.interpolatedWith (col::gold, 0.5f));
+        g.setGradientFill (rg);
+        g.fillPath (stroked);
+        {
+            // brighter along the top of the rim, where the light comes from
+            juce::Graphics::ScopedSaveState save (g);
+            g.reduceClipRegion (r.expanded (2.0f).withHeight (r.getHeight() * 0.35f + 2.0f).getSmallestIntegerContainer());
+            g.setColour (juce::Colour (0xfffff6dc).withAlpha (0.55f));
+            g.drawRoundedRectangle (r.reduced (0.6f), corner, 0.6f);
+        }
+
+        // light catching the rim
+        const float fs = juce::jlimit (3.0f, 9.0f, juce::jmin (r.getWidth(), r.getHeight()) * 0.06f);
+        rimFlare (g, { r.getX() + 0.6f, r.getY() + r.getHeight() * 0.38f }, fs, true);
+        rimFlare (g, { r.getRight() - 0.6f, r.getY() + r.getHeight() * 0.62f }, fs, true);
+        rimFlare (g, { r.getX() + corner * 0.3f + 1.0f, r.getBottom() - corner * 0.3f - 1.0f }, fs * 0.8f, false);
+        rimFlare (g, { r.getRight() - corner * 0.3f - 1.0f, r.getY() + corner * 0.3f + 1.0f }, fs * 0.8f, false);
+    }
+
+    /** Glass windows are drawn a lot (the waveform repaints 30x a second), so each size is rendered
+        once into an image and reused. */
+    struct GlassCache
+    {
+        std::map<juce::String, juce::Image> images;
+        std::deque<juce::String> order;
+    };
+
+    GlassCache& glassCache()
+    {
+        static GlassCache c;
+        return c;
+    }
 }
 
 void glassWindow (juce::Graphics& g, juce::Rectangle<float> r, float corner, float glare, bool rim)
 {
-    const juce::Colour shadowGold (0xff1f1403), lipGold (0xfffff0bf);
+    if (r.getWidth() < 2.0f || r.getHeight() < 2.0f)
+        return;
 
-    if (rim)
+    const float scale = juce::jlimit (1.0f, 3.0f, g.getInternalContext().getPhysicalPixelScaleFactor());
+    const float margin = rim ? 12.0f : 1.0f;
+    const auto key = juce::String (r.getWidth(), 1) + "x" + juce::String (r.getHeight(), 1) + "c" + juce::String (corner, 1)
+                   + "g" + juce::String (glare, 2) + (rim ? "r" : "n") + "s" + juce::String (scale, 2);
+
+    auto& cache = glassCache();
+    auto it = cache.images.find (key);
+    if (it == cache.images.end())
     {
-        // the cut in the gold: the upper wall faces away from the light, the lower lip catches it
-        auto cut = r.expanded (2.5f);
-        juce::ColourGradient cg (shadowGold.withAlpha (0.85f), 0.0f, cut.getY(), lipGold.withAlpha (0.75f), 0.0f, cut.getBottom(), false);
-        cg.addColour (juce::jlimit (0.05, 0.95, 1.0 - 10.0 / juce::jmax (12.0, (double) cut.getHeight())), shadowGold.withAlpha (0.55f));
-        g.setGradientFill (cg);
-        g.fillRoundedRectangle (cut, corner + 2.5f);
+        const int w = juce::roundToInt ((r.getWidth() + margin * 2.0f) * scale);
+        const int h = juce::roundToInt ((r.getHeight() + margin * 2.0f) * scale);
+        if ((juce::int64) w * h > 12000000)   // absurdly large: draw directly
+        {
+            renderGlassWindow (g, r, corner, glare, rim);
+            return;
+        }
+        juce::Image img (juce::Image::ARGB, juce::jmax (1, w), juce::jmax (1, h), true);
+        {
+            juce::Graphics ig (img);
+            ig.addTransform (juce::AffineTransform::scale (scale));
+            renderGlassWindow (ig, { margin, margin, r.getWidth(), r.getHeight() }, corner, glare, rim);
+        }
+        it = cache.images.emplace (key, img).first;
+        cache.order.push_back (key);
+        while (cache.order.size() > 48)
+        {
+            cache.images.erase (cache.order.front());
+            cache.order.pop_front();
+        }
+    }
+    g.setOpacity (1.0f);
+    g.drawImage (it->second, r.expanded (margin));
+}
+
+void goldPanel (juce::Graphics& g, juce::Rectangle<float> r, float corner, ScaledTexture& texture)
+{
+    // shadow onto the glitter plate
+    for (int i = 5; i >= 1; --i)
+    {
+        g.setColour (juce::Colours::black.withAlpha (0.14f));
+        g.fillRoundedRectangle (r.expanded ((float) i * 1.2f).translated (0.0f, (float) i * 0.9f), corner + (float) i);
     }
 
     juce::Path shape;
     shape.addRoundedRectangle (r, corner);
-
-    // the glass itself: almost black, very slightly lifted at the top
-    juce::ColourGradient body (juce::Colour (0xff121216), 0.0f, r.getY(), juce::Colour (0xff020203), 0.0f, r.getBottom(), false);
-    body.addColour (0.35, juce::Colour (0xff09090b));
-    g.setGradientFill (body);
-    g.fillPath (shape);
-
     {
         juce::Graphics::ScopedSaveState save (g);
         g.reduceClipRegion (shape);
-
-        // the plate shades the top of the recessed glass
-        g.setGradientFill (juce::ColourGradient (juce::Colours::black.withAlpha (0.65f), 0.0f, r.getY(),
-                                                 juce::Colours::transparentBlack, 0.0f, r.getY() + juce::jmin (9.0f, r.getHeight() * 0.3f), false));
-        g.fillRect (r);
-
-        // warm bounce from the gold along the bottom edge
-        g.setGradientFill (juce::ColourGradient (juce::Colours::transparentBlack, 0.0f, r.getBottom() - juce::jmin (14.0f, r.getHeight() * 0.35f),
-                                                 col::gold.withAlpha (0.10f), 0.0f, r.getBottom(), false));
-        g.fillRect (r);
+        texture.draw (g, r.getSmallestIntegerContainer(), goldSmoothImage());
     }
 
-    fillGrain (g, shape, 0.35f);
-
-    if (glare > 0.0f)
-        glassGlare (g, r, corner, glare);
-
-    // polished bevel: bright along the top, gold reflection along the bottom
-    juce::ColourGradient edge (juce::Colours::white.withAlpha (0.22f), 0.0f, r.getY(), juce::Colours::white.withAlpha (0.0f), 0.0f, r.getY() + juce::jmin (16.0f, r.getHeight() * 0.4f), false);
-    g.setGradientFill (edge);
-    g.drawRoundedRectangle (r.reduced (1.0f), juce::jmax (0.0f, corner - 1.0f), 1.0f);
-    g.setGradientFill (juce::ColourGradient (col::goldLight.withAlpha (0.0f), 0.0f, r.getBottom() - juce::jmin (14.0f, r.getHeight() * 0.4f),
-                                             col::goldLight.withAlpha (0.30f), 0.0f, r.getBottom(), false));
-    g.drawRoundedRectangle (r.reduced (1.0f), juce::jmax (0.0f, corner - 1.0f), 1.0f);
-
-    g.setColour (juce::Colours::black.withAlpha (0.9f));
+    // polished bevel: bright top edge, dark bottom edge, fine dark outline
+    g.setGradientFill (juce::ColourGradient (juce::Colour (0xfffff8e0).withAlpha (0.85f), 0.0f, r.getY(),
+                                             juce::Colour (0xfffff8e0).withAlpha (0.0f), 0.0f, r.getY() + 6.0f, false));
+    g.drawRoundedRectangle (r.reduced (1.0f), corner - 1.0f, 1.6f);
+    g.setGradientFill (juce::ColourGradient (juce::Colour (0xff3a2402).withAlpha (0.0f), 0.0f, r.getBottom() - 8.0f,
+                                             juce::Colour (0xff3a2402).withAlpha (0.8f), 0.0f, r.getBottom(), false));
+    g.drawRoundedRectangle (r.reduced (1.0f), corner - 1.0f, 1.6f);
+    g.setColour (juce::Colour (0xff1a1000).withAlpha (0.9f));
     g.drawRoundedRectangle (r.reduced (0.25f), corner, 0.8f);
+}
+
+void glitterText (juce::Graphics& g, const juce::String& text, juce::Rectangle<float> r,
+                  const juce::Font& f, juce::Justification j)
+{
+    juce::GlyphArrangement ga;
+    ga.addFittedText (f, text, r.getX(), r.getY(), r.getWidth(), r.getHeight(), j, 1, 0.9f);
+    juce::Path p;
+    ga.createPath (p);
+    const auto b = p.getBounds();
+
+    // set into the gold: dark shadow above, light catch below
+    g.setColour (juce::Colour (0xfffff4cf).withAlpha (0.6f));
+    g.fillPath (p, juce::AffineTransform::translation (0.0f, 1.2f));
+    g.setColour (juce::Colour (0xff1a0f00).withAlpha (0.7f));
+    g.fillPath (p, juce::AffineTransform::translation (0.0f, -0.8f));
+
+    // black glass full of glitter
+    {
+        juce::Graphics::ScopedSaveState save (g);
+        g.reduceClipRegion (p);
+        g.fillAll (juce::Colours::black);
+        static const juce::Image tex = juce::ImageCache::getFromMemory (SnaggerBinary::glitter_text_jpg, SnaggerBinary::glitter_text_jpgSize);
+        if (tex.isValid())
+        {
+            // dense glitter at half size, so each speck is one crisp pixel on a Retina / HiDPI screen
+            g.setOpacity (1.0f);
+            g.setImageResamplingQuality (juce::Graphics::highResamplingQuality);
+            g.drawImageTransformed (tex, juce::AffineTransform::scale (0.5f).translated (b.getX() - 4.0f, b.getY() - 4.0f));
+        }
+        // glass: a glossy highlight over the top half
+        g.setGradientFill (juce::ColourGradient (juce::Colours::white.withAlpha (0.2f), 0.0f, b.getY(),
+                                                 juce::Colours::white.withAlpha (0.0f), 0.0f, b.getCentreY(), false));
+        g.fillRect (b.withHeight (b.getHeight() * 0.5f));
+    }
+
+    // fine dark edge
+    g.setColour (juce::Colour (0xff120a00).withAlpha (0.85f));
+    g.strokePath (p, juce::PathStrokeType (0.7f));
 }
 
 void glassWell (juce::Graphics& g, juce::Rectangle<float> r, float corner, bool highlighted)
@@ -855,86 +1011,148 @@ void SnaggerLookAndFeel::drawToggleButton (juce::Graphics& g, juce::ToggleButton
 }
 
 //==============================================================================
+namespace
+{
+    /** The parts of a knob that never move: knurled skirt, red ring, brushed cap. Cached per size. */
+    void renderKnobBody (juce::Graphics& g, float size, bool enabled)
+    {
+        const float R = size * 0.5f;
+        const juce::Point<float> c (R, R);
+        auto circle = [&] (float radius) { return juce::Rectangle<float> (radius * 2.0f, radius * 2.0f).withCentre (c); };
+
+        // contact shadow
+        for (int i = 4; i >= 1; --i)
+        {
+            g.setColour (juce::Colours::black.withAlpha (0.15f));
+            g.fillEllipse (circle (R * 0.93f + (float) i * 0.6f).translated (0.0f, (float) i * 0.7f));
+        }
+
+        // ---- knurled skirt: rows of little pyramids ----
+        const float skirtOuter = R * 0.94f, skirtInner = R * 0.79f;
+        g.setColour (juce::Colour (0xff0a0a0b));
+        g.fillEllipse (circle (skirtOuter));
+        const int rows = juce::jmax (2, (int) ((skirtOuter - skirtInner) / 2.6f));
+        const float rowH = (skirtOuter - skirtInner) / (float) rows;
+        const int around = juce::jlimit (24, 96, (int) (juce::MathConstants<float>::twoPi * skirtOuter / 3.0f));
+        const float step = juce::MathConstants<float>::twoPi / (float) around;
+        for (int k = 0; k < rows; ++k)
+        {
+            const float rr = skirtInner + ((float) k + 0.5f) * rowH;
+            for (int i = 0; i < around; ++i)
+            {
+                const float a = ((float) i + ((k % 2) ? 0.5f : 0.0f)) * step;
+                const auto top    = c.getPointOnCircumference (rr + rowH * 0.5f, a);
+                const auto bottom = c.getPointOnCircumference (rr - rowH * 0.5f, a);
+                const auto left   = c.getPointOnCircumference (rr, a - step * 0.5f);
+                const auto right  = c.getPointOnCircumference (rr, a + step * 0.5f);
+                // light from the upper left: facets facing it are brighter
+                const float facing = 0.5f + 0.5f * std::cos (a + juce::MathConstants<float>::pi * 0.25f);
+                juce::Path lit, shade;
+                lit.startNewSubPath (left);   lit.lineTo (top);    lit.lineTo (right); lit.closeSubPath();
+                shade.startNewSubPath (left); shade.lineTo (bottom); shade.lineTo (right); shade.closeSubPath();
+                g.setColour (juce::Colour::greyLevel (0.10f + 0.20f * facing));
+                g.fillPath (lit);
+                g.setColour (juce::Colour::greyLevel (0.03f + 0.05f * facing));
+                g.fillPath (shade);
+            }
+        }
+        g.setColour (juce::Colours::black.withAlpha (0.8f));
+        g.drawEllipse (circle (skirtOuter - 0.4f), 0.8f);
+
+        // ---- glowing red ring in a black groove ----
+        g.setColour (juce::Colour (0xff050505));
+        g.fillEllipse (circle (skirtInner));
+        const float ringR = R * 0.745f;
+        {
+            juce::Path ring;
+            ring.addEllipse (circle (ringR));
+            juce::Path stroked;
+            juce::PathStrokeType (juce::jmax (1.4f, R * 0.05f)).createStrokedPath (stroked, ring);
+            const float s = enabled ? 1.0f : 0.3f;
+            neonGlow (g, stroked, col::red, juce::jmax (3.0f, R * 0.18f), 0.9f * s);
+            g.setColour (col::red.interpolatedWith (juce::Colours::white, 0.22f).withMultipliedAlpha (s));
+            g.fillPath (stroked);
+        }
+
+        // ---- cap: black anodised, brushed in circles, catching light in two opposite lobes ----
+        const float capR = R * 0.69f;
+        g.setColour (juce::Colour (0xff050506));
+        g.fillEllipse (circle (capR + juce::jmax (1.0f, R * 0.03f)));   // dark bevel between ring and cap
+        juce::Random rng (1234);
+        const int wedges = 180;
+        const float lightAngle = -juce::MathConstants<float>::pi * 0.25f;   // upper left (0 = up)
+        for (int i = 0; i < wedges; ++i)
+        {
+            const float a0 = (float) i / (float) wedges * juce::MathConstants<float>::twoPi;
+            const float a1 = (float) (i + 1) / (float) wedges * juce::MathConstants<float>::twoPi + 0.004f;
+            const float lobe = std::pow (std::abs (std::cos (a0 - lightAngle)), 6.0f);
+            const float grey = 0.07f + 0.19f * lobe + (rng.nextFloat() - 0.5f) * 0.025f;
+            juce::Path w;
+            w.startNewSubPath (c);
+            w.lineTo (c.getPointOnCircumference (capR, a0));
+            w.lineTo (c.getPointOnCircumference (capR, a1));
+            w.closeSubPath();
+            g.setColour (juce::Colour::greyLevel (juce::jlimit (0.0f, 1.0f, grey)));
+            g.fillPath (w);
+        }
+        // a satin softness over the brushing, darker towards the rim
+        g.setGradientFill (juce::ColourGradient (juce::Colours::transparentBlack, c.x, c.y,
+                                                 juce::Colours::black.withAlpha (0.35f), c.x + capR, c.y, true));
+        g.fillEllipse (circle (capR));
+        // rim of the cap: bright towards the light, dark away from it
+        g.setGradientFill (juce::ColourGradient (juce::Colours::white.withAlpha (0.35f), c.x - capR, c.y - capR,
+                                                 juce::Colours::black.withAlpha (0.6f), c.x + capR, c.y + capR, false));
+        g.drawEllipse (circle (capR - 0.5f), 1.0f);
+    }
+
+    struct KnobCache
+    {
+        std::map<juce::String, juce::Image> images;
+    };
+}
+
 void SnaggerLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, float pos,
                                            float startAngle, float endAngle, juce::Slider& s)
 {
     auto bounds = juce::Rectangle<float> ((float) x, (float) y, (float) w, (float) h);
-    const float size = juce::jmin (bounds.getWidth(), bounds.getHeight()) - 6.0f;
+    const float size = juce::jmin (bounds.getWidth(), bounds.getHeight()) - 4.0f;
+    if (size < 8.0f)
+        return;
     auto r = bounds.withSizeKeepingCentre (size, size);
     const auto c = r.getCentre();
-    const float radius = size * 0.5f;
+    const float R = size * 0.5f;
     const float angle = startAngle + pos * (endAngle - startAngle);
-    const float arcR = radius - 2.5f;
+    const bool enabled = s.isEnabled();
 
-    // LED ring: a dark groove with lit red segments for the value
-    juce::Path track;
-    track.addCentredArc (c.x, c.y, arcR, arcR, 0.0f, startAngle, endAngle, true);
-    g.setColour (juce::Colours::black.withAlpha (0.9f));
-    g.strokePath (track, juce::PathStrokeType (4.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    g.setColour (juce::Colour (0xff2a0a0f));
-    g.strokePath (track, juce::PathStrokeType (2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-
-    const bool bipolar = s.getMinimum() < 0 && s.getMaximum() > 0;
-    const float from = bipolar ? startAngle + (float) ((0.0 - s.getMinimum()) / (s.getMaximum() - s.getMinimum())) * (endAngle - startAngle)
-                               : startAngle;
-    if (std::abs (angle - from) > 0.01f)
+    // static body, rendered once per size
+    static KnobCache cache;
+    const float scale = juce::jlimit (1.0f, 3.0f, g.getInternalContext().getPhysicalPixelScaleFactor());
+    const auto key = juce::String (size, 1) + (enabled ? "e" : "d") + juce::String (scale, 2);
+    auto it = cache.images.find (key);
+    if (it == cache.images.end())
     {
-        juce::Path arc;
-        arc.addCentredArc (c.x, c.y, arcR, arcR, 0.0f, juce::jmin (from, angle), juce::jmax (from, angle), true);
-        juce::Path stroked;
-        juce::PathStrokeType (2.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded).createStrokedPath (stroked, arc);
-        glowPath (g, stroked, col::red, s.isEnabled() ? 0.9f : 0.3f);
-    }
-
-    // knob: satin black skirt + cap
-    auto skirt = r.reduced (size * 0.15f);
-    for (int i = 4; i >= 1; --i)
-    {
-        g.setColour (juce::Colours::black.withAlpha (0.13f));
-        g.fillEllipse (skirt.expanded ((float) i * 0.8f).translated (0.0f, (float) i * 0.9f));
-    }
-    g.setGradientFill (juce::ColourGradient (juce::Colour (0xff3a3a40), skirt.getX(), skirt.getY(),
-                                             juce::Colour (0xff060607), skirt.getRight(), skirt.getBottom(), false));
-    g.fillEllipse (skirt);
-
-    // fine knurling on the skirt
-    {
-        const int ridges = juce::jlimit (24, 60, (int) (skirt.getWidth() * 1.2f));
-        const float ro = skirt.getWidth() * 0.5f, ri = ro - juce::jmax (2.0f, skirt.getWidth() * 0.06f);
-        for (int i = 0; i < ridges; ++i)
+        const int px = juce::roundToInt (size * scale);
+        juce::Image img (juce::Image::ARGB, px, px, true);
         {
-            const float a = (float) i / (float) ridges * juce::MathConstants<float>::twoPi;
-            const float lightness = 0.5f + 0.5f * std::cos (a + juce::MathConstants<float>::pi * 0.25f);   // lit from the top left
-            g.setColour ((i % 2 == 0 ? juce::Colours::white : juce::Colours::black).withAlpha (i % 2 == 0 ? 0.03f + 0.07f * lightness : 0.25f));
-            g.drawLine ({ c.getPointOnCircumference (ri, a), c.getPointOnCircumference (ro - 0.5f, a) }, 1.0f);
+            juce::Graphics ig (img);
+            ig.addTransform (juce::AffineTransform::scale (scale));
+            renderKnobBody (ig, size, enabled);
         }
+        if (cache.images.size() > 32)
+            cache.images.clear();
+        it = cache.images.emplace (key, img).first;
     }
+    g.setOpacity (1.0f);
+    g.drawImage (it->second, r);
 
-    auto cap = skirt.reduced (skirt.getWidth() * 0.09f);
-    juce::Path capPath; capPath.addEllipse (cap);
-    g.setGradientFill (juce::ColourGradient (juce::Colour (0xff2c2c31), cap.getCentreX(), cap.getY(),
-                                             juce::Colour (0xff0e0e10), cap.getCentreX(), cap.getBottom(), false));
-    g.fillPath (capPath);
-    // satin sheen: broad and soft
-    g.setGradientFill (juce::ColourGradient (juce::Colours::white.withAlpha (0.13f), cap.getX() + cap.getWidth() * 0.38f, cap.getY() + cap.getHeight() * 0.22f,
-                                             juce::Colours::white.withAlpha (0.0f), cap.getX() + cap.getWidth() * 0.38f + cap.getWidth() * 0.62f, cap.getY() + cap.getHeight() * 0.22f, true));
-    g.fillPath (capPath);
-    fillGrain (g, capPath, 1.0f);
-    // rim highlight top-left, shadow bottom-right
-    g.setGradientFill (juce::ColourGradient (juce::Colours::white.withAlpha (0.28f), cap.getX(), cap.getY(),
-                                             juce::Colours::black.withAlpha (0.5f), cap.getRight(), cap.getBottom(), false));
-    g.drawEllipse (cap.reduced (0.5f), 1.0f);
-
-    // glowing red pointer
-    const float capR = cap.getWidth() * 0.5f;
+    // glowing red pointer, from the cap's edge towards the centre
+    const float capR = R * 0.69f;
     juce::Path pointer;
-    pointer.startNewSubPath (c.getPointOnCircumference (capR * 0.42f, angle));
-    pointer.lineTo (c.getPointOnCircumference (capR * 0.86f, angle));
+    pointer.startNewSubPath (c.getPointOnCircumference (capR * 0.93f, angle));
+    pointer.lineTo (c.getPointOnCircumference (capR * 0.42f, angle));
     juce::Path ps;
-    juce::PathStrokeType (juce::jmax (2.0f, capR * 0.11f), juce::PathStrokeType::curved, juce::PathStrokeType::rounded).createStrokedPath (ps, pointer);
-    g.setColour (juce::Colours::black.withAlpha (0.8f));
-    g.fillPath (ps, juce::AffineTransform::translation (0.0f, 0.8f));
-    glowPath (g, ps, col::red, s.isEnabled() ? 1.0f : 0.3f);
+    juce::PathStrokeType (juce::jmax (1.8f, R * 0.075f), juce::PathStrokeType::curved, juce::PathStrokeType::rounded).createStrokedPath (ps, pointer);
+    glowPath (g, ps, col::red, enabled ? 1.0f : 0.3f);
 }
 
 void SnaggerLookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, int w, int h, float pos, float, float,

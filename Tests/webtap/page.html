@@ -1,5 +1,5 @@
 <!doctype html><html><body>
-<button id="wa">webaudio</button><button id="det">detached</button><button id="mes">mes</button><button id="dom">dom</button>
+<button id="wa">webaudio</button><button id="det">detached</button><button id="mes">mes</button><button id="dom">dom</button><button id="xo">xo</button>
 <audio id="domaudio" loop></audio>
 <script>
 // a short WAV generated in page (sine 440) so media elements have same-origin data: audio
@@ -15,5 +15,7 @@ document.getElementById('wa').onclick=()=>{ // Howler-style: page context, oscil
 document.getElementById('det').onclick=()=>{ window.a=new Audio(wavDataUrl(660,5)); a.loop=true; a.play(); };
 document.getElementById('mes').onclick=()=>{ // WaveSurfer-webaudio style: element routed through page web audio
   window.c2=new AudioContext(); window.m=new Audio(wavDataUrl(330,5)); m.loop=true; const s=c2.createMediaElementSource(m); s.connect(c2.destination); m.play(); };
+document.getElementById('xo').onclick=()=>{ // like ZapSplat: the file lives on another server
+  window.x=new Audio(location.protocol+'//127.0.0.1:'+(+location.port+1)+'/tone.wav'); x.loop=true; x.play(); };
 document.getElementById('dom').onclick=()=>{ const d=document.getElementById('domaudio'); d.src=wavDataUrl(550,5); d.play(); };
 </script></body></html>

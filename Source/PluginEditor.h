@@ -60,8 +60,11 @@ private:
     snag::IconButton gearBtn   { "settings", snag::theme::icons::gear(), {}, "chip" };
     snag::IconButton cancelBtn { "cancel", snag::theme::icons::close(), {}, "icon" };
     snag::LevelMeter outMeter;
-    juce::Rectangle<int> headerArea, hudArea, logoArea, tabsArea, hudGlass;
-    snag::theme::GoldPlate goldPlate;
+    juce::Rectangle<int> headerArea, headerPanel, hudArea, logoArea, tabsArea, hudGlass;
+    snag::theme::ScaledTexture goldTexture;
+    juce::Image plateCache;          // glitter glass + gold rim, rendered once per window size
+    float plateScale = 0.0f;
+    void renderPlate (float scale);
 
     // pages
     snag::BrowsePage  browse;
