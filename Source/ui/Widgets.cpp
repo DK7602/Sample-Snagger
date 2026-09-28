@@ -20,18 +20,19 @@ void IconButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
     const auto style = getProperties().getWithDefault ("style", "gold").toString();
     const bool on = getToggleState();
     auto r = getLocalBounds().toFloat();
+    if (down && style != "icon" && style != "ghost")
+        r.translate (0.0f, 1.0f);
 
-    juce::Colour c = col::goldPale;
-    if (style == "red" || style == "redFill") c = (on || style == "redFill") ? juce::Colours::white : col::redHot;
-    else if (style == "ghost" || style == "icon") c = highlighted ? col::goldLight : col::gold.withAlpha (0.85f);
-    else if (on) c = col::bg0;
-    else if (highlighted) c = col::goldLight;
-    if (hasIconColour && ! on) c = iconColour;
-    if (! isEnabled()) c = c.withAlpha (0.35f);
+    auto legend = buttonLegend (*this, highlighted);
+    if (hasIconColour && ! on && isEnabled())
+        legend = { iconColour, false };
+
+    // the record button's dot is always a red light
+    if (style == "red" && ! on && getName().containsIgnoreCase ("rec") && isEnabled())
+        legend = { col::red, true };
 
     const float iconSize = juce::jmin (r.getHeight() * 0.42f, 16.0f);
     juce::Rectangle<float> iconArea;
-    juce::Rectangle<float> textArea;
 
     if (caption.isEmpty())
         iconArea = r.withSizeKeepingCentre (iconSize, iconSize);
@@ -43,23 +44,30 @@ void IconButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
         auto content = r.withSizeKeepingCentre (juce::jmin (total, r.getWidth() - 12.0f), r.getHeight());
         iconArea = content.removeFromLeft (iconSize).withSizeKeepingCentre (iconSize, iconSize);
         content.removeFromLeft (8.0f);
-        textArea = content;
-        g.setFont (font);
-        g.setColour (c);
-        g.drawFittedText (caption.toUpperCase(), textArea.toNearestInt(), juce::Justification::centredLeft, 1, 0.8f);
+
+        // with a lit record dot the caption stays champagne, otherwise the whole legend lights up
+        const bool recDot = style == "red" && ! on && getName().containsIgnoreCase ("rec");
+        if (legend.glow && ! recDot)
+            glowText (g, caption.toUpperCase(), content, font, juce::Justification::centredLeft, legend.colour);
+        else
+        {
+            g.setFont (font);
+            g.setColour (recDot ? (highlighted ? col::goldLight : col::goldPale) : legend.colour);
+            g.drawFittedText (caption.toUpperCase(), content.toNearestInt(), juce::Justification::centredLeft, 1, 0.8f);
+        }
     }
 
     if (! icon.isEmpty())
     {
         auto p = icon;
         p.applyTransform (p.getTransformToScaleToFit (iconArea, true));
-        if (style == "red" && ! on && getName().containsIgnoreCase ("rec"))
+        if (legend.glow)
+            glowPath (g, p, legend.colour, 1.0f);
+        else
         {
-            neonGlow (g, p, col::red, 7.0f, 0.9f);
-            c = col::red;
+            g.setColour (legend.colour);
+            g.fillPath (p);
         }
-        g.setColour (c);
-        g.fillPath (p);
     }
 }
 
@@ -103,7 +111,7 @@ void Knob::paint (juce::Graphics& g)
 //==============================================================================
 juce::Rectangle<int> Panel::getContentBounds() const
 {
-    auto r = getLocalBounds().reduced (10, 8);
+    auto r = getLocalBounds().reduced (12, 10);
     if (title.isNotEmpty())
         r.removeFromTop (18);
     return r;
@@ -111,11 +119,13 @@ juce::Rectangle<int> Panel::getContentBounds() const
 
 void Panel::paint (juce::Graphics& g)
 {
-    auto r = getLocalBounds().toFloat();
-    glossPanel (g, r, 8.0f, col::bg2.brighter (0.03f), col::bg1, goldEdge, 0.035f);
+    auto r = getLocalBounds().toFloat().reduced (3.0f);
+    glassWindow (g, r, 8.0f, 0.8f);
+    if (goldEdge)
+        goldBorder (g, r, 8.0f, 1.0f, 0.5f);
     if (title.isNotEmpty())
     {
-        auto t = r.reduced (12.0f, 7.0f).removeFromTop (14.0f);
+        auto t = r.reduced (11.0f, 6.0f).removeFromTop (14.0f);
         sectionLabel (g, title, t);
         // small neon tick before the next section
         g.setColour (col::red.withAlpha (0.9f));
@@ -128,7 +138,7 @@ void Panel::paint (juce::Graphics& g)
 void LevelMeter::paint (juce::Graphics& g)
 {
     auto r = getLocalBounds().toFloat();
-    g.setColour (col::bg0);
+    g.setColour (juce::Colours::black.withAlpha (0.9f));
     g.fillRoundedRectangle (r, 2.0f);
     const float db = juce::Decibels::gainToDecibels (level, -60.0f);
     const float frac = juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 60.0f);
@@ -149,29 +159,37 @@ DragHandle::DragHandle (const juce::String& c) : caption (c)
 
 void DragHandle::paint (juce::Graphics& g)
 {
-    auto r = getLocalBounds().toFloat().reduced (0.5f);
+    auto r = getLocalBounds().toFloat().reduced (2.0f);
     const bool hover = isMouseOver (true);
+    const float corner = juce::jmin (7.0f, r.getHeight() * 0.3f);
 
-    juce::Path shape; shape.addRoundedRectangle (r, 7.0f);
-    if (hover || dragging)
-        neonGlow (g, shape, col::gold, 10.0f, 0.5f);
+    // the main call to action: satin black, backlit in neon red
+    juce::Path shape; shape.addRoundedRectangle (r, corner);
+    neonGlow (g, shape, col::red, hover || dragging ? 14.0f : 9.0f, hover || dragging ? 0.6f : 0.35f);
+    satinSurface (g, r, corner, hover, dragging, ! dragging);
+    {
+        juce::Path rim; rim.addRoundedRectangle (r.reduced (1.2f), corner - 1.0f);
+        juce::Path stroked;
+        juce::PathStrokeType (1.2f).createStrokedPath (stroked, rim);
+        glowPath (g, stroked, col::red, hover || dragging ? 1.0f : 0.7f);
+    }
 
-    g.setGradientFill (goldGradient (r));
-    g.fillRoundedRectangle (r, 7.0f);
-    g.setGradientFill (juce::ColourGradient (juce::Colours::white.withAlpha (0.3f), r.getX(), r.getY(),
-                                             juce::Colours::white.withAlpha (0.0f), r.getX(), r.getCentreY(), false));
-    g.fillRoundedRectangle (r.reduced (1.0f).withHeight (r.getHeight() * 0.5f), 7.0f);
-
-    auto content = r.reduced (10.0f, 4.0f);
+    auto content = r.reduced (12.0f, 4.0f);
     auto iconArea = content.removeFromLeft (juce::jmin (18.0f, content.getHeight())).withSizeKeepingCentre (16.0f, 16.0f);
     auto icon = icons::drag();
     icon.applyTransform (icon.getTransformToScaleToFit (iconArea, true));
-    g.setColour (col::bg0);
-    g.fillPath (icon);
+    glowPath (g, icon, col::red, 1.0f);
 
-    content.removeFromLeft (8.0f);
-    g.setFont (ui (juce::jmin (12.0f, r.getHeight() * 0.36f), true).withExtraKerningFactor (0.12f));
-    g.drawFittedText (caption, content.toNearestInt(), juce::Justification::centredLeft, 2, 0.8f);
+    content.removeFromLeft (9.0f);
+    auto font = ui (juce::jmin (12.0f, r.getHeight() * 0.36f), true).withExtraKerningFactor (0.12f);
+    if (juce::GlyphArrangement::getStringWidth (font, caption) <= content.getWidth())
+        glowText (g, caption, content, font, juce::Justification::centredLeft, col::red, 1.0f);
+    else
+    {
+        g.setFont (font);
+        g.setColour (col::redHot);
+        g.drawFittedText (caption, content.toNearestInt(), juce::Justification::centredLeft, 2, 0.8f);
+    }
 }
 
 void DragHandle::mouseDown (const juce::MouseEvent&) { pressed = true; }
@@ -301,6 +319,7 @@ void WaveThumb::draw (juce::Graphics& g, juce::Rectangle<float> r, const AudioDa
         drawWaveform (ig, size.toFloat(), *audio, start, end, colour, true, gain);
         cachedFor = audio; cachedColour = colour; cachedStart = start; cachedEnd = end; cachedSize = size;
     }
+    g.setOpacity (1.0f);   // drawImage uses the current colour's alpha
     g.drawImage (cache, r, juce::RectanglePlacement::stretchToFit);
 }
 
@@ -344,7 +363,9 @@ void ToastOverlay::paint (juce::Graphics& g)
 
         juce::Path shape; shape.addRoundedRectangle (r, 8.0f);
         neonGlow (g, shape, it->error ? col::red : col::gold, 14.0f, 0.35f * alpha);
-        glossPanel (g, r, 8.0f, col::bg3, col::bg1, ! it->error, 0.06f);
+        glassWindow (g, r, 8.0f, 0.7f, false);
+        if (! it->error)
+            goldBorder (g, r, 8.0f, 1.0f, 0.7f);
         if (it->error)
         {
             g.setColour (col::red);

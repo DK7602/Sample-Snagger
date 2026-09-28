@@ -45,8 +45,8 @@ void SlicePads::paint (juce::Graphics& g)
 
     if (n <= 1)
     {
-        auto r = getLocalBounds().toFloat();
-        glossPanel (g, r, 7.0f, col::bg2, col::bg1, false, 0.03f);
+        auto r = getLocalBounds().toFloat().reduced (3.0f);
+        glassWindow (g, r, 7.0f, 0.6f);
         g.setColour (col::textDim);
         g.setFont (ui (12.0f));
         g.drawText (chopsMode ? "Chop the sample (AUTO CHOP or EQUAL) to get MIDI pads - pads start at " + noteName (root) + ". Drag any pad into your DAW."
@@ -59,12 +59,15 @@ void SlicePads::paint (juce::Graphics& g)
     for (int i = 0; i < juce::jmax (16, n); ++i)
     {
         auto r = padBounds (i, n);
+        r = r.reduced (1.5f);
         if (i >= n)
         {
-            g.setColour (col::bg1);
+            // empty slot: a dark recess in the gold
+            g.setGradientFill (juce::ColourGradient (juce::Colour (0xff1f1403).withAlpha (0.55f), 0.0f, r.getY(),
+                                                     juce::Colour (0xfffff0bf).withAlpha (0.45f), 0.0f, r.getBottom(), false));
+            g.fillRoundedRectangle (r.expanded (1.0f), 7.0f);
+            g.setGradientFill (juce::ColourGradient (juce::Colour (0xff0c0c0e), 0.0f, r.getY(), juce::Colour (0xff050506), 0.0f, r.getBottom(), false));
             g.fillRoundedRectangle (r, 6.0f);
-            g.setColour (col::lineSoft);
-            g.drawRoundedRectangle (r.reduced (0.5f), 6.0f, 1.0f);
             continue;
         }
 
@@ -72,20 +75,29 @@ void SlicePads::paint (juce::Graphics& g)
         if (isLit)
         {
             juce::Path p; p.addRoundedRectangle (r, 6.0f);
-            neonGlow (g, p, col::red, 10.0f, 0.9f);
-            g.setGradientFill (juce::ColourGradient (col::red, r.getX(), r.getY(), col::redDeep, r.getX(), r.getBottom(), false));
-            g.fillRoundedRectangle (r, 6.0f);
+            neonGlow (g, p, col::red, 12.0f, 0.75f);
+        }
+        satinSurface (g, r, 6.0f, isLit, i == pressed, i != pressed);
+        if (isLit)
+        {
+            juce::Path rim; rim.addRoundedRectangle (r.reduced (1.2f), 5.0f);
+            juce::Path stroked;
+            juce::PathStrokeType (1.2f).createStrokedPath (stroked, rim);
+            glowPath (g, stroked, col::red, 0.9f);
         }
         else
-        {
-            glossPanel (g, r, 6.0f, col::bg4, col::bg1, false, 0.07f);
-            goldBorder (g, r, 6.0f, 1.0f, 0.45f);
-        }
+            goldBorder (g, r.reduced (0.6f), 6.0f, 1.0f, 0.3f);
 
-        g.setColour (isLit ? juce::Colours::white : col::goldLight);
-        g.setFont (display (r.getHeight() * 0.36f, true));
-        g.drawText (juce::String (i + 1), r.withTrimmedBottom (r.getHeight() * 0.38f), juce::Justification::centred);
-        g.setColour (isLit ? juce::Colours::white.withAlpha (0.85f) : col::textDim);
+        auto numArea = r.withTrimmedBottom (r.getHeight() * 0.38f);
+        if (isLit)
+            glowText (g, juce::String (i + 1), numArea, display (r.getHeight() * 0.36f, true), juce::Justification::centred, col::red);
+        else
+        {
+            g.setColour (col::goldLight);
+            g.setFont (display (r.getHeight() * 0.36f, true));
+            g.drawText (juce::String (i + 1), numArea, juce::Justification::centred);
+        }
+        g.setColour (isLit ? col::redHot : col::textDim);
         g.setFont (ui (juce::jmin (10.0f, r.getWidth() * 0.26f), true));
         g.drawText (noteName (root + i), r.withTrimmedTop (r.getHeight() * 0.55f), juce::Justification::centred);
     }
@@ -669,7 +681,9 @@ void StudioPage::resized()
 {
     auto r = getLocalBounds().reduced (14, 10);
 
-    auto head = r.removeFromTop (34);
+    auto head = r.removeFromTop (40);
+    headGlass = head;
+    head = head.reduced (14, 3);
     redoBtn.setBounds (head.removeFromRight (30).reduced (2));
     undoBtn.setBounds (head.removeFromRight (30).reduced (2));
     head.removeFromRight (10);
@@ -703,9 +717,11 @@ void StudioPage::resized()
     transport.removeFromRight (8);
     saveBtn.setBounds (transport.removeFromRight (92));
     transport.removeFromRight (14);
-    fitBtn.setBounds (transport.removeFromRight (44).reduced (0, 4));
-    zoomInBtn.setBounds (transport.removeFromRight (32).reduced (2, 5));
-    zoomOutBtn.setBounds (transport.removeFromRight (32).reduced (2, 5));
+    readoutGlass = transport;
+    transport = transport.reduced (12, 0);
+    fitBtn.setBounds (transport.removeFromRight (44).reduced (0, 6));
+    zoomInBtn.setBounds (transport.removeFromRight (32).reduced (2, 7));
+    zoomOutBtn.setBounds (transport.removeFromRight (32).reduced (2, 7));
     transport.removeFromRight (8);
     selLabel.setBounds (transport);
 
@@ -788,6 +804,11 @@ void StudioPage::resized()
     }
 }
 
-void StudioPage::paint (juce::Graphics&) {}
+void StudioPage::paint (juce::Graphics& g)
+{
+    // black glass displays set into the gold: clip info on top, selection read-out next to the transport
+    glassWindow (g, headGlass.toFloat().reduced (3.0f, 1.0f), 8.0f, 0.8f);
+    glassWindow (g, readoutGlass.toFloat().reduced (0.0f, 1.0f), 8.0f, 0.6f);
+}
 
 } // namespace snag

@@ -49,9 +49,16 @@ private:
     IconButton fwdBtn     { "forward", theme::icons::forward(), {}, "icon" };
     IconButton reloadBtn  { "reload",  theme::icons::reload(),  {}, "icon" };
     IconButton homeBtn    { "home",    theme::icons::home(),    {}, "icon" };
+    IconButton openExternalBtn { "external", theme::icons::external(), {}, "icon" };
     juce::TextEditor urlField;
     juce::TextButton goBtn { "GO" };
     juce::OwnedArray<juce::TextButton> quickLinks;
+    juce::TextButton openModeBtn;          // "Sites open in: Sample Snagger / My browser"
+    bool opensExternally() const;
+    void setOpensExternally (bool);
+    void openInSystemBrowser (const juce::String& url);
+    void updateOpenModeButton();
+    static juce::String normaliseUrl (juce::String typed);
 
 #if JUCE_WEB_BROWSER
     class Browser;
@@ -74,7 +81,7 @@ private:
     bool pageVisible = false;
     juce::uint32 liveRecStarted = 0;
 
-    juce::Rectangle<int> captureBarArea, browserArea;
+    juce::Rectangle<int> navArea, captureBarArea, browserArea;
 
     JUCE_DECLARE_WEAK_REFERENCEABLE (BrowsePage)
 };

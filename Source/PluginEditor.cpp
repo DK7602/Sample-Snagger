@@ -8,7 +8,7 @@ using namespace snag;
 using namespace snag::theme;
 
 static constexpr int headerHeight = 66;
-static constexpr int trayHeight = 112;
+static constexpr int trayHeight = 118;
 static int openEditors = 0;   // message thread only
 
 //==============================================================================
@@ -240,52 +240,55 @@ void SnaggerEditor::layoutHeader (juce::Rectangle<int> r)
     r = r.reduced (18, 0);
     logoArea = r.removeFromLeft (290);
 
-    gearBtn.setBounds (r.removeFromRight (40).withSizeKeepingCentre (36, 36));
-    r.removeFromRight (10);
-    outMeter.setBounds (r.removeFromRight (70).withSizeKeepingCentre (70, 5));
-    r.removeFromRight (14);
-    hudArea = r.removeFromRight (juce::jmin (330, r.getWidth() / 3));
-    cancelBtn.setBounds (hudArea.withLeft (hudArea.getRight() - 26).withSizeKeepingCentre (22, 22));
+    gearBtn.setBounds (r.removeFromRight (40).withSizeKeepingCentre (38, 38));
+    r.removeFromRight (16);
 
-    const int tabW = juce::jmin (130, r.getWidth() / 4);
+    // status display: job HUD + output meter behind one glass window
+    auto hudBox = r.removeFromRight (juce::jmin (438, r.getWidth() / 3 + 108));
+    hudGlass = hudBox.withSizeKeepingCentre (hudBox.getWidth(), 44);
+    auto inner = hudBox.reduced (12, 0);
+    outMeter.setBounds (inner.removeFromRight (64).withSizeKeepingCentre (64, 5));
+    inner.removeFromRight (12);
+    hudArea = inner;
+    cancelBtn.setBounds (hudArea.withLeft (hudArea.getRight() - 26).withSizeKeepingCentre (22, 22));
+    r.removeFromRight (12);
+
+    const int tabW = juce::jmin (130, (r.getWidth() - 24) / 4);
     auto tabs = r.withSizeKeepingCentre (tabW * 4, headerHeight);
+    tabsArea = tabs.expanded (8, 0).reduced (0, 10);
     for (auto* b : tabButtons)
         b->setBounds (tabs.removeFromLeft (tabW).reduced (4, 12));
 }
 
 void SnaggerEditor::paint (juce::Graphics& g)
 {
-    auto r = getLocalBounds().toFloat();
+    // the whole instrument is a brushed 24k gold plate; everything else is set into it
+    goldPlate.draw (g, getLocalBounds());
 
-    // body: deep gloss black with a faint warm vignette
-    g.setGradientFill (juce::ColourGradient (col::bg1, 0, 0, col::bg0, 0, r.getBottom(), false));
-    g.fillAll();
-    {
-        juce::ColourGradient vignette (col::goldDeep.withAlpha (0.10f), r.getCentreX(), headerHeight + 40.0f,
-                                       juce::Colours::transparentBlack, r.getCentreX(), r.getHeight() * 0.9f, true);
-        g.setGradientFill (vignette);
-        g.fillRect (r);
-    }
-
-    // header
+    // engraved groove under the header
     auto h = headerArea.toFloat();
-    g.setGradientFill (juce::ColourGradient (col::bg3, 0, h.getY(), col::bg1, 0, h.getBottom(), false));
-    g.fillRect (h);
-    g.setGradientFill (juce::ColourGradient (juce::Colours::white.withAlpha (0.06f), 0, h.getY(),
-                                             juce::Colours::transparentWhite, 0, h.getCentreY(), false));
-    g.fillRect (h.withHeight (h.getHeight() * 0.5f));
-    auto hair = goldGradient (h.withHeight (1.0f).withY (h.getBottom() - 1.0f), false);
-    g.setGradientFill (hair);
-    g.fillRect (h.withHeight (1.0f).withY (h.getBottom() - 1.0f));
+    g.setColour (juce::Colour (0xff1c1102).withAlpha (0.6f));
+    g.fillRect (h.getX(), h.getBottom() - 2.0f, h.getWidth(), 1.0f);
+    g.setColour (juce::Colour (0xfffff4cf).withAlpha (0.5f));
+    g.fillRect (h.getX(), h.getBottom() - 1.0f, h.getWidth(), 1.0f);
 
-    // logo
+    // logo badge with a soft shadow on the plate, engraved name plate
     auto logo = logoArea.toFloat();
-    drawLogoMark (g, logo.removeFromLeft (44.0f).withSizeKeepingCentre (42.0f, 42.0f));
+    auto badge = logo.removeFromLeft (46.0f).withSizeKeepingCentre (44.0f, 44.0f);
+    for (int i = 5; i >= 1; --i)
+    {
+        g.setColour (juce::Colours::black.withAlpha (0.08f));
+        g.fillEllipse (badge.reduced (1.5f).expanded ((float) i * 0.9f).translated (0.0f, (float) i * 0.8f));
+    }
+    drawLogoMark (g, badge);
     logo.removeFromLeft (12.0f);
-    goldText (g, "SAMPLE SNAGGER", logo.withTrimmedBottom (20.0f).withTrimmedTop (12.0f), display (22.0f, true));
-    g.setColour (col::textDim);
-    g.setFont (ui (9.0f, true).withExtraKerningFactor (0.42f));
-    g.drawText ("CAPTURE  -  CHOP  -  SEPARATE", logo.withTrimmedTop (38.0f).withHeight (14.0f), juce::Justification::centredLeft);
+    engravedText (g, "SAMPLE SNAGGER", logo.withTrimmedBottom (20.0f).withTrimmedTop (12.0f), display (22.0f, true));
+    engravedText (g, "CAPTURE  -  CHOP  -  SEPARATE", logo.withTrimmedTop (38.0f).withHeight (14.0f),
+                  ui (9.0f, true).withExtraKerningFactor (0.42f));
+
+    // the tab bar and the status display are black glass windows
+    glassWindow (g, tabsArea.toFloat(), 10.0f, 0.8f);
+    glassWindow (g, hudGlass.toFloat(), 9.0f, 0.6f);
 
     // job HUD
     auto hud = hudArea.toFloat();
@@ -294,7 +297,6 @@ void SnaggerEditor::paint (juce::Graphics& g)
     {
         auto& job = *active.front();
         auto box = hud.withSizeKeepingCentre (hud.getWidth(), 42.0f);
-        glossPanel (g, box, 8.0f, col::bg2, col::bg0, true, 0.04f);
         auto inner = box.reduced (10.0f, 6.0f).withTrimmedRight (26.0f);
         drawSpinner (g, inner.removeFromLeft (16.0f).withSizeKeepingCentre (16.0f, 16.0f), col::red);
         inner.removeFromLeft (8.0f);
@@ -325,9 +327,9 @@ void SnaggerEditor::paint (juce::Graphics& g)
     else
     {
         auto clip = processor.session.getSelected();
-        g.setColour (col::textFaint);
+        g.setColour (col::textDim);
         g.setFont (ui (10.5f, true));
-        g.drawText (clip != nullptr ? "SELECTED:  " + clip->name.toUpperCase() : "READY", hud, juce::Justification::centredRight, true);
+        g.drawText (clip != nullptr ? "SELECTED:  " + clip->name.toUpperCase() : "READY", hud.withTrimmedLeft (4.0f), juce::Justification::centredRight, true);
     }
 }
 

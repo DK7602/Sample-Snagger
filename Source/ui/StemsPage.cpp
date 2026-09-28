@@ -2,6 +2,7 @@
 #include "../PluginProcessor.h"
 #include "../Actions.h"
 #include "../core/EditOps.h"
+#include "../core/AiStems.h"
 
 namespace snag
 {
@@ -73,8 +74,8 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        auto r = getLocalBounds().toFloat().reduced (1.0f);
-        glossPanel (g, r, 8.0f, col::bg3, col::bg1, false, 0.04f);
+        auto r = getLocalBounds().toFloat().reduced (3.0f);
+        glassWindow (g, r, 8.0f, 0.7f);
 
         auto bar = r.withWidth (5.0f).reduced (0.0f, 10.0f).translated (8.0f, 0.0f);
         juce::Path bp; bp.addRoundedRectangle (bar, 2.5f);
@@ -93,8 +94,7 @@ public:
         g.drawText (formatTime (clip->audio->lengthSeconds(), true) + "s", nameArea.withTrimmedLeft (110.0f), juce::Justification::centredLeft);
 
         auto wr = waveArea;
-        g.setColour (col::bg0.withAlpha (0.6f));
-        g.fillRoundedRectangle (wr, 6.0f);
+        glassWell (g, wr, 6.0f);
         thumb.draw (g, wr.reduced (4.0f, 4.0f), clip->audio.get(), audible ? colour : colour.withSaturation (0.1f).darker (0.6f), 0, -1, true);
 
         // playhead when this stem (or the mix) is playing
@@ -145,17 +145,20 @@ StemsPage::StemsPage (EditorContext& c) : ctx (c), proc (c.getProcessor())
     sourceInfo.setColour (juce::Label::textColourId, col::textDim);
     addAndMakeVisible (sourceInfo);
 
-    engineBox.addItem (actions::engineName (actions::Engine::quick), 1);
-    engineBox.addItem (actions::engineName (actions::Engine::aiFast), 2);
-    engineBox.addItem (actions::engineName (actions::Engine::aiBest), 3);
+    engineBox.addItem (actions::engineName (actions::Engine::ai), 2);
+    engineBox.addItem (actions::engineName (actions::Engine::aiMax), 3);
     engineBox.addItem (actions::engineName (actions::Engine::ai6), 4);
-    engineBox.setSelectedId (proc.getTools().isAvailable (ToolManager::Tool::ai) ? 2 : 1, juce::dontSendNotification);
+    engineBox.addItem (actions::engineName (actions::Engine::quick), 1);
+    engineBox.addSeparator();
+    engineBox.addItem (actions::engineName (actions::Engine::python), 5);
+    engineBox.setSelectedId (ai::isAvailable() ? 2 : 1, juce::dontSendNotification);
     engineBox.onChange = [this] { timerCallback(); };
     addAndMakeVisible (engineBox);
 
     stemsBox.addItem ("Vocals + Music", 1);
     stemsBox.addItem ("Vocals, Drums, Bass, Other", 2);
     stemsBox.setSelectedId (1, juce::dontSendNotification);
+    stemsBox.onChange = [this] { timerCallback(); };
     addAndMakeVisible (stemsBox);
 
     engineNote.setFont (ui (11.0f));
@@ -268,20 +271,40 @@ void StemsPage::rebuild()
 void StemsPage::timerCallback()
 {
     const int id = engineBox.getSelectedId();
-    const bool aiReady = proc.getTools().isAvailable (ToolManager::Tool::ai);
+    const bool fourStems = stemsBox.getSelectedId() == 2;
     juce::String note;
+    bool warn = false;
+
+    auto dl = [] (ai::Mode m)
+    {
+        const int mb = ai::downloadMegabytesFor (m);
+        return mb > 0 ? "  First use downloads " + juce::String (mb) + " MB once." : juce::String ("  Ready - works offline.");
+    };
+
     if (id == 1)
-        note = "Instant, runs inside the plug-in. Best on stereo mixes. For studio quality use an AI engine.";
-    else if (! aiReady)
-        note = "AI engine not installed yet: open Settings (gear, top right) > Install AI Stem Engine.";
-    else if (id == 3)
-        note = "Highest quality, about 4x slower. Runs locally on your computer.";
+        note = "Instant, but only a rough split (it guesses from stereo placement). Use AI Studio for clean stems.";
+    else if (id == 5)
+    {
+        warn = ! proc.getTools().isAvailable (ToolManager::Tool::ai);
+        note = warn ? "Python engine not installed (Settings > Install). Or pick AI Studio - it needs no Python."
+                    : "Uses your Python + PyTorch install - fastest with an NVIDIA graphics card.";
+    }
+    else if (! ai::isAvailable())
+    {
+        warn = true;
+        note = ai::unavailableReason();
+    }
     else if (id == 4)
-        note = "Six stems: vocals, drums, bass, guitar, piano, other.";
+        note = "Six stems: vocals, drums, bass, guitar, piano, other." + dl (ai::Mode::sixStems);
+    else if (id == 3 && fourStems)
+        note = "Four specialised AI models, one per stem - cleanest result, about 4x slower." + dl (ai::Mode::fourStemsMax);
+    else if (! fourStems)
+        note = "Studio-quality AI vocal split, runs right here on your computer." + dl (ai::Mode::vocalsMusic);
     else
-        note = "Neural separation (Demucs), runs locally. A 3-minute song takes about 1-3 minutes on CPU.";
+        note = "Studio-quality AI, runs right here on your computer." + dl (ai::Mode::fourStems);
+
     engineNote.setText (note, juce::dontSendNotification);
-    engineNote.setColour (juce::Label::textColourId, (id != 1 && ! aiReady) ? col::redHot : col::textDim);
+    engineNote.setColour (juce::Label::textColourId, warn ? col::redHot : col::textDim);
     stemsBox.setEnabled (id != 4);
 
     if (proc.isPreviewing())
@@ -299,7 +322,8 @@ void StemsPage::separateNow()
     if (src == nullptr) { ctx.toast ("Pick a sample in the tray first.", true); return; }
 
     const int id = engineBox.getSelectedId();
-    auto engine = id == 1 ? actions::Engine::quick : id == 2 ? actions::Engine::aiFast : id == 3 ? actions::Engine::aiBest : actions::Engine::ai6;
+    auto engine = id == 1 ? actions::Engine::quick : id == 2 ? actions::Engine::ai : id == 3 ? actions::Engine::aiMax
+                : id == 4 ? actions::Engine::ai6 : actions::Engine::python;
     actions::separate (proc, src, engine, stemsBox.getSelectedId() == 2);
 }
 
@@ -378,8 +402,8 @@ void StemsPage::paint (juce::Graphics& g)
     if (! lanes.isEmpty())
         return;
 
-    auto r = emptyArea.toFloat();
-    glossPanel (g, r, 10.0f, col::bg2, col::bg0, false, 0.02f);
+    auto r = emptyArea.toFloat().reduced (3.0f);
+    glassWindow (g, r, 10.0f, 1.0f);
 
     auto c = r.withSizeKeepingCentre (juce::jmin (640.0f, r.getWidth() - 40.0f), 160.0f);
     auto icon = icons::scissors();

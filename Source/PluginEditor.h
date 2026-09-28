@@ -57,10 +57,11 @@ private:
 
     // header
     juce::OwnedArray<juce::TextButton> tabButtons;
-    snag::IconButton gearBtn   { "settings", snag::theme::icons::gear(), {}, "icon" };
+    snag::IconButton gearBtn   { "settings", snag::theme::icons::gear(), {}, "chip" };
     snag::IconButton cancelBtn { "cancel", snag::theme::icons::close(), {}, "icon" };
     snag::LevelMeter outMeter;
-    juce::Rectangle<int> headerArea, hudArea, logoArea;
+    juce::Rectangle<int> headerArea, hudArea, logoArea, tabsArea, hudGlass;
+    snag::theme::GoldPlate goldPlate;
 
     // pages
     snag::BrowsePage  browse;

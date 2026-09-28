@@ -23,16 +23,18 @@ public:
 
         if (selected)
         {
-            glossPanel (g, r, 6.0f, col::bg4, col::bg2, true, 0.05f);
+            glassWell (g, r, 6.0f, true);
+            g.setColour (col::red);
+            g.fillRoundedRectangle (r.withWidth (3.0f).reduced (0.0f, 8.0f).translated (1.0f, 0.0f), 1.5f);
         }
         else if (isMouseOver())
         {
-            g.setColour (col::bg3);
+            g.setColour (juce::Colours::white.withAlpha (0.06f));
             g.fillRoundedRectangle (r, 6.0f);
         }
         else if (row % 2 == 0)
         {
-            g.setColour (col::bg2.withAlpha (0.6f));
+            g.setColour (juce::Colours::white.withAlpha (0.025f));
             g.fillRoundedRectangle (r, 6.0f);
         }
 
@@ -250,7 +252,9 @@ void LibraryPage::showRowMenu (int row)
 void LibraryPage::resized()
 {
     auto r = getLocalBounds().reduced (14, 10);
-    auto top = r.removeFromTop (38);
+    auto top = r.removeFromTop (46);
+    toolbarArea = top;
+    top = top.reduced (14, 4);
     refreshBtn.setBounds (top.removeFromRight (34).reduced (3));
     top.removeFromRight (6);
     revealBtn.setBounds (top.removeFromRight (140));
@@ -262,7 +266,10 @@ void LibraryPage::resized()
     folderLabel.setBounds (top);
 
     r.removeFromTop (10);
+    listGlass = r;
+    r = r.reduced (10, 8);
     auto header = r.removeFromTop (22);
+    headerArea = header;
     countLabel.setBounds (header.removeFromRight (160));
     r.removeFromTop (4);
     list.setBounds (r);
@@ -270,11 +277,11 @@ void LibraryPage::resized()
 
 void LibraryPage::paint (juce::Graphics& g)
 {
-    auto listArea = list.getBounds().toFloat().expanded (4.0f);
-    glossPanel (g, listArea, 10.0f, col::bg2, col::bg0, false, 0.02f);
+    glassWindow (g, toolbarArea.toFloat().reduced (3.0f, 1.0f), 9.0f, 0.8f);
+    glassWindow (g, listGlass.toFloat().reduced (3.0f), 10.0f, 1.0f);
+    auto listArea = list.getBounds().toFloat();
 
-    auto header = getLocalBounds().reduced (14, 10).withTrimmedTop (48).removeFromTop (22).toFloat();
-    sectionLabel (g, "Sample library", header);
+    sectionLabel (g, "Sample library", headerArea.toFloat().withTrimmedLeft (4.0f));
 
     if (shown.empty())
     {

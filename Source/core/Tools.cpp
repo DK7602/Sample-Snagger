@@ -1,4 +1,5 @@
 #include "Tools.h"
+#include "AiStems.h"
 #include "SnaggerBinaryData.h"
 
 namespace snag
@@ -28,7 +29,8 @@ juce::String ToolManager::displayName (Tool t)
         case Tool::ffmpeg: return "FFmpeg";
         case Tool::ytdlp:  return "yt-dlp";
         case Tool::deno:   return "Deno";
-        case Tool::ai:     return "AI Stem Engine";
+        case Tool::aiModels: return "AI Stem Models";
+        case Tool::ai:     return "Python AI Engine";
     }
     return {};
 }
@@ -40,7 +42,8 @@ juce::String ToolManager::description (Tool t)
         case Tool::ffmpeg: return "Reads video files (mp4, mov, mkv, webm...) and any audio format. Required for HQ downloads.";
         case Tool::ytdlp:  return "Grabs full-quality audio from YouTube, SoundCloud, TikTok, Instagram, Vimeo + 1000 more sites.";
         case Tool::deno:   return "Small JavaScript runtime that yt-dlp needs to read YouTube pages reliably.";
-        case Tool::ai:     return "Demucs neural network (runs locally) for studio-quality vocal / drum / bass / music stems. ~2-3 GB, needs Python 3.9+.";
+        case Tool::aiModels: return "Studio-quality AI stems built right in - no Python needed. Vocal + 4-stem models, 162 MB, downloaded once.";
+        case Tool::ai:     return "Optional: the same AI through Python + PyTorch - faster on NVIDIA graphics cards. ~2-3 GB, needs Python 3.9+.";
     }
     return {};
 }
@@ -147,6 +150,8 @@ juce::File ToolManager::locate (Tool t) const
             if (own.existsAsFile()) return own;
             return searchPath ({ exeName ("deno") }, commonBinDirs());
         }
+        case Tool::aiModels:
+            return ai::modelFile (ai::ModelId::ftVocals);
         case Tool::ai:
             return aiVenvPython();
     }
@@ -168,10 +173,25 @@ void ToolManager::refresh()
     std::map<Tool, Status> fresh;
     auto stop = [this] { return shuttingDown.load(); };
 
-    for (auto t : { Tool::ffmpeg, Tool::ytdlp, Tool::deno, Tool::ai })
+    for (auto t : { Tool::ffmpeg, Tool::ytdlp, Tool::deno, Tool::aiModels, Tool::ai })
     {
         Status s;
         s.path = locate (t);
+        if (t == Tool::aiModels)
+        {
+            int count = 0, mb = 0;
+            for (auto id : { ai::ModelId::ftVocals, ai::ModelId::htdemucs4, ai::ModelId::htdemucs6,
+                             ai::ModelId::ftDrums, ai::ModelId::ftBass, ai::ModelId::ftOther })
+                if (ai::isDownloaded (id)) { ++count; mb += ai::info (id).megabytes; }
+            s.found = ai::isAvailable() && ai::isDownloaded (ai::ModelId::ftVocals) && ai::isDownloaded (ai::ModelId::htdemucs4);
+            s.version = count > 0 ? juce::String (count) + (count == 1 ? " model, " : " models, ") + juce::String (mb) + " MB" : juce::String();
+            if (! ai::isAvailable())
+                s.detail = "Not supported on this computer";
+            else if (! s.found)
+                s.detail = count > 0 ? "Partly downloaded - click Install to finish" : "Not downloaded yet (or downloads on first use)";
+            fresh[t] = s;
+            continue;
+        }
         if (s.path.existsAsFile())
         {
             juce::String out;
@@ -189,6 +209,8 @@ void ToolManager::refresh()
                 case Tool::deno:
                     code = ProcessRunner::runAndCapture ({ s.path.getFullPathName(), "--version" }, out, 15000, stop);
                     s.version = out.upToFirstOccurrenceOf ("\n", false, false).fromFirstOccurrenceOf ("deno ", false, false).upToFirstOccurrenceOf (" ", false, false);
+                    break;
+                case Tool::aiModels:
                     break;
                 case Tool::ai:
                 {
@@ -526,6 +548,18 @@ bool ToolManager::installAi (Job& job)
     return true;
 }
 
+bool ToolManager::installAiModels (Job& job)
+{
+    if (! ai::isAvailable())
+    {
+        job.fail (ai::unavailableReason());
+        return false;
+    }
+    const auto base = settings.getString ("aiModelBaseUrl");
+    return ai::ensureModels (ai::Mode::vocalsMusic, job, base, 0.0f, 0.5f)
+        && ai::ensureModels (ai::Mode::fourStems, job, base, 0.5f, 1.0f);
+}
+
 bool ToolManager::install (Tool t, Job& job)
 {
     bool ok = false;
@@ -534,6 +568,7 @@ bool ToolManager::install (Tool t, Job& job)
         case Tool::ffmpeg: ok = installFfmpeg (job); break;
         case Tool::ytdlp:  ok = installYtDlp (job); break;
         case Tool::deno:   ok = installDeno (job); break;
+        case Tool::aiModels: ok = installAiModels (job); break;
         case Tool::ai:     ok = installAi (job); break;
     }
     if (ok)

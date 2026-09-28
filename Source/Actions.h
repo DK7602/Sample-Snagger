@@ -15,7 +15,8 @@ namespace snag::actions
     void downloadUrl (SnaggerProcessor&, const juce::String& url, double inSec = -1.0, double outSec = -1.0,
                       const juce::String& titleHint = {});
 
-    enum class Engine { quick, aiFast, aiBest, ai6 };
+    /** quick = built-in DSP; ai / aiMax / ai6 = built-in AI (no Python); python = optional Python engine. */
+    enum class Engine { quick, ai, aiMax, ai6, python };
     juce::String engineName (Engine);
 
     /** Split a clip into stems; adds the stems to the session right after the clip. */

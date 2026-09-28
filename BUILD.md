@@ -1,14 +1,14 @@
 # Building Sample Snagger
 
-Everything (JUCE 8.0.9, Signalsmith Stretch, and on Windows the WebView2 SDK) is downloaded automatically
-by CMake. You only need a compiler and CMake 3.24+.
+Everything (JUCE 8.0.9, Signalsmith Stretch, demucs.cpp + Eigen for the built-in AI, and on Windows the WebView2 SDK)
+is downloaded automatically by CMake. Pass `-DSNAGGER_BUILTIN_AI=OFF` to leave the AI engine out. You only need a compiler and CMake 3.24+.
 
 ## Option A - let GitHub build it (no dev tools needed)
 1. Create a repository on GitHub and push this folder to it.
 2. Open the **Actions** tab -> *Build Sample Snagger* runs automatically on every push.
 3. When it's green, download the installers from the run's **Artifacts** section.
-4. To publish a release: create a tag, e.g. `git tag v1.0.0 && git push --tags`. The installers are attached
-   to a GitHub Release.
+4. To publish a release: put `[release]` in a commit message on `main`, or push a tag such as `v1.2.0`.
+   The installers are attached to a GitHub Release named after the version in `CMakeLists.txt`.
 
 ## Option B - build on your own machine
 
@@ -17,7 +17,7 @@ by CMake. You only need a compiler and CMake 3.24+.
 brew install cmake ninja
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
 cmake --build build --parallel
-./build/SnaggerTests_artefacts/Release/SnaggerTests          # optional: run the tests
+./build/SnaggerTests_artefacts/Release/SnaggerTests          # optional: run the tests (--ai also tests the AI stems)
 bash packaging/mac/build_pkg.sh build/SampleSnagger_artefacts/Release dist
 ```
 To just copy the plug-ins yourself:
@@ -77,13 +77,16 @@ Source/
     AudioData.h        immutable audio + Clip (name, chops, undo/redo)
     Session.*          the tray; clips cached as WAV and saved with the DAW project
     EditOps.*          trim/cut/fade/normalize/reverse/filter, Signalsmith pitch+time, transients, BPM
-    QuickSplit.*       built-in STFT stem separator (centre extraction + harmonic/percussive masks)
+    QuickSplit.*       instant STFT stem separator (centre extraction + harmonic/percussive masks)
+    AiStems.*          built-in AI stems: model downloads, resampling, 4 / 6 stem and vocal modes
     WebCapture.*       receives audio from the browser page (hindsight ring + recorder)
-    Tools.*            finds / installs FFmpeg, yt-dlp, Deno and the Demucs AI environment
+    Tools.*            finds / installs FFmpeg, yt-dlp, Deno, the AI models and the optional Python AI
     Jobs.*, Process.h  background job runner, command-line process runner
     AudioFileIO.*      loading any audio/video (FFmpeg fallback), WAV export
-  ui/                  Theme (LookAndFeel, fonts, icons), pages, waveform, tray, settings
+  ai/DemucsBridge.*    runs demucs.cpp (Demucs v4 in C++/Eigen) in parallel chunks; the only code that sees Eigen
+  ui/                  Theme (gold plate, black glass, satin controls, fonts, icons), pages, waveform, tray, settings
 Resources/
   Scripts/webtap.js     injected into web pages to tap <video>/<audio> audio
-  Scripts/snagger_ai.py  installs Demucs in a private venv and runs separation
+  Scripts/snagger_ai.py  optional Python AI engine (GPU): installs Demucs in a private venv
+  gold_plate.jpg         the faceplate texture, rendered by Design/make_gold.py
 ```

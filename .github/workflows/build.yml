@@ -41,6 +41,15 @@ jobs:
       - name: Test
         run: ./build/SnaggerTests_artefacts/${{ env.BUILD_TYPE }}/SnaggerTests
 
+      - name: Cache AI models
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Application Support/Sample Snagger/Models
+          key: demucs-cpp-models-v1
+
+      - name: Test built-in AI stems (real models)
+        run: ./build/SnaggerTests_artefacts/${{ env.BUILD_TYPE }}/SnaggerTests --ai
+
       - name: Ad-hoc sign bundles
         run: |
           ART="build/SampleSnagger_artefacts/${{ env.BUILD_TYPE }}"
@@ -78,6 +87,15 @@ jobs:
 
       - name: Test
         run: build\SnaggerTests_artefacts\${{ env.BUILD_TYPE }}\SnaggerTests.exe
+
+      - name: Cache AI models
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Roaming\Sample Snagger\Models
+          key: demucs-cpp-models-v1
+
+      - name: Test built-in AI stems (real models)
+        run: build\SnaggerTests_artefacts\${{ env.BUILD_TYPE }}\SnaggerTests.exe --ai
 
       - name: Build installer (Inno Setup)
         shell: pwsh
@@ -117,6 +135,15 @@ jobs:
 
       - name: Test
         run: xvfb-run -a ./build/SnaggerTests_artefacts/${{ env.BUILD_TYPE }}/SnaggerTests
+
+      - name: Cache AI models
+        uses: actions/cache@v4
+        with:
+          path: ~/.config/Sample Snagger/Models
+          key: demucs-cpp-models-v1
+
+      - name: Test built-in AI stems (real models)
+        run: xvfb-run -a ./build/SnaggerTests_artefacts/${{ env.BUILD_TYPE }}/SnaggerTests --ai
 
       - name: Package
         run: |
@@ -164,4 +191,7 @@ jobs:
             **Linux:** `Sample-Snagger-*-Linux.tar.gz`, then run `./install.sh`.
 
             After installing, rescan plug-ins in your DAW. Sample Snagger is an instrument, so put it on an instrument / MIDI track.
-            Open Settings (gear icon) once and click INSTALL ALL for HQ downloads.
+            Open Settings (gear icon) once and click INSTALL ALL for HQ downloads and the AI stem models.
+
+            **New in 1.1:** built-in AI stem separation (no Python needed), a brushed 24k gold / black glass look,
+            and an "Opens in: My browser" option to open sites in Chrome, Safari or whatever your default browser is.

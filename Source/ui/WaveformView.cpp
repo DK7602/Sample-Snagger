@@ -115,7 +115,7 @@ void WaveformView::clampView()
 
 juce::Rectangle<float> WaveformView::getWaveArea() const
 {
-    return getLocalBounds().toFloat().reduced (1.0f).withTrimmedTop (22.0f);
+    return getLocalBounds().toFloat().reduced (5.0f).withTrimmedTop (20.0f);
 }
 
 double WaveformView::xToSample (float x) const
@@ -152,10 +152,10 @@ void WaveformView::resized()
 void WaveformView::paint (juce::Graphics& g)
 {
     auto bounds = getLocalBounds().toFloat();
-    glossPanel (g, bounds, 8.0f, col::bg2, col::bg0, false, 0.03f);
+    glassWindow (g, bounds.reduced (3.0f), 8.0f, 0.0f);
 
     auto area = getWaveArea();
-    auto ruler = bounds.reduced (1.0f).withHeight (22.0f);
+    auto ruler = bounds.reduced (5.0f).withHeight (22.0f);
 
     if (clip == nullptr || clip->audio == nullptr)
     {
@@ -215,6 +215,7 @@ void WaveformView::paint (juce::Graphics& g)
                           (int) viewStart, (int) (viewStart + viewLen), col::gold, true);
             cacheKey = { clip->audio.get(), viewStart, viewLen, w, h };
         }
+        g.setOpacity (1.0f);
         g.drawImage (waveCache, area, juce::RectanglePlacement::stretchToFit);
     }
 
@@ -528,6 +529,11 @@ void WaveformView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseW
         setViewStart (viewStart - w.deltaX * viewLen * 0.3);
 }
 
+void WaveformView::paintOverChildren (juce::Graphics& g)
+{
+    glassGlare (g, getLocalBounds().toFloat().reduced (3.0f), 8.0f, 0.9f);
+}
+
 void WaveformView::mouseMagnify (const juce::MouseEvent& e, float scaleFactor)
 {
     if (clip != nullptr && scaleFactor > 0)
@@ -537,8 +543,8 @@ void WaveformView::mouseMagnify (const juce::MouseEvent& e, float scaleFactor)
 //==============================================================================
 void WaveOverview::paint (juce::Graphics& g)
 {
-    auto r = getLocalBounds().toFloat();
-    glossPanel (g, r, 5.0f, col::bg2, col::bg0, false, 0.03f);
+    auto r = getLocalBounds().toFloat().reduced (3.0f);
+    glassWindow (g, r, 5.0f, 0.0f);
     auto clip = view.getClip();
     if (clip == nullptr || clip->audio == nullptr)
         return;
@@ -561,6 +567,7 @@ void WaveOverview::paint (juce::Graphics& g)
     g.setColour (col::gold.withAlpha (0.08f));
     g.fillRoundedRectangle (vr, 3.0f);
     goldBorder (g, vr, 3.0f, 1.0f, 0.9f);
+    glassGlare (g, r, 5.0f, 0.8f);
 }
 
 void WaveOverview::mouseDown (const juce::MouseEvent& e)
@@ -568,7 +575,7 @@ void WaveOverview::mouseDown (const juce::MouseEvent& e)
     auto clip = view.getClip();
     if (clip == nullptr || clip->audio == nullptr) return;
     const double n = clip->audio->getNumSamples();
-    const double s = (double) e.x / getWidth() * n;
+    const double s = (double) (e.x - 5) / juce::jmax (1, getWidth() - 10) * n;
     if (s >= view.getViewStart() && s <= view.getViewStart() + view.getViewLength())
         grabOffset = s - view.getViewStart();
     else
@@ -583,7 +590,7 @@ void WaveOverview::mouseDrag (const juce::MouseEvent& e)
     auto clip = view.getClip();
     if (clip == nullptr || clip->audio == nullptr) return;
     const double n = clip->audio->getNumSamples();
-    view.setViewStart ((double) e.x / getWidth() * n - grabOffset);
+    view.setViewStart ((double) (e.x - 5) / juce::jmax (1, getWidth() - 10) * n - grabOffset);
     repaint();
 }
 

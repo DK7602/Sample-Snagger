@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(SampleSnagger VERSION 1.0.0 LANGUAGES C CXX)
+project(SampleSnagger VERSION 1.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,6 +16,7 @@ endif()
 option(SNAGGER_WEB_BROWSER "Build the in-plugin web browser (needs WebKit on Linux, WebView2 on Windows)" ON)
 option(SNAGGER_BUILD_AAX   "Also build an AAX plug-in for Pro Tools (needs PACE signing for retail Pro Tools)" OFF)
 option(SNAGGER_BUILD_TESTS "Build the headless test + screenshot runner" ON)
+option(SNAGGER_BUILTIN_AI  "Build the built-in AI stem engine (Demucs v4 in C++, no Python needed)" ON)
 
 # ------------------------------------------------------------------------------------------------
 # Dependencies (fetched automatically; point FETCHCONTENT_SOURCE_DIR_<NAME> at local copies to skip)
@@ -59,6 +60,22 @@ FetchContent_Declare(signalsmith_stretch
     GIT_TAG        1.4.0
     GIT_SHALLOW    ON)
 FetchContent_MakeAvailable(signalsmith_stretch)
+
+if(SNAGGER_BUILTIN_AI)
+    # Eigen 3.4.0 (GitHub mirror of the official tag, commit 3147391d) - header only
+    FetchContent_Declare(eigen
+        GIT_REPOSITORY https://github.com/ROCm/eigen.git
+        GIT_TAG        3.4.0
+        GIT_SHALLOW    ON
+        SOURCE_SUBDIR  do-not-add-subdirectory)
+    # demucs.cpp - C++17 inference for Demucs v4 hybrid transformer (MIT, by Sevag H.)
+    FetchContent_Declare(demucs_cpp
+        GIT_REPOSITORY https://github.com/sevagh/demucs.cpp.git
+        GIT_TAG        f1206e9adeea103aef4a636b9e62297cf1f8e34e
+        GIT_SUBMODULES ""
+        SOURCE_SUBDIR  do-not-add-subdirectory)
+    FetchContent_MakeAvailable(eigen demucs_cpp)
+endif()
 
 # ------------------------------------------------------------------------------------------------
 # Plug-in formats
@@ -117,8 +134,8 @@ juce_add_binary_data(SnaggerBinaryData
         Resources/Fonts/Montserrat-Bold.ttf
         Resources/Scripts/snagger_ai.py
         Resources/Scripts/webtap.js
-        Resources/icon.png
-        Resources/logo_256.png)
+        Resources/logo_256.png
+        Resources/gold_plate.jpg)
 
 set(SNAGGER_SOURCES
     Source/PluginProcessor.cpp
@@ -133,6 +150,7 @@ set(SNAGGER_SOURCES
     Source/core/Tools.cpp
     Source/core/Jobs.cpp
     Source/core/WebCapture.cpp
+    Source/core/AiStems.cpp
     Source/ui/Theme.cpp
     Source/ui/Widgets.cpp
     Source/ui/WaveformView.cpp
@@ -182,6 +200,25 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 target_compile_definitions(SnaggerShared INTERFACE ${SNAGGER_DEFS})
+
+if(SNAGGER_BUILTIN_AI)
+    file(GLOB SNAGGER_DEMUCS_SOURCES "${demucs_cpp_SOURCE_DIR}/src/*.cpp")
+    add_library(snagger_demucs STATIC ${SNAGGER_DEMUCS_SOURCES} Source/ai/DemucsBridge.cpp)
+    target_include_directories(snagger_demucs SYSTEM PRIVATE "${eigen_SOURCE_DIR}" "${demucs_cpp_SOURCE_DIR}/src")
+    target_include_directories(snagger_demucs PUBLIC Source/ai)
+    set_target_properties(snagger_demucs PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON POSITION_INDEPENDENT_CODE ON)
+    target_compile_definitions(snagger_demucs PRIVATE NDEBUG EIGEN_NO_DEBUG)
+    # Baseline instruction set only (SSE2 on x86-64, NEON on Apple Silicon). Building this library
+    # with AVX2 would be faster, but the linker can then pick AVX2 copies of shared inline code
+    # (std::vector etc.) for the whole plug-in, which would crash hosts on older CPUs.
+    if(MSVC)
+        target_compile_options(snagger_demucs PRIVATE /bigobj /EHsc /W0 "$<$<NOT:$<CONFIG:Debug>>:/O2;/Ob2;/fp:fast>")
+    else()
+        target_compile_options(snagger_demucs PRIVATE -O3 -fno-math-errno -w)
+    endif()
+    target_compile_definitions(SnaggerShared INTERFACE SNAGGER_BUILTIN_AI=1)
+    target_link_libraries(SnaggerShared INTERFACE snagger_demucs)
+endif()
 
 if(MSVC)
     target_compile_options(SnaggerShared INTERFACE /bigobj /utf-8)

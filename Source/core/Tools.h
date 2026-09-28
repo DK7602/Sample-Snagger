@@ -12,11 +12,12 @@ namespace snag
       FFmpeg  - decodes video / exotic audio, needed by yt-dlp
       yt-dlp  - high-quality audio from YouTube & 1000+ sites
       Deno    - JavaScript runtime yt-dlp uses for YouTube
-      AI      - a private Python environment with Demucs for studio-quality stems */
+      AI models - weights for the built-in AI stem engine (no Python)
+      AI      - optional private Python environment with Demucs (fastest on NVIDIA GPUs) */
 class ToolManager : public juce::ChangeBroadcaster
 {
 public:
-    enum class Tool { ffmpeg, ytdlp, deno, ai };
+    enum class Tool { ffmpeg, ytdlp, deno, aiModels, ai };   // ai = optional Python engine
 
     struct Status
     {
@@ -80,6 +81,7 @@ private:
     bool installYtDlp (Job&);
     bool installDeno (Job&);
     bool installAi (Job&);
+    bool installAiModels (Job&);
 };
 
 //==============================================================================

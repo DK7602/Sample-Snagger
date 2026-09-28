@@ -47,6 +47,7 @@ public:
 
     void resized() override;
     void paint (juce::Graphics&) override;
+    juce::Rectangle<int> headGlass, readoutGlass;
 
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;

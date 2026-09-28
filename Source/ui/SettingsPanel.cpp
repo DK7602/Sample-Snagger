@@ -1,6 +1,7 @@
 #include "SettingsPanel.h"
 #include "../PluginProcessor.h"
 #include "../Actions.h"
+#include "../core/AiStems.h"
 
 #include "../StandaloneBridge.h"
 
@@ -43,6 +44,13 @@ public:
             });
         };
         addAndMakeVisible (locateBtn);
+
+        if (tool == ToolManager::Tool::aiModels)
+        {
+            locateBtn.setButtonText ("SHOW FOLDER");
+            locateBtn.setTooltip ("Where the AI models are kept");
+            locateBtn.onClick = [] { snag::ai::modelsDir().revealToUser(); };
+        }
         update();
     }
 
@@ -70,7 +78,7 @@ public:
     void paint (juce::Graphics& g) override
     {
         auto r = getLocalBounds().toFloat().reduced (1.0f);
-        glossPanel (g, r, 8.0f, col::bg3, col::bg1, false, 0.04f);
+        glassWell (g, r, 8.0f);
 
         auto c = r.reduced (16.0f, 10.0f);
         c.removeFromRight (240.0f);
@@ -120,11 +128,12 @@ SettingsPanel::SettingsPanel (EditorContext& c) : ctx (c), proc (c.getProcessor(
     closeBtn.onClick = [this] { close(); };
     addAndMakeVisible (closeBtn);
 
-    for (auto t : { ToolManager::Tool::ffmpeg, ToolManager::Tool::ytdlp, ToolManager::Tool::deno, ToolManager::Tool::ai })
+    for (auto t : { ToolManager::Tool::ffmpeg, ToolManager::Tool::ytdlp, ToolManager::Tool::deno,
+                    ToolManager::Tool::aiModels, ToolManager::Tool::ai })
         addAndMakeVisible (rows.add (new ToolRow (*this, t)));
 
     setStyle (installAllBtn, "redFill");
-    installAllBtn.setTooltip ("Install everything that's missing (FFmpeg, yt-dlp, Deno)");
+    installAllBtn.setTooltip ("Install everything that's missing (FFmpeg, yt-dlp, Deno and the AI stem models)");
     installAllBtn.onClick = [this]
     {
         int n = 0;
@@ -137,7 +146,7 @@ SettingsPanel::SettingsPanel (EditorContext& c) : ctx (c), proc (c.getProcessor(
                 actions::installTool (proc, r->tool, [safe] (bool) { if (safe != nullptr) { safe->installing = false; safe->update(); } });
                 ++n;
             }
-        if (n == 0) ctx.toast ("FFmpeg, yt-dlp and Deno are already installed.");
+        if (n == 0) ctx.toast ("Everything is already installed.");
     };
     addAndMakeVisible (installAllBtn);
     setStyle (recheckBtn, "ghost");
@@ -236,7 +245,7 @@ void SettingsPanel::mouseDown (const juce::MouseEvent& e)
 
 void SettingsPanel::resized()
 {
-    card = getLocalBounds().withSizeKeepingCentre (juce::jmin (820, getWidth() - 40), juce::jmin (596, getHeight() - 40));
+    card = getLocalBounds().withSizeKeepingCentre (juce::jmin (820, getWidth() - 40), juce::jmin (640, getHeight() - 40));
     auto r = card.reduced (24, 18);
     closeBtn.setBounds (r.getRight() - 30, r.getY(), 30, 30);
     r.removeFromTop (44);
@@ -249,8 +258,8 @@ void SettingsPanel::resized()
 
     for (auto* row : rows)
     {
-        row->setBounds (r.removeFromTop (74));
-        r.removeFromTop (6);
+        row->setBounds (r.removeFromTop (66));
+        r.removeFromTop (5);
     }
 
     r.removeFromTop (12);
@@ -277,7 +286,8 @@ void SettingsPanel::paint (juce::Graphics& g)
     auto c = card.toFloat();
     juce::Path shape; shape.addRoundedRectangle (c, 12.0f);
     neonGlow (g, shape, col::gold, 24.0f, 0.25f);
-    glossPanel (g, c, 12.0f, col::bg3, col::bg0, true, 0.05f);
+    glassWindow (g, c, 12.0f, 0.8f, false);
+    goldBorder (g, c, 12.0f, 1.2f, 0.9f);
 
     auto r = card.reduced (24, 18).toFloat();
     auto titleRow = r.removeFromTop (34.0f);

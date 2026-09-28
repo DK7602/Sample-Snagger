@@ -14,6 +14,7 @@ public:
     {
         setTooltip (clip->name + "\nClick: select - Double-click: edit - Drag: into your DAW - Right-click: more");
         setMouseCursor (juce::MouseCursor::PointingHandCursor);
+        setRepaintsOnMouseActivity (true);
     }
 
     void paint (juce::Graphics& g) override
@@ -22,16 +23,18 @@ public:
         const bool selected = owner.getProcessor().session.getSelected() == clip;
         const auto accent = clip->isStem() ? stemColour (clip->stemName) : col::gold;
 
+        r = r.reduced (1.5f);
         if (selected)
         {
             juce::Path p; p.addRoundedRectangle (r, 8.0f);
-            neonGlow (g, p, col::red, 10.0f, 0.55f);
+            neonGlow (g, p, col::red, 10.0f, 0.45f);
         }
-        glossPanel (g, r, 8.0f, selected ? col::bg4 : col::bg3, col::bg1, selected, 0.06f);
+        satinSurface (g, r, 8.0f, isMouseOver (true) || selected, false, true);
+        goldBorder (g, r.reduced (0.6f), 8.0f, 1.0f, selected ? 0.8f : 0.25f);
         if (selected)
         {
-            g.setColour (col::red);
-            g.fillRoundedRectangle (r.withHeight (2.5f).reduced (14.0f, 0.0f).translated (0.0f, r.getHeight() - 3.0f), 1.0f);
+            juce::Path bar; bar.addRoundedRectangle (r.withHeight (2.5f).reduced (14.0f, 0.0f).translated (0.0f, r.getHeight() - 3.5f), 1.0f);
+            glowPath (g, bar, col::red, 1.0f);
         }
 
         auto c = r.reduced (10.0f, 7.0f);
@@ -242,9 +245,9 @@ void ClipTray::rebuild()
 
 void ClipTray::resized()
 {
-    auto r = getLocalBounds().reduced (14, 8);
+    auto r = getLocalBounds().reduced (14, 6).reduced (12, 8);
     auto left = r.removeFromLeft (110);
-    left.removeFromTop (22);
+    left.removeFromTop (20);
     importBtn.setBounds (left.removeFromTop (32));
     left.removeFromTop (6);
     clearBtn.setBounds (left.removeFromTop (24));
@@ -264,15 +267,10 @@ void ClipTray::resized()
 
 void ClipTray::paint (juce::Graphics& g)
 {
-    auto r = getLocalBounds().toFloat();
-    g.setGradientFill (juce::ColourGradient (col::bg2, 0, r.getY(), col::bg0, 0, r.getBottom(), false));
-    g.fillRect (r);
-    auto line = goldGradient (r.withHeight (1.0f), false);
-    line.multiplyOpacity (0.6f);
-    g.setGradientFill (line);
-    g.fillRect (r.withHeight (1.0f));
+    // the session dock: one long black glass window along the bottom of the plate
+    glassWindow (g, getLocalBounds().toFloat().reduced (17.0f, 7.0f), 10.0f, 0.9f);
 
-    auto head = getLocalBounds().reduced (14, 8).removeFromLeft (110).removeFromTop (18).toFloat();
+    auto head = getLocalBounds().reduced (14, 6).reduced (12, 8).removeFromLeft (110).removeFromTop (18).toFloat();
     sectionLabel (g, "Session", head);
     g.setColour (col::textFaint);
     g.setFont (ui (10.0f, true));

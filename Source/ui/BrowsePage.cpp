@@ -11,6 +11,18 @@ using namespace theme;
 
 static const char* homeUrl = "https://www.youtube.com";
 
+/** Site chip that knows whether it was right-clicked. */
+struct LinkChip : juce::TextButton
+{
+    using juce::TextButton::TextButton;
+    using juce::TextButton::clicked;
+    std::function<void (bool rightClick)> onChipClick;
+    void clicked (const juce::ModifierKeys& mods) override
+    {
+        if (onChipClick) onChipClick (mods.isPopupMenu());
+    }
+};
+
 //==============================================================================
 #if JUCE_WEB_BROWSER
 class BrowsePage::Browser : public juce::WebBrowserComponent
@@ -87,12 +99,54 @@ BrowsePage::BrowsePage (EditorContext& c) : ctx (c), proc (c.getProcessor())
     };
     for (auto& [name, url] : links)
     {
-        auto* b = quickLinks.add (new juce::TextButton (name));
+        auto* b = new LinkChip (name);
+        quickLinks.add (b);
         setStyle (*b, "chip");
         juce::String u (url);
-        b->onClick = [this, u] { goTo (u); };
+        b->onChipClick = [this, u] (bool rightClick)
+        {
+            if (rightClick) openInSystemBrowser (u);
+            else            goTo (u);
+        };
+        b->setTooltip ("Open " + juce::String (name) + " (right-click: open in your own browser)");
         addAndMakeVisible (b);
     }
+
+    setStyle (openModeBtn, "chip");
+    openModeBtn.setTooltip ("Choose where sites open: inside Sample Snagger (LIVE REC + hindsight work) "
+                            "or in your own browser - Chrome, Safari, Edge... (copy a video link back here for HQ SNAG)");
+    openModeBtn.onClick = [this]
+    {
+        juce::PopupMenu m;
+        m.addSectionHeader ("Open sites in...");
+        m.addItem (1, "Sample Snagger's built-in browser", true, ! opensExternally());
+        m.addItem (2, "My browser (Chrome, Safari, Edge...)", true, opensExternally());
+        m.addSeparator();
+        m.addItem (3, "Open this page in my browser now");
+        juce::Component::SafePointer<BrowsePage> safe (this);
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&openModeBtn), [safe] (int r)
+        {
+            if (safe == nullptr) return;
+            if (r == 1) safe->setOpensExternally (false);
+            else if (r == 2) safe->setOpensExternally (true);
+            else if (r == 3) safe->openExternalBtn.triggerClick();
+        });
+    };
+    addAndMakeVisible (openModeBtn);
+    updateOpenModeButton();
+
+    openExternalBtn.setTooltip ("Open this page in your own browser (Chrome, Safari, Edge...)");
+    openExternalBtn.onClick = [this]
+    {
+        withPageInfo ([this] (const juce::var& info)
+        {
+            auto u = info.getProperty ("url", "").toString();
+            if (! u.startsWithIgnoreCase ("http")) u = normaliseUrl (urlField.getText());
+            if (u.isEmpty()) u = homeUrl;
+            openInSystemBrowser (u);
+        });
+    };
+    addAndMakeVisible (openExternalBtn);
 
 #if JUCE_WEB_BROWSER
     // The web view itself is created lazily, once this page is really on screen
@@ -245,18 +299,62 @@ void BrowsePage::withPageInfo (std::function<void (const juce::var&)> cb)
 #endif
 }
 
-void BrowsePage::goTo (juce::String url)
+juce::String BrowsePage::normaliseUrl (juce::String url)
 {
     url = url.trim();
     if (url.isEmpty())
-        return;
-
+        return {};
     const bool looksLikeUrl = url.startsWithIgnoreCase ("http://") || url.startsWithIgnoreCase ("https://")
                               || (! url.containsChar (' ') && url.containsChar ('.'));
     if (! looksLikeUrl)
-        url = "https://www.youtube.com/results?search_query=" + juce::URL::addEscapeChars (url, true);
-    else if (! url.startsWithIgnoreCase ("http"))
-        url = "https://" + url;
+        return "https://www.youtube.com/results?search_query=" + juce::URL::addEscapeChars (url, true);
+    if (! url.startsWithIgnoreCase ("http"))
+        return "https://" + url;
+    return url;
+}
+
+bool BrowsePage::opensExternally() const
+{
+    return proc.getSettings().getString ("openSitesExternally", hasEmbeddedBrowser() ? "0" : "1") == "1";
+}
+
+void BrowsePage::setOpensExternally (bool shouldOpenExternally)
+{
+    proc.getSettings().setString ("openSitesExternally", shouldOpenExternally ? "1" : "0");
+    updateOpenModeButton();
+    ctx.toast (shouldOpenExternally ? "Sites now open in your own browser. Copy a video's link back here and hit HQ SNAG."
+                                    : "Sites now open inside Sample Snagger (LIVE REC and hindsight work here).");
+}
+
+void BrowsePage::updateOpenModeButton()
+{
+    openModeBtn.setButtonText (opensExternally() ? juce::String ("Opens in: My browser") : juce::String ("Opens in: Sample Snagger"));
+    openModeBtn.setToggleState (opensExternally(), juce::dontSendNotification);
+    resized();
+}
+
+void BrowsePage::openInSystemBrowser (const juce::String& url)
+{
+    auto u = normaliseUrl (url);
+    if (u.isEmpty()) return;
+    if (juce::URL (u).launchInDefaultBrowser())
+        ctx.toast ("Opened in your browser. To grab audio from there: copy the video's link, paste it in the address bar here and hit HQ SNAG.");
+    else
+        ctx.toast ("Couldn't open your browser.", true);
+}
+
+void BrowsePage::goTo (juce::String url)
+{
+    url = normaliseUrl (url);
+    if (url.isEmpty())
+        return;
+
+    if (opensExternally())
+    {
+        urlField.setText (url, false);
+        openInSystemBrowser (url);
+        return;
+    }
 
     currentUrl = url;
     urlField.setText (url, false);
@@ -394,6 +492,21 @@ void BrowsePage::markPoint (bool isIn)
 
 void BrowsePage::snagHq()
 {
+    // A link typed / pasted into the address bar (e.g. copied from Chrome or Safari) wins.
+    auto typed = urlField.getText().trim();
+    if (typed.isEmpty() && opensExternally())
+    {
+        auto clip = juce::SystemClipboard::getTextFromClipboard().trim();
+        if (clip.startsWithIgnoreCase ("http") && ! clip.containsChar ('\n'))
+            typed = clip;
+    }
+    if (typed.startsWithIgnoreCase ("http") && (opensExternally() || typed != currentUrl || ! hasEmbeddedBrowser()))
+    {
+        urlField.setText (typed, false);
+        actions::downloadUrl (proc, typed);
+        return;
+    }
+
     withPageInfo ([this] (const juce::var& info)
     {
         auto url = info.getProperty ("url", "").toString();
@@ -511,18 +624,25 @@ void BrowsePage::resized()
 {
     auto r = getLocalBounds().reduced (14, 10);
 
-    auto nav = r.removeFromTop (38);
+    auto nav = r.removeFromTop (44);
+    navArea = nav;
+    nav = nav.reduced (10, 4);
     for (auto* b : { &backBtn, &fwdBtn, &reloadBtn, &homeBtn })
     {
         b->setBounds (nav.removeFromLeft (34).reduced (2));
     }
     nav.removeFromLeft (8);
+    openExternalBtn.setBounds (nav.removeFromRight (34).reduced (2));
+    nav.removeFromRight (6);
     goBtn.setBounds (nav.removeFromRight (64).reduced (0, 2));
     nav.removeFromRight (8);
     urlField.setBounds (nav.reduced (0, 2));
 
     r.removeFromTop (8);
     auto links = r.removeFromTop (26);
+    const int modeW = (int) juce::GlyphArrangement::getStringWidth (theme::ui (11.5f, true), openModeBtn.getButtonText()) + 34;
+    openModeBtn.setBounds (links.removeFromRight (modeW));
+    links.removeFromRight (10);
     for (auto* b : quickLinks)
     {
         const int w = (int) juce::GlyphArrangement::getStringWidth (ui (11.5f, true), b->getButtonText()) + 28;
@@ -582,9 +702,13 @@ void BrowsePage::resized()
 
 void BrowsePage::paint (juce::Graphics& g)
 {
+    // address bar
+    glassWindow (g, navArea.toFloat().reduced (3.0f, 1.0f), 9.0f, 0.8f);
+
     // browser frame
     auto frame = browserArea.toFloat().expanded (1.0f);
-    glossPanel (g, frame, 8.0f, col::bg1, col::bg0, true, 0.0f);
+    glassWindow (g, frame, 8.0f, 0.0f);
+    goldBorder (g, frame, 8.0f, 1.0f, 0.5f);
 
 #if ! JUCE_WEB_BROWSER
     auto inner = browserArea.toFloat().reduced (40.0f);
@@ -602,8 +726,8 @@ void BrowsePage::paint (juce::Graphics& g)
 #endif
 
     // capture bar
-    auto bar = captureBarArea.toFloat();
-    glossPanel (g, bar, 10.0f, col::bg3, col::bg1, true, 0.05f);
+    auto bar = captureBarArea.toFloat().reduced (3.0f, 1.0f);
+    glassWindow (g, bar, 10.0f, 0.8f);
 
     auto heads = captureBarArea.reduced (14, 8).removeFromTop (16).toFloat();
     auto place = [&] (juce::Component& c, const juce::String& text)
@@ -616,7 +740,7 @@ void BrowsePage::paint (juce::Graphics& g)
     place (importBtn, "More sources");
 
     // divider lines
-    g.setColour (col::line);
+    g.setColour (juce::Colours::white.withAlpha (0.08f));
     for (auto* c : { static_cast<juce::Component*> (grabButtons.getFirst()), static_cast<juce::Component*> (&markInBtn), static_cast<juce::Component*> (&importBtn) })
         g.drawVerticalLine (c->getX() - 10, bar.getY() + 12.0f, bar.getBottom() - 12.0f);
 }

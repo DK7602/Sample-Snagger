@@ -2,6 +2,7 @@
 #include "core/AudioFileIO.h"
 #include "core/EditOps.h"
 #include "core/QuickSplit.h"
+#include "core/AiStems.h"
 
 namespace snag::actions
 {
@@ -261,10 +262,11 @@ juce::String engineName (Engine e)
 {
     switch (e)
     {
-        case Engine::quick:  return "Quick Split (built-in)";
-        case Engine::aiFast: return "AI - Fast (htdemucs)";
-        case Engine::aiBest: return "AI - Best (htdemucs_ft)";
-        case Engine::ai6:    return "AI - 6 stems (+guitar, piano)";
+        case Engine::quick:  return "Quick Split (instant, rough)";
+        case Engine::ai:     return "AI Studio (built-in)";
+        case Engine::aiMax:  return "AI Studio Max (slower, cleanest)";
+        case Engine::ai6:    return "AI 6 Stems (+ guitar, piano)";
+        case Engine::python: return "AI via Python (GPU)";
     }
     return {};
 }
@@ -329,18 +331,48 @@ void separate (SnaggerProcessor& p, Clip::Ptr clip, Engine engine, bool fourStem
         return;
     }
 
-    // ---- AI engine ----
+    // ---- built-in AI engine (no Python) ----
     auto& tools = p.getTools();
     auto python = tools.getPath (ToolManager::Tool::ai);
+
+    if (engine != Engine::python && ai::isAvailable())
+    {
+        const auto mode = engine == Engine::ai6 ? ai::Mode::sixStems
+                        : ! fourStems            ? ai::Mode::vocalsMusic
+                        : engine == Engine::aiMax ? ai::Mode::fourStemsMax
+                                                  : ai::Mode::fourStems;
+        const auto baseUrl = p.getSettings().getString ("aiModelBaseUrl");
+        const int downloadMB = ai::downloadMegabytesFor (mode);
+        if (downloadMB > 0)
+            notify (p, "First time: downloading the AI model (" + juce::String (downloadMB) + " MB). After that it works offline.");
+
+        p.jobs.start ("AI Split", [audio, mode, baseUrl, makeStem] (Job& job)
+        {
+            std::vector<ai::Stem> stems;
+            if (! ai::separate (*audio, mode, job, baseUrl, stems))
+                return;
+            for (auto& st : stems)
+                job.clips.push_back (makeStem (st.name, st.audio));
+        }, finish);
+        return;
+    }
+
+    if (engine != Engine::python && ! python.existsAsFile())
+    {
+        notify (p, ai::unavailableReason(), true);
+        return;
+    }
+
+    // ---- optional Python engine (fastest with an NVIDIA GPU) ----
     if (! python.existsAsFile())
     {
-        notify (p, "AI stems need the AI Stem Engine. Open Settings (gear) and click Install next to it - or use Quick Split now.", true);
+        notify (p, "The Python AI engine isn't installed. Open Settings (gear) to install it - or pick AI Studio (built-in), which needs no Python.", true);
         if (p.onRequestSettings) p.onRequestSettings();
         return;
     }
 
     auto script = tools.writeAiScript();
-    const juce::String model = engine == Engine::aiBest ? "htdemucs_ft" : (engine == Engine::ai6 ? "htdemucs_6s" : "htdemucs");
+    const juce::String model = engine == Engine::aiMax ? "htdemucs_ft" : (engine == Engine::ai6 ? "htdemucs_6s" : "htdemucs");
     const bool twoStems = ! fourStems && engine != Engine::ai6;
     auto ffmpeg = tools.getPath (ToolManager::Tool::ffmpeg);
 

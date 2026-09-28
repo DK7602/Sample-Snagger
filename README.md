@@ -1,6 +1,7 @@
 # Sample Snagger
 
-**Capture · Chop · Separate.** A sampling plug-in and standalone app in gloss black, gold and neon red.
+**Capture · Chop · Separate.** A sampling plug-in and standalone app: a brushed 24k gold faceplate with black glass
+displays, satin black controls and neon red lights.
 Browse YouTube (or any site) inside the plug-in, grab the audio the moment you hear something,
 chop it, pitch it, split vocals from music, and drag the result straight onto a DAW track.
 
@@ -46,9 +47,15 @@ Every capture lands in the **Session tray** at the bottom. Tray clips are saved 
 - **SAVE** writes a WAV into your sample library.
 
 ### 3. STEMS - separate vocals and music
-- **Quick Split (built-in):** instant, no downloads. Vocals + Music, or Vocals / Drums / Bass / Other.
-  Best on stereo mixes.
-- **AI Split (Demucs, runs locally):** studio-quality separation - *Fast*, *Best*, or *6 stems* (adds guitar and piano).
+- **AI Studio (built in, the default):** studio-quality AI separation (Demucs v4) running natively inside the
+  plug-in on all your CPU cores - no Python, no GPU, works offline. The model (about 80 MB) downloads once, the
+  first time you use it.
+  - *Vocals + Music* uses the fine-tuned vocal model; the music stem is exactly the original minus the vocals.
+  - *4 stems:* vocals, drums, bass, other.
+  - *AI Studio Max:* four fine-tuned models, one per stem - the cleanest result, about 4x slower.
+  - *AI 6 Stems:* adds guitar and piano.
+- **Quick Split:** instant and rough - handy for a quick preview on stereo mixes.
+- **AI via Python (optional):** the same models through PyTorch - only worth it if you have an NVIDIA graphics card.
 - Solo / mute each stem, play the mix, open any stem in STUDIO to chop it, save it, or drag it into your DAW.
   **DRAG MIX** exports just the stems you left un-muted (e.g. drums + bass only).
 
@@ -80,9 +87,10 @@ Open **Settings** (gear icon, top right):
 | **FFmpeg** | video files + exotic audio formats, needed for HQ SNAG | ~30 MB |
 | **yt-dlp** | HQ SNAG from YouTube and 1,000+ sites | ~35 MB |
 | **Deno** | helps yt-dlp read YouTube reliably | ~40 MB |
-| **AI Stem Engine** | Demucs AI separation (needs Python 3.9-3.13 from python.org) | ~2-3 GB |
+| **AI Stem Models** | the built-in AI stem separation (also downloads by itself the first time you split) | 80-160 MB |
+| **Python AI Engine** | optional - AI stems on an NVIDIA GPU (needs Python 3.9-3.13 from python.org) | ~2-3 GB |
 
-Click **INSTALL ALL** for the first three. They download from their official GitHub releases into
+Click **INSTALL ALL** for everything except the optional Python engine. They download from their official GitHub releases into
 Sample Snagger's own folder - nothing else on your system is touched. LIVE REC, hindsight grabs,
 Quick Split and everything in STUDIO work with no tools at all.
 
@@ -104,7 +112,7 @@ Quick Split and everything in STUDIO work with no tools at all.
 | | Mac | Windows |
 |---|---|---|
 | Sample library | `~/Documents/Sample Snagger/Samples` | `Documents\Sample Snagger\Samples` |
-| Helper tools, session cache, settings | `~/Library/Application Support/Sample Snagger` | `%APPDATA%\Sample Snagger` |
+| Helper tools, AI models (`Models`), session cache, settings | `~/Library/Application Support/Sample Snagger` | `%APPDATA%\Sample Snagger` |
 
 Session clips are cached as WAVs so projects reopen with their samples. You can delete old folders in
 `Sessions` whenever you like.
@@ -120,6 +128,8 @@ builds installers for macOS, Windows and Linux; or build locally with CMake.
 ## Credits & licences
 - [JUCE](https://juce.com) 8 - audio plug-in framework (AGPLv3 or JUCE commercial licence; if you sell this, check JUCE's licence tiers)
 - [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) - pitch / time (MIT)
+- [demucs.cpp](https://github.com/sevagh/demucs.cpp) (MIT) with [Eigen](https://eigen.tuxfamily.org) (MPL 2.0) - the built-in
+  AI engine; models are Meta's [Demucs v4](https://github.com/facebookresearch/demucs) (MIT), converted by demucs.cpp
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) (Unlicense), [FFmpeg](https://ffmpeg.org) (LGPL/GPL, downloaded separately),
-  [Deno](https://deno.com) (MIT), [Demucs](https://github.com/facebookresearch/demucs) (MIT) - installed on demand, not bundled
+  [Deno](https://deno.com) (MIT), Python Demucs (MIT) - installed on demand, not bundled
 - Fonts: Cinzel and Montserrat (SIL Open Font License, see `Resources/Fonts`)

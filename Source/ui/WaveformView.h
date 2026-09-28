@@ -50,6 +50,7 @@ public:
     void mouseMagnify (const juce::MouseEvent&, float scaleFactor) override;
 
     juce::Rectangle<float> getWaveArea() const;
+    void paintOverChildren (juce::Graphics&) override;
 
 private:
     void timerCallback() override;

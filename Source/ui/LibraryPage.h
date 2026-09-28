@@ -17,6 +17,7 @@ public:
     void refresh();
     void resized() override;
     void paint (juce::Graphics&) override;
+    juce::Rectangle<int> toolbarArea, listGlass, headerArea;
     void visibilityChanged() override { if (isVisible()) refresh(); }
 
     struct Entry

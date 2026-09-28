@@ -48,6 +48,51 @@ namespace snag::theme
                      juce::Colour top = col::bg3, juce::Colour bottom = col::bg1,
                      bool goldEdge = false, float highlight = 0.06f);
 
+    // ---- materials -----------------------------------------------------------------------
+    /** The brushed 24k gold faceplate texture, scaled to cover `area`. */
+    const juce::Image& goldPlateImage();
+
+    /** Keeps a copy of the gold plate pre-scaled to a component's size, so repaints are a plain blit. */
+    class GoldPlate
+    {
+    public:
+        void draw (juce::Graphics&, juce::Rectangle<int> area);
+    private:
+        juce::Image cache;
+        juce::Rectangle<int> cachedArea;
+        float cachedScale = 0.0f;
+    };
+
+    /** A window of polished black glass set into the gold plate (bevelled cut, reflections, glare).
+        `rim` draws the cut in the surrounding gold (needs ~3 px of space around r). */
+    void glassWindow (juce::Graphics&, juce::Rectangle<float> r, float corner, float glare = 1.0f, bool rim = true);
+
+    /** Just the reflection on the glass - for drawing over a window's content. */
+    void glassGlare (juce::Graphics&, juce::Rectangle<float> r, float corner, float strength = 1.0f);
+
+    /** Dark well inside a glass window (for rows and cards that sit inside one). */
+    void glassWell (juce::Graphics&, juce::Rectangle<float> r, float corner, bool highlighted = false);
+
+    /** Satin black cap for buttons and pads: soft sheen, fine grain, bevelled edge, soft shadow. */
+    void satinSurface (juce::Graphics&, juce::Rectangle<float> r, float corner, bool highlighted, bool down,
+                       bool shadow = true);
+
+    /** Text engraved into the gold plate. */
+    void engravedText (juce::Graphics&, const juce::String& text, juce::Rectangle<float> r,
+                       const juce::Font& f, juce::Justification j = juce::Justification::centredLeft);
+
+    /** Neon-lit text or icon (red LEDs behind satin black). */
+    void glowText (juce::Graphics&, const juce::String& text, juce::Rectangle<float> r, const juce::Font& f,
+                   juce::Justification j, juce::Colour c = col::red, float strength = 1.0f);
+    void glowPath (juce::Graphics&, const juce::Path& p, juce::Colour c = col::red, float strength = 1.0f);
+
+    /** Legend (text / icon) colour of a styled button, and whether it is lit neon. */
+    struct Legend { juce::Colour colour; bool glow; };
+    Legend buttonLegend (const juce::Button&, bool highlighted);
+
+    /** Small indicator LED. */
+    void led (juce::Graphics&, juce::Point<float> centre, float radius, bool lit, juce::Colour c = col::red);
+
     void goldBorder (juce::Graphics&, juce::Rectangle<float> r, float corner, float thickness = 1.0f, float alpha = 1.0f);
 
     /** Soft neon bloom around a path (drawn *before* the crisp stroke / fill). */
@@ -90,6 +135,7 @@ namespace snag::theme
         juce::Path save();
         juce::Path wave();
         juce::Path mic();
+        juce::Path external();
     }
 }
 
