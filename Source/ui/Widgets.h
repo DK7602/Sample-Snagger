@@ -32,7 +32,7 @@ private:
 
 //==============================================================================
 /** Rotary knob with a caption underneath and a value readout. */
-class Knob : public juce::Component
+class Knob : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     Knob (const juce::String& caption, double min, double max, double def, double step = 0.0,
@@ -46,12 +46,22 @@ public:
     void setValueSilently (double v)        { slider.setValue (v, juce::dontSendNotification); repaint(); }
     double getDefault() const noexcept      { return defaultValue; }
 
+    /** Double-click the number under the knob to type a value ("3.5", "-2 st", "5k", "off"...). */
+    void mouseDoubleClick (const juce::MouseEvent&) override;
+    void mouseMove (const juce::MouseEvent&) override;
+    double parseTyped (const juce::String& text) const;
+    void startTyping();
+
     void resized() override;
     void paint (juce::Graphics&) override;
 
 private:
+    juce::Rectangle<int> valueArea() const;
+    void finishTyping (bool apply);
+
     juce::String caption, suffix;
     double defaultValue = 0.0;
+    std::unique_ptr<juce::TextEditor> typing;
 };
 
 //==============================================================================

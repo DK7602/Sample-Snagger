@@ -17,10 +17,11 @@ public:
     using Ptr = std::shared_ptr<Job>;
     using Fn  = std::function<void (Job&)>;
 
-    Job (juce::String titleIn, Fn workIn, Fn doneIn)
-        : title (std::move (titleIn)), work (std::move (workIn)), done (std::move (doneIn)) {}
+    Job (juce::String titleIn, Fn workIn, Fn doneIn, juce::String subjectIn = {})
+        : title (std::move (titleIn)), subject (std::move (subjectIn)), work (std::move (workIn)), done (std::move (doneIn)) {}
 
     const juce::String title;
+    const juce::String subject;     // what it works on (e.g. the clip id being split into stems)
 
     // --- progress (thread-safe) ------------------------------------------------
     void setProgress (float p) noexcept         { progress = p; }
@@ -66,7 +67,7 @@ public:
     JobManager();
     ~JobManager() override;
 
-    Job::Ptr start (const juce::String& title, Job::Fn work, Job::Fn done = {});
+    Job::Ptr start (const juce::String& title, Job::Fn work, Job::Fn done = {}, const juce::String& subject = {});
 
     std::vector<Job::Ptr> getActiveJobs() const;
     bool isBusy() const;

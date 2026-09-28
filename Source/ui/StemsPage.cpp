@@ -363,6 +363,9 @@ StemsPage::StemsPage (EditorContext& c) : ctx (c), proc (c.getProcessor())
     for (auto* comp : std::initializer_list<juce::Component*> { &playMixBtn, &stopBtn, &saveAllBtn, &dragMix })
         addAndMakeVisible (comp);
 
+    claw.onExplodeProgress = [this] (float p) { revealLanes (p); };
+    addChildComponent (claw);
+
     proc.session.addChangeListener (this);
     proc.getTools().addChangeListener (this);
     rebuild();
@@ -410,6 +413,8 @@ void StemsPage::rebuild()
             for (auto& s : proc.session.getStemsOf (*src))
             {
                 auto* lane = lanes.add (new StemLane (*this, s, i++));
+                if (claw.isActive())
+                    lane->setAlpha (0.0f);   // they appear as the claw animation bursts
                 laneHolder.addAndMakeVisible (lane);
             }
         }
@@ -473,12 +478,12 @@ void StemsPage::timerCallback()
         const auto engine = id == 3 ? actions::Engine::aiMax : actions::Engine::ai;
         const auto mode = actions::aiModeFor (engine, parts);
         if (mode == ai::Mode::vocalsMusic)
-            note = "Fine-tuned AI vocal model - the cleanest vocals, and the music is exactly what's left.";
+            note = "Fine-tuned AI vocal model - clean vocals, and the voice is masked out of the music. Max is cleaner still.";
         else if (mode == ai::Mode::sixStems)
             note = juce::String ("6-part AI model (vocals, drums, bass, guitar, piano, other).")
                  + (id == 3 ? " Max has no guitar / piano models, so it uses this one." : "");
         else if (mode == ai::Mode::fourStemsMax)
-            note = "Four specialised AI models, one per part - cleanest result, about 4x slower.";
+            note = "Four specialised AI models, one per part - the cleanest vocals and music, about 4x slower.";
         else
             note = "Studio-quality AI, runs right here on your computer.";
         note << dl (mode);
@@ -486,6 +491,8 @@ void StemsPage::timerCallback()
 
     engineNote.setText (note, juce::dontSendNotification);
     engineNote.setColour (juce::Label::textColourId, warn ? col::redHot : col::textDim);
+
+    updateClaw();
 
     if (proc.isPreviewing())
         for (auto* l : lanes) l->repaint();
@@ -541,6 +548,83 @@ void StemsPage::separateNow()
     auto engine = id == 1 ? actions::Engine::quick : id == 2 ? actions::Engine::ai : id == 3 ? actions::Engine::aiMax
                 : actions::Engine::python;
     actions::separate (proc, src, engine, partsPicker.parts);
+    updateClaw();   // start the claw right away
+}
+
+void StemsPage::updateClaw()
+{
+    if (updatingClaw || claw.isFrozen())   // (frozen = a screenshot is being taken)
+        return;
+    const juce::ScopedValueSetter<bool> busy (updatingClaw, true);
+
+    const auto shownId = shownParent != nullptr ? shownParent->id : juce::String();
+    if (claw.isActive() && clawClipId != shownId)
+        claw.stop();   // a different sample is showing now
+
+    Job::Ptr job;
+    if (shownId.isNotEmpty())
+        for (auto& j : proc.jobs.getActiveJobs())
+            if (j->subject == shownId)
+                job = j;
+
+    if (job != nullptr)
+    {
+        if (! claw.isLooping())
+        {
+            if (claw.isActive())
+                claw.stop();
+            clawClipId = shownId;
+            stemIdsBeforeSplit = shownStemIds;
+            claw.setStatus (job->getStatus(), job->getProgress());
+            claw.start();
+        }
+        claw.setStatus (job->getStatus(), job->getProgress());
+        return;
+    }
+
+    if (! claw.isLooping())
+        return;
+
+    // the job has finished: new stems -> burst into them; failed / cancelled -> just go away
+    if (shownParent != nullptr)
+    {
+        juce::StringArray ids;
+        for (auto& st : proc.session.getStemsOf (*shownParent))
+            ids.add (st->id);
+        if (ids != shownStemIds)
+            rebuild();
+    }
+
+    if (! lanes.isEmpty() && shownStemIds != stemIdsBeforeSplit)
+    {
+        juce::Array<juce::Colour> colours;
+        for (auto* l : lanes)
+            colours.add (stemColour (l->clip->stemName));
+        claw.explode (colours);
+    }
+    else
+        claw.stop();
+}
+
+bool StemsPage::areLanesFullyShown() const
+{
+    for (auto* l : lanes)
+        if (l->getAlpha() < 0.999f || ! l->getTransform().isIdentity())
+            return false;
+    return true;
+}
+
+void StemsPage::revealLanes (float p)
+{
+    const int n = lanes.size();
+    const float stagger = n > 1 ? juce::jmin (0.1f, 0.4f / (float) (n - 1)) : 0.0f;
+    for (int i = 0; i < n; ++i)
+    {
+        const float x = juce::jlimit (0.0f, 1.0f, (p - 0.22f - stagger * (float) i) / 0.38f);
+        const float a = p >= 1.0f ? 1.0f : x * x * (3.0f - 2.0f * x);
+        lanes[i]->setAlpha (a);
+        lanes[i]->setTransform (a >= 1.0f ? juce::AffineTransform() : juce::AffineTransform::translation (0.0f, (1.0f - a) * 16.0f));
+    }
 }
 
 void StemsPage::updateGains()
@@ -626,6 +710,7 @@ void StemsPage::resized()
     saveAllBtn.setBounds (bottom.removeFromRight (170));
 
     laneViewport.setBounds (r);
+    claw.setBounds (r);
     emptyArea = r;
     const int laneH = lanes.isEmpty() ? 0 : juce::jlimit (84, 130, (r.getHeight() - 8 * (lanes.size() - 1)) / juce::jmax (1, lanes.size()));
     const int totalH = lanes.size() * laneH + juce::jmax (0, lanes.size() - 1) * 8;

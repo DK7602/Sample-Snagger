@@ -55,7 +55,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/Library/Application Support/Sample Snagger/Models
-          key: demucs-cpp-models-v1
+          key: demucs-cpp-models-v2
 
       - name: Test built-in AI stems (real models)
         run: ./build/SnaggerTests_artefacts/${{ env.BUILD_TYPE }}/SnaggerTests --ai
@@ -113,7 +113,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~\AppData\Roaming\Sample Snagger\Models
-          key: demucs-cpp-models-v1
+          key: demucs-cpp-models-v2
 
       - name: Test built-in AI stems (real models)
         run: build\SnaggerTests_artefacts\${{ env.BUILD_TYPE }}\SnaggerTests.exe --ai
@@ -177,7 +177,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.config/Sample Snagger/Models
-          key: demucs-cpp-models-v1
+          key: demucs-cpp-models-v2
 
       - name: Test built-in AI stems (real models)
         run: xvfb-run -a ./build/SnaggerTests_artefacts/${{ env.BUILD_TYPE }}/SnaggerTests --ai
@@ -230,7 +230,10 @@ jobs:
             After installing, rescan plug-ins in your DAW. Sample Snagger is an instrument, so put it on an instrument / MIDI track.
             Open Settings (gear icon) once and click INSTALL ALL for HQ downloads and the AI stem models.
 
-            **New in 1.3:** PITCH & TIME and TONE knobs apply as you turn them (DEFAULT restores the original), and the
+            **New in 1.4:** the music stem no longer keeps the vocals (the voice is masked out, and AI Studio Max builds the
+            music from all four specialist models); double-click the number under any knob to type a value; and a claw
+            animation plays while stems are separating, bursting into the stems when they're ready.
+            **1.3:** PITCH & TIME and TONE knobs apply as you turn them (DEFAULT restores the original), and the
             STEMS menu lets you pick any mix of vocals, music, drums, bass, guitar, piano and other.
             **1.2:** new look, LIVE REC on every site on Windows 11, HQ SNAG falls back to the file a page is playing,
             cleaner AI music stems, and a playhead with play / stop on every stem.

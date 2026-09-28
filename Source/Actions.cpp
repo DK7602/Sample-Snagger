@@ -377,12 +377,14 @@ static bool vocalsAndMusicOnly (const juce::StringArray& parts)
 ai::Mode aiModeFor (Engine engine, const juce::StringArray& parts)
 {
     if (needsSixParts (parts))       return ai::Mode::sixStems;
+    if (engine == Engine::aiMax)     return ai::Mode::fourStemsMax;   // every part from its own specialist
     if (vocalsAndMusicOnly (parts))  return ai::Mode::vocalsMusic;
-    return engine == Engine::aiMax ? ai::Mode::fourStemsMax : ai::Mode::fourStems;
+    return ai::Mode::fourStems;
 }
 
 /** Keeps just the parts that were asked for, in menu order. "music" is everything but the vocals:
-    the original minus the vocal stem, so vocals + music always add up to the original exactly. */
+    built from the AI's other parts (drums + bass + other...) with a spectral mask against the vocal
+    stem, so vocal residue the AI missed doesn't stay in the music. */
 static std::vector<std::pair<juce::String, AudioData::Ptr>> chooseParts (const std::vector<std::pair<juce::String, AudioData::Ptr>>& raw,
                                                                         const juce::StringArray& parts, const AudioData& input)
 {
@@ -404,15 +406,14 @@ static std::vector<std::pair<juce::String, AudioData::Ptr>> chooseParts (const s
         {
             if (auto v = find ("vocals"))
             {
-                const int n = input.getNumSamples();
-                const int chans = juce::jmax (v->getNumChannels(), input.getNumChannels());
-                juce::AudioBuffer<float> m (chans, n);
-                for (int c = 0; c < chans; ++c)
-                {
-                    m.copyFrom (c, 0, input.buffer, juce::jmin (c, input.getNumChannels() - 1), 0, n);
-                    m.addFrom (c, 0, v->buffer, juce::jmin (c, v->getNumChannels() - 1), 0, juce::jmin (n, v->getNumSamples()), -1.0f);
-                }
-                a = AudioData::make (std::move (m), input.sampleRate);
+                std::vector<AudioData::Ptr> rest;
+                for (auto& r : raw)
+                    if (r.first != "vocals" && r.first != "music")
+                        rest.push_back (r.second);
+                AudioData::Ptr others;
+                if (! rest.empty())
+                    others = edit::mix (rest, std::vector<float> (rest.size(), 1.0f));
+                a = edit::musicWithoutVocals (input, *v, others.get());
             }
         }
         if (a != nullptr)
@@ -491,7 +492,7 @@ void separate (SnaggerProcessor& p, Clip::Ptr clip, Engine engine, const juce::S
             for (auto& [name, a] : chooseParts (raw, parts, *audio))
                 job.clips.push_back (makeStem (name, a));
             job.text = r.note;
-        }, finish);
+        }, finish, clipId);
         return;
     }
 
@@ -517,7 +518,7 @@ void separate (SnaggerProcessor& p, Clip::Ptr clip, Engine engine, const juce::S
                 raw.push_back ({ st.name, st.audio });
             for (auto& [name, a] : chooseParts (raw, parts, *audio))
                 job.clips.push_back (makeStem (name, a));
-        }, finish);
+        }, finish, clipId);
         return;
     }
 
@@ -611,7 +612,7 @@ void separate (SnaggerProcessor& p, Clip::Ptr clip, Engine engine, const juce::S
         dir.deleteRecursively();
         if (job.clips.empty())
             job.fail ("AI Split produced no readable stems");
-    }, finish);
+    }, finish, clipId);
 }
 
 //==============================================================================

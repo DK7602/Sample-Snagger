@@ -289,6 +289,102 @@ AudioData::Ptr resample (const AudioData& a, double newRate)
     return AudioData::make (std::move (b), newRate);
 }
 
+AudioData::Ptr musicWithoutVocals (const AudioData& mix, const AudioData& vocals, const AudioData* others, float strength)
+{
+    constexpr int order = 12, N = 1 << order, hop = N / 4, bins = N / 2 + 1;
+    const int n = mix.getNumSamples();
+    const int chans = juce::jmax (mix.getNumChannels(), vocals.getNumChannels());
+    auto sample = [] (const AudioData& a, int c, int i) -> float
+    {
+        return i >= 0 && i < a.getNumSamples() ? a.buffer.getSample (juce::jmin (c, a.getNumChannels() - 1), i) : 0.0f;
+    };
+
+    std::vector<float> window ((size_t) N);
+    for (int i = 0; i < N; ++i)
+        window[(size_t) i] = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::twoPi * (float) i / (float) N);   // periodic Hann
+
+    juce::dsp::FFT fft (order);
+    juce::AudioBuffer<float> out (chans, n);
+    out.clear();
+    std::vector<float> norm ((size_t) n, 0.0f);
+
+    std::vector<std::vector<float>> X ((size_t) chans, std::vector<float> ((size_t) N * 2));
+    std::vector<float> V ((size_t) N * 2), O ((size_t) N * 2);
+    std::vector<float> pv ((size_t) bins), po ((size_t) bins), mask ((size_t) bins);
+
+    for (int start = -N + hop; start < n; start += hop)
+    {
+        std::fill (pv.begin(), pv.end(), 0.0f);
+        std::fill (po.begin(), po.end(), 0.0f);
+
+        for (int c = 0; c < chans; ++c)
+        {
+            auto& x = X[(size_t) c];
+            std::fill (x.begin(), x.end(), 0.0f);
+            std::fill (V.begin(), V.end(), 0.0f);
+            std::fill (O.begin(), O.end(), 0.0f);
+            for (int i = 0; i < N; ++i)
+            {
+                const float w = window[(size_t) i];
+                const float m = sample (mix, c, start + i);
+                const float v = sample (vocals, c, start + i);
+                x[(size_t) i] = m * w;
+                V[(size_t) i] = v * w;
+                O[(size_t) i] = (others != nullptr ? sample (*others, c, start + i) : m - v) * w;
+            }
+            fft.performRealOnlyForwardTransform (x.data(), true);
+            fft.performRealOnlyForwardTransform (V.data(), true);
+            fft.performRealOnlyForwardTransform (O.data(), true);
+            for (int k = 0; k < bins; ++k)
+            {
+                pv[(size_t) k] += V[(size_t) (2 * k)] * V[(size_t) (2 * k)] + V[(size_t) (2 * k + 1)] * V[(size_t) (2 * k + 1)];
+                po[(size_t) k] += O[(size_t) (2 * k)] * O[(size_t) (2 * k)] + O[(size_t) (2 * k + 1)] * O[(size_t) (2 * k + 1)];
+            }
+        }
+
+        // Wiener-style mask from the two power estimates (lightly smoothed across frequency, which
+        // keeps the "musical noise" of hard masks away); the same mask for both channels keeps the stereo image
+        for (int k = 0; k < bins; ++k)
+        {
+            const int k0 = juce::jmax (0, k - 1), k1 = juce::jmin (bins - 1, k + 1);
+            const float sv = 0.25f * pv[(size_t) k0] + 0.5f * pv[(size_t) k] + 0.25f * pv[(size_t) k1];
+            const float so = 0.25f * po[(size_t) k0] + 0.5f * po[(size_t) k] + 0.25f * po[(size_t) k1];
+            mask[(size_t) k] = so / (so + strength * sv + 1.0e-12f);
+        }
+
+        for (int c = 0; c < chans; ++c)
+        {
+            auto& x = X[(size_t) c];
+            for (int k = 0; k < bins; ++k)
+            {
+                x[(size_t) (2 * k)]     *= mask[(size_t) k];
+                x[(size_t) (2 * k + 1)] *= mask[(size_t) k];
+            }
+            fft.performRealOnlyInverseTransform (x.data());
+            for (int i = 0; i < N; ++i)
+            {
+                const int t = start + i;
+                if (t < 0 || t >= n) continue;
+                out.addSample (c, t, x[(size_t) i] * window[(size_t) i]);
+            }
+        }
+        for (int i = 0; i < N; ++i)
+        {
+            const int t = start + i;
+            if (t >= 0 && t < n)
+                norm[(size_t) t] += window[(size_t) i] * window[(size_t) i];
+        }
+    }
+
+    for (int c = 0; c < chans; ++c)
+    {
+        auto* d = out.getWritePointer (c);
+        for (int i = 0; i < n; ++i)
+            d[i] = norm[(size_t) i] > 1.0e-6f ? d[i] / norm[(size_t) i] : 0.0f;
+    }
+    return AudioData::make (std::move (out), mix.sampleRate);
+}
+
 AudioData::Ptr renderAdjust (const AudioData& original, const Clip::Adjust& adj)
 {
     AudioData::Ptr a = AudioData::make (copyOf (original), original.sampleRate);

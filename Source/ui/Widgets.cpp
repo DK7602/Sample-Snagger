@@ -1,4 +1,5 @@
 #include "Widgets.h"
+#include <limits>
 
 namespace snag
 {
@@ -88,6 +89,80 @@ Knob::Knob (const juce::String& captionIn, double min, double max, double def, d
     addAndMakeVisible (slider);
 }
 
+juce::Rectangle<int> Knob::valueArea() const
+{
+    return getLocalBounds().removeFromBottom (28).removeFromTop (15).withSizeKeepingCentre (juce::jmin (getWidth(), 90), 17);
+}
+
+void Knob::mouseMove (const juce::MouseEvent& e)
+{
+    const bool overValue = valueArea().contains (e.getPosition());
+    setMouseCursor (overValue ? juce::MouseCursor::IBeamCursor : juce::MouseCursor::NormalCursor);
+    setTooltip (overValue ? "Double-click to type a value" : juce::String());
+}
+
+void Knob::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    if (valueArea().expanded (0, 4).contains (e.getPosition()))
+        startTyping();
+}
+
+void Knob::startTyping()
+{
+    if (! isEnabled())
+        return;
+    typing = std::make_unique<juce::TextEditor>();
+    auto& t = *typing;
+    t.setFont (theme::ui (12.0f, true));
+    t.setJustification (juce::Justification::centred);
+    t.setIndents (2, 1);
+    t.setColour (juce::TextEditor::backgroundColourId, juce::Colours::black);
+    t.setColour (juce::TextEditor::textColourId, theme::col::goldLight);
+    t.setColour (juce::TextEditor::outlineColourId, theme::col::gold);
+    t.setColour (juce::TextEditor::focusedOutlineColourId, theme::col::red);
+    const double v = slider.getValue();
+    t.setText (juce::String (v, slider.getInterval() >= 1.0 ? 0 : (std::abs (v - std::round (v)) < 1.0e-6 ? 0 : 1)), false);
+    t.onReturnKey = [this] { finishTyping (true); };
+    t.onEscapeKey = [this] { finishTyping (false); };
+    t.onFocusLost = [this] { finishTyping (true); };
+    addAndMakeVisible (t);
+    t.setBounds (valueArea());
+    t.grabKeyboardFocus();
+    t.selectAll();
+    repaint();
+}
+
+void Knob::finishTyping (bool apply)
+{
+    if (typing == nullptr)
+        return;
+    const auto text = typing->getText();
+    // remove it after this callback has returned
+    juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<Knob> (this)]
+    {
+        if (safe != nullptr) { safe->typing.reset(); safe->repaint(); }
+    });
+    typing->onFocusLost = nullptr;
+    typing->setVisible (false);
+    if (apply && text.trim().isNotEmpty())
+    {
+        const double v = parseTyped (text);
+        if (! std::isnan (v))
+            slider.setValue (juce::jlimit (slider.getMinimum(), slider.getMaximum(), v), juce::sendNotificationSync);
+    }
+}
+
+double Knob::parseTyped (const juce::String& textIn) const
+{
+    auto text = textIn.trim().toLowerCase();
+    if (text.contains ("off"))
+        return defaultValue;
+    if (! text.containsAnyOf ("0123456789"))
+        return std::numeric_limits<double>::quiet_NaN();
+    const double v = text.retainCharacters ("0123456789.-+,").replaceCharacter (',', '.').getDoubleValue();
+    return text.contains ("k") ? v * 1000.0 : v;   // "5k", "2.5 kHz"
+}
+
 void Knob::resized()
 {
     auto r = getLocalBounds();
@@ -104,7 +179,10 @@ void Knob::paint (juce::Graphics& g)
                                : juce::String (slider.getValue(), slider.getInterval() >= 1.0 ? 0 : 1) + suffix;
     g.setColour (col::goldPale);
     g.setFont (ui (11.0f, true));
-    g.drawText (valueText, bottom.removeFromTop (14.0f), juce::Justification::centred);
+    if (typing == nullptr)
+        g.drawText (valueText, bottom.removeFromTop (14.0f), juce::Justification::centred);
+    else
+        bottom.removeFromTop (14.0f);
     g.setColour (col::textDim);
     g.setFont (ui (9.5f, true).withExtraKerningFactor (0.14f));
     g.drawText (caption.toUpperCase(), bottom, juce::Justification::centred);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Page.h"
+#include "SeparationAnimation.h"
 
 namespace snag
 {
@@ -46,6 +47,8 @@ public:
     SnaggerProcessor& getProcessor() { return proc; }
     EditorContext& getContext()      { return ctx; }
     const juce::OwnedArray<StemLane>& getLanes() const { return lanes; }
+    SeparationAnimation& getClaw()      { return claw; }
+    bool areLanesFullyShown() const;                // (after the claw's burst has faded them in)
     bool isMixPlaying = false;
 
 private:
@@ -56,6 +59,8 @@ private:
     void toggleMix();
     void startMix();
     void updatePlayButtons();
+    void updateClaw();                              // follow the split job for the shown sample
+    void revealLanes (float progress);              // stem lanes fade in as the track bursts
     Clip::Ptr sourceClip() const;
     double cursor = 0.0;
 
@@ -80,6 +85,11 @@ private:
     Clip::Ptr shownParent;
     juce::StringArray shownStemIds;
     juce::Rectangle<int> emptyArea;
+
+    SeparationAnimation claw;                       // plays over the lanes while stems are being made
+    juce::String clawClipId;
+    juce::StringArray stemIdsBeforeSplit;
+    bool updatingClaw = false;
 };
 
 } // namespace snag

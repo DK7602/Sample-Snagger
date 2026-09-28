@@ -11,9 +11,9 @@ JobManager::~JobManager()
     pool.removeAllJobs (true, 15000);
 }
 
-Job::Ptr JobManager::start (const juce::String& title, Job::Fn work, Job::Fn done)
+Job::Ptr JobManager::start (const juce::String& title, Job::Fn work, Job::Fn done, const juce::String& subject)
 {
-    auto job = std::make_shared<Job> (title, std::move (work), std::move (done));
+    auto job = std::make_shared<Job> (title, std::move (work), std::move (done), subject);
 
     {
         const juce::ScopedLock sl (lock);

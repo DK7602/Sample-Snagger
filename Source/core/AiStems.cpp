@@ -243,15 +243,9 @@ bool separate (const AudioData& input, Mode mode, Job& job, const juce::String& 
     if (mode == Mode::vocalsMusic)
     {
         auto vocals = toSourceRate (combined[6], combined[7], sr, n);
-        // music = original - vocals, so the two stems always add back up to the original exactly
-        juce::AudioBuffer<float> music (2, n);
-        for (int c = 0; c < 2; ++c)
-        {
-            music.copyFrom (c, 0, input.buffer, juce::jmin (c, input.getNumChannels() - 1), 0, n);
-            music.addFrom (c, 0, vocals->buffer, c, 0, n, -1.0f);
-        }
+        job.setStatus ("Taking the vocals out of the music");
         stems.push_back ({ "vocals", vocals });
-        stems.push_back ({ "music", AudioData::make (std::move (music), sr) });
+        stems.push_back ({ "music", edit::musicWithoutVocals (input, *vocals, nullptr) });
     }
     else
     {

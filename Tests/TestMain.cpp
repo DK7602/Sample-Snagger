@@ -4,6 +4,7 @@
 //   SnaggerTests --shots DIR     also render every screen to PNGs in DIR
 //   SnaggerTests --network       also test the helper-tool downloads (needs internet)
 //   SnaggerTests --ai            also download the AI models and run real stem separation
+//   SnaggerTests --claw DIR      also render frames of the stem-separation animation to DIR
 
 #include "../Source/PluginProcessor.h"
 #include "../Source/PluginEditor.h"
@@ -22,8 +23,17 @@ using namespace snag;
 
 static int failures = 0, passes = 0;
 
+/** On GitHub Actions, lines like "::notice::..." show up as annotations on the run page. */
+static bool onCI()   { return juce::SystemStats::getEnvironmentVariable ("GITHUB_ACTIONS", {}) == "true"; }
+static void ciAnnotate (const char* kind, const juce::String& msg)
+{
+    if (onCI())
+        std::cout << "::" << kind << " title=" << juce::SystemStats::getOperatingSystemName() << "::" << msg << std::endl;
+}
+
 #define CHECK(cond, msg) do { if (cond) { ++passes; std::cout << "  ok    " << msg << "\n"; } \
-                              else { ++failures; std::cout << "  FAIL  " << msg << "   (" #cond ")\n"; } } while (0)
+                              else { ++failures; std::cout << "  FAIL  " << msg << "   (" #cond ")\n"; \
+                                     ciAnnotate ("error", juce::String ("FAIL ") + juce::String (msg)); } } while (0)
 
 static void pump (int ms)
 {
@@ -493,12 +503,83 @@ static double zeroCrossHz (const AudioData& a)
     return zc * 0.5 / (n / a.sampleRate);
 }
 
+static void testVocalRemoval()
+{
+    std::cout << "\n[taking vocals out of the music]\n";
+    const double sr = 44100.0;
+    const int n = (int) (sr * 4.0);
+    juce::Random rng (42);
+
+    // a sung-ish line (harmonics with vibrato, in syllables) over drums, bass and a pad
+    juce::AudioBuffer<float> v (2, n), o (2, n);
+    v.clear(); o.clear();
+    double ph = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = i / sr;
+        const double f0 = 220.0 * std::pow (2.0, (std::floor (t * 2.0) - 3.0 * std::floor (t * 2.0 / 3.0)) * 2.0 / 12.0)
+                        * (1.0 + 0.012 * std::sin (6.283 * 5.5 * t));
+        ph += 6.283185307 * f0 / sr;
+        const double env = std::pow (std::sin (3.14159 * std::fmod (t * 2.0, 1.0)), 2.0);
+        double voice = 0.0;
+        for (int h = 1; h <= 12; ++h)
+            voice += std::sin (ph * h) / (h * 1.2);
+        const float vs = (float) (0.22 * env * voice);
+        const double beat = std::fmod (t, 0.5);
+        const float drums = (float) ((beat < 0.06 ? (rng.nextFloat() * 2.0f - 1.0f) * (1.0 - beat / 0.06) * 0.5 : 0.0)
+                                     + std::sin (6.283 * 60.0 * beat) * std::exp (-beat * 30.0) * 0.6);
+        const float bass = (float) (0.25 * std::sin (6.283 * 55.0 * t));
+        const float pad = (float) (0.06 * (std::sin (6.283 * 330.0 * t) + std::sin (6.283 * 415.3 * t) + std::sin (6.283 * 494.0 * t)));
+        for (int c = 0; c < 2; ++c) { v.setSample (c, i, vs); o.setSample (c, i, drums + bass + pad * (c == 0 ? 1.0f : 0.8f)); }
+    }
+    auto vocals = AudioData::make (juce::AudioBuffer<float> (v), sr);
+    auto others = AudioData::make (juce::AudioBuffer<float> (o), sr);
+    auto mix = edit::mix ({ vocals, others }, { 1, 1 });
+
+    // what an AI typically gives back: most of the voice, not all of it (reverb, breaths... are missed)
+    juce::AudioBuffer<float> est (v);
+    est.applyGain (0.7f);
+    auto vocalEstimate = AudioData::make (std::move (est), sr);
+
+    auto leak = [&] (const AudioData& music)   // how much of the true voice is still in the music
+    {
+        double num = 0, den = 0;
+        for (int i = 0; i < n; ++i) { num += music.buffer.getSample (0, i) * v.getSample (0, i); den += (double) v.getSample (0, i) * v.getSample (0, i); }
+        return num / den;
+    };
+    auto keep = [&] (const AudioData& music) { return correlation (music, *others); };
+
+    // identity: nothing to remove -> the mix comes back unchanged
+    {
+        juce::AudioBuffer<float> silent (2, n); silent.clear();
+        auto none = AudioData::make (std::move (silent), sr);
+        auto same = edit::musicWithoutVocals (*mix, *none, mix.get());
+        double maxErr = 0;
+        for (int i = 0; i < n; ++i) maxErr = juce::jmax (maxErr, (double) std::abs (same->buffer.getSample (0, i) - mix->buffer.getSample (0, i)));
+        CHECK (maxErr < 1e-3, "with no vocals the mask gives back the mix unchanged (max err " + juce::String (maxErr, 6) + ")");
+    }
+
+    juce::AudioBuffer<float> sub (2, n);
+    for (int c = 0; c < 2; ++c) { sub.copyFrom (c, 0, mix->buffer, c, 0, n); sub.addFrom (c, 0, vocalEstimate->buffer, c, 0, n, -1.0f); }
+    auto subtracted = AudioData::make (std::move (sub), sr);
+    auto fromResidual = edit::musicWithoutVocals (*mix, *vocalEstimate, nullptr);
+    auto fromOthers   = edit::musicWithoutVocals (*mix, *vocalEstimate, others.get());
+
+    const double l0 = leak (*subtracted), l1 = leak (*fromResidual), l2 = leak (*fromOthers);
+    auto dB = [] (double x) { return juce::String (20.0 * std::log10 (juce::jmax (1e-6, std::abs (x))), 1) + " dB"; };
+    std::cout << "  vocal left in the music:  mix - vocals " << dB (l0) << ",  masked " << dB (l1) << ",  masked with the other parts " << dB (l2) << "\n";
+    CHECK (std::abs (l1) < std::abs (l0) * 0.5, "the mask takes out at least 6 dB more of the vocal than plain subtraction");
+    CHECK (std::abs (l2) < std::abs (l0) * 0.25, "with the AI's other parts, at least 12 dB more");
+    CHECK (keep (*fromResidual) > 0.9 && keep (*fromOthers) > 0.9, "and the instruments stay (corr " + juce::String (keep (*fromResidual), 3) + " / " + juce::String (keep (*fromOthers), 3) + ")");
+}
+
 static void testStemParts()
 {
     std::cout << "\n[stem parts]\n";
     CHECK (actions::aiModeFor (actions::Engine::ai, { "vocals", "music" }) == ai::Mode::vocalsMusic, "vocals + music uses the fine-tuned vocal model");
     CHECK (actions::aiModeFor (actions::Engine::ai, { "drums" }) == ai::Mode::fourStems, "drums alone uses the 4-part model");
     CHECK (actions::aiModeFor (actions::Engine::aiMax, { "drums", "bass" }) == ai::Mode::fourStemsMax, "Max uses the fine-tuned models");
+    CHECK (actions::aiModeFor (actions::Engine::aiMax, { "vocals", "music" }) == ai::Mode::fourStemsMax, "Max builds the music from all four specialists too");
     CHECK (actions::aiModeFor (actions::Engine::ai, { "vocals", "piano" }) == ai::Mode::sixStems, "guitar / piano use the 6-part model");
 
     SnaggerProcessor p;
@@ -775,10 +856,8 @@ static void testBuiltinAi()
             if (stems.size() == 2)
             {
                 auto sum = edit::mix ({ stems[0].audio, stems[1].audio }, { 1, 1 });
-                double maxErr = 0;
-                for (int i = 0; i < sum->getNumSamples(); ++i)
-                    maxErr = juce::jmax (maxErr, (double) std::abs (sum->buffer.getSample (0, i) - demo.mix->buffer.getSample (0, i)));
-                CHECK (maxErr < 1e-4, "vocals + music add back up to the original exactly");
+                CHECK (correlation (*sum, *demo.mix) > 0.9, "vocals + music still add up to (nearly) the original (corr " + juce::String (correlation (*sum, *demo.mix), 3) + ")");
+                CHECK (bestLag (*demo.mix, *stems[1].audio, 32) == 0, "music lines up with the original to the sample");
             }
         }
     }
@@ -799,9 +878,320 @@ static void testBuiltinAi()
         else
             CHECK (! ok && stems.empty() && ! job.hasFailed(), "cancel stops the AI (after " + juce::String (secs, 1) + " s)");
     }
+
+    // Vocals + music, end to end, on AI Studio and on Max: the music must not keep the voice.
+    // (Measured against the lead line we mixed in: how much of it is still in the music.)
+    auto leakOf = [&demo] (const AudioData& music)
+    {
+        double num = 0, den = 0;
+        const int n = juce::jmin (music.getNumSamples(), demo.vocal->getNumSamples());
+        for (int c = 0; c < 2; ++c)
+            for (int i = 0; i < n; ++i)
+            {
+                const double v = demo.vocal->buffer.getSample (c, i);
+                num += music.buffer.getSample (juce::jmin (c, music.getNumChannels() - 1), i) * v;
+                den += v * v;
+            }
+        return den > 0 ? std::abs (num / den) : 0.0;
+    };
+    auto dB = [] (double x) { return juce::String (20.0 * std::log10 (juce::jmax (1e-6, x)), 1) + " dB"; };
+    auto instruments = edit::mix ({ demo.mix, demo.vocal }, { 1.0f, -1.0f });
+
+    for (auto engine : { actions::Engine::ai, actions::Engine::aiMax })
+    {
+        const juce::String name = engine == actions::Engine::aiMax ? "AI Studio Max" : "AI Studio";
+        SnaggerProcessor p;
+        juce::StringArray errors;
+        p.onNotify = [&errors] (const juce::String& m, bool err) { if (err) errors.add (m); };
+        Clip::Ptr c (new Clip());
+        c->name = "Demo";
+        c->audio = demo.mix;
+        p.session.add (c, true);
+
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        actions::separate (p, c, engine, { "vocals", "music" });
+        pump (200);
+        for (int i = 0; i < 30 * 60 * 10 && p.jobs.isBusy(); ++i)   // up to 30 minutes
+            pump (100);
+        pump (200);
+        const double secs = (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0;
+
+        AudioData::Ptr vocals, music;
+        for (auto& st : p.session.getStemsOf (*c))
+        {
+            if (st->stemName == "vocals") vocals = st->audio;
+            if (st->stemName == "music")  music = st->audio;
+        }
+        CHECK (vocals != nullptr && music != nullptr, name + ": vocals + music in " + juce::String (juce::roundToInt (secs)) + " s " + errors.joinIntoString ("; "));
+        if (vocals == nullptr || music == nullptr)
+            continue;
+
+        auto subtracted = edit::mix ({ demo.mix, vocals }, { 1.0f, -1.0f });   // the old way
+        const double now = leakOf (*music), before = leakOf (*subtracted);
+        const double kept = correlation (*music, *instruments);
+        const auto line = name + ": lead left in the music " + dB (now) + " (plain mix - vocals: " + dB (before)
+                        + "), instruments kept corr " + juce::String (kept, 3);
+        std::cout << "  " << line << "\n";
+        ciAnnotate ("notice", line);
+        CHECK (now <= before * 1.02 + 1e-4, name + ": the music has less of the voice than plain subtraction left");
+        CHECK (bestLag (*demo.mix, *music, 32) == 0, name + ": music lines up with the original to the sample");
+    }
 }
 
 //==============================================================================
+//==============================================================================
+static void testKnobTyping()
+{
+    std::cout << "\n[knobs - double-click the number to type a value]\n";
+    Knob k ("PITCH", -24.0, 24.0, 0.0, 0.1, " st");
+    k.setSize (86, 118);
+    auto approx = [] (double a, double b, double tol = 1.0e-6) { return std::abs (a - b) <= tol; };
+
+    CHECK (approx (k.parseTyped ("3.5"), 3.5), "\"3.5\" reads as 3.5");
+    CHECK (approx (k.parseTyped ("-2 st"), -2.0), "\"-2 st\" reads as -2");
+    CHECK (approx (k.parseTyped ("+7"), 7.0), "\"+7\" reads as 7");
+    CHECK (approx (k.parseTyped ("2,5"), 2.5), "\"2,5\" (decimal comma) reads as 2.5");
+    CHECK (approx (k.parseTyped ("5k"), 5000.0) && approx (k.parseTyped ("2.5 kHz"), 2500.0), "\"5k\" / \"2.5 kHz\" read as Hz");
+    CHECK (approx (k.parseTyped ("off"), 0.0), "\"off\" gives the knob's default");
+    CHECK (std::isnan (k.parseTyped ("abc")), "text without a number is ignored");
+
+    int changes = 0;
+    k.onChange = [&] { ++changes; };
+
+    auto editor = [&k]() -> juce::TextEditor*
+    {
+        for (auto* c : k.getChildren())
+            if (auto* t = dynamic_cast<juce::TextEditor*> (c))
+                if (t->isVisible())
+                    return t;
+        return nullptr;
+    };
+
+    // double-click on the number (below the dial)
+    const juce::Point<float> onNumber ((float) k.getWidth() * 0.5f, (float) k.getHeight() - 21.0f);
+    k.mouseDoubleClick (juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), onNumber, {}, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                          &k, &k, juce::Time::getCurrentTime(), onNumber, juce::Time::getCurrentTime(), 2, false));
+    auto* t = editor();
+    CHECK (t != nullptr, "double-clicking the number opens a text box");
+    if (t != nullptr)
+    {
+        CHECK (t->getText() == "0", "the box starts with the current value (" + t->getText().toStdString() + ")");
+        t->setText ("7.25", false);
+        t->onReturnKey();
+        CHECK (approx (k.slider.getValue(), 7.25, 0.051), "typing 7.25 + Return sets the knob (" + juce::String (k.slider.getValue()).toStdString() + ")");
+        CHECK (changes > 0, "typing a value applies it straight away (onChange)");
+    }
+    pump (30);
+    CHECK (editor() == nullptr, "the text box closes afterwards");
+
+    k.startTyping();
+    if (auto* t2 = editor()) { t2->setText ("99", false); t2->onReturnKey(); }
+    CHECK (approx (k.slider.getValue(), 24.0), "values past the end stop at the knob's range");
+
+    k.startTyping();
+    if (auto* t3 = editor()) { t3->setText ("-5", false); t3->onEscapeKey(); }
+    CHECK (approx (k.slider.getValue(), 24.0), "Escape cancels without changing the value");
+
+    k.startTyping();
+    if (auto* t4 = editor()) { t4->setText ("nonsense", false); t4->onReturnKey(); }
+    CHECK (approx (k.slider.getValue(), 24.0), "text that isn't a number leaves the value alone");
+    pump (30);
+}
+
+//==============================================================================
+static void testClawAnimation()
+{
+    std::cout << "\n[stems - claw animation while separating]\n";
+
+    // rendering: every moment of the loop and the burst draws, at small and large sizes
+    {
+        SeparationAnimation a;
+        for (auto size : { juce::Point<int> (560, 260), juce::Point<int> (1250, 520), juce::Point<int> (1900, 900) })
+        {
+            a.setSize (size.x, size.y);
+            bool drewTrack = true;
+            double firstMs = 0.0, total = 0.0;
+            int frames = 0;
+            juce::Image img (juce::Image::ARGB, size.x, size.y, true);
+            for (double t = 0.0; t < SeparationAnimation::loopLength; t += 0.1)
+            {
+                a.freezeAt (t);
+                a.setStatus ("Separating (2 of 4) on 8 cores", 0.43f);
+                img.clear (img.getBounds());
+                const double t0 = juce::Time::getMillisecondCounterHiRes();
+                {
+                    juce::Graphics g (img);
+                    a.paintEntireComponent (g, true);
+                }
+                const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+                if (frames++ == 0) firstMs = ms; else total += ms;
+                // the left end of the track is always there (well away from the claw)
+                bool yellowish = false;
+                const int y0 = juce::roundToInt ((float) size.y * 0.35f), y1 = juce::roundToInt ((float) size.y * 0.7f);
+                for (int y = y0; y < y1 && ! yellowish; ++y)
+                    for (int x = size.x / 6; x < size.x / 6 + 30 && ! yellowish; ++x)
+                    {
+                        auto c = img.getPixelAt (x, y);
+                        yellowish = c.getRed() > 200 && c.getGreen() > 150 && c.getBlue() < 120;
+                    }
+                drewTrack = drewTrack && yellowish;
+            }
+            const double avg = total / juce::jmax (1, frames - 1);
+            const auto label = juce::String (size.x) + "x" + juce::String (size.y);
+            CHECK (drewTrack, "the yellow track shows in every frame at " + label);
+            CHECK (size.x > 1300 || avg < 50.0, "a frame takes " + juce::String (avg, 1) + " ms at " + label
+                                                 + " (first one, building the cache: " + juce::String (firstMs, 0) + " ms)");
+        }
+
+        // resizing while it plays: the glow is stretched until the size settles, then redrawn
+        {
+            SeparationAnimation live;
+            live.setSize (1000, 400);
+            live.start();
+            auto paintOnce = [&live]
+            {
+                juce::Image img (juce::Image::ARGB, live.getWidth(), live.getHeight(), true);
+                juce::Graphics g (img);
+                live.paintEntireComponent (g, true);
+            };
+            paintOnce();
+            CHECK (! live.isStretchingForResize(), "drawn crisply at its size");
+            live.setSize (1100, 460);
+            paintOnce();
+            CHECK (live.isStretchingForResize(), "mid-resize it stretches the cached glow (smooth resizing)");
+            pump (320);
+            paintOnce();
+            CHECK (! live.isStretchingForResize(), "once the size settles it's redrawn crisply");
+            live.stop();
+        }
+
+        // the grabbed section glows red while the claw has it
+        a.setSize (1100, 480);
+        a.freezeAt (1.85);
+        auto img = a.createComponentSnapshot (a.getLocalBounds());
+        int red = 0;
+        for (int y = 150; y < 380; ++y)
+            for (int x = 480; x < 620; ++x)
+            {
+                auto c = img.getPixelAt (x, y);
+                if (c.getRed() > 200 && c.getGreen() < 110 && c.getBlue() < 120) ++red;
+            }
+        CHECK (red > 200, "the clutched section turns red (" + juce::String (red) + " red pixels)");
+
+        juce::Array<juce::Colour> colours { theme::stemColour ("vocals"), theme::stemColour ("music") };
+        for (double bt : { 0.0, 0.2, 0.6, 1.1 })
+        {
+            a.freezeAt (2.4, bt, colours);
+            auto b = a.createComponentSnapshot (a.getLocalBounds());
+            juce::ignoreUnused (b);
+        }
+        CHECK (true, "the burst draws at every stage");
+    }
+
+    // the Stems page runs it for the sample being split, then bursts into the new stems
+    auto p = std::make_unique<SnaggerProcessor>();
+    p->prepareToPlay (44100.0, 512);
+    auto ed = std::unique_ptr<SnaggerEditor> (dynamic_cast<SnaggerEditor*> (p->createEditor()));
+    ed->setSize (1280, 820);
+    ed->showTab (Tab::stems);
+    auto& page = ed->getStemsPage();
+    auto& claw = page.getClaw();
+
+    auto mix = makeClicks (44100.0, 2.0, 0.25);
+    Clip::Ptr c (new Clip());
+    c->name = "Loop";
+    c->audio = mix;
+    p->session.add (c, true);
+    pump (100);
+
+    std::atomic<bool> release { false }, fail { false };
+    auto startJob = [&]
+    {
+        release = false;
+        const auto id = c->id;
+        auto* proc = p.get();
+        p->jobs.start ("AI Split", [&release, &fail] (Job& job)
+        {
+            job.setStatus ("Separating on 4 CPU cores");
+            job.setProgress (0.4f);
+            while (! release) juce::Thread::sleep (5);
+            if (fail) job.fail ("Test failure");
+        }, [proc, id, mix] (Job& job)
+        {
+            if (job.hasFailed()) return;
+            auto parent = proc->session.findById (id);
+            for (auto name : { "vocals", "music" })
+            {
+                Clip::Ptr s (new Clip());
+                s->name = "Loop - " + prettyStemName (name);
+                s->kind = "Stem"; s->parentId = id; s->stemName = name; s->audio = mix;
+                proc->session.add (s, false);
+            }
+            proc->session.select (parent.get());
+        }, id);
+    };
+
+    startJob();
+    pump (200);
+    CHECK (claw.isLooping() && claw.isVisible(), "the claw plays while the split runs");
+    CHECK (page.getLanes().isEmpty(), "no stem lanes yet");
+
+    release = true;
+    pump (250);
+    CHECK (page.getLanes().size() == 2, "stem lanes are built when the split finishes");
+    CHECK (claw.isActive() && ! claw.isLooping(), "the track bursts into the stems");
+    pump (1400);
+    CHECK (! claw.isActive() && ! claw.isVisible(), "the animation is gone after the burst");
+    CHECK (page.getLanes().size() == 2 && page.areLanesFullyShown(), "every stem lane is fully shown");
+
+    // a failed split: the claw just goes away, the old stems stay put
+    fail = true;
+    startJob();
+    pump (200);
+    CHECK (claw.isLooping(), "the claw plays again for a second split");
+    release = true;
+    pump (300);
+    CHECK (! claw.isActive(), "a failed split stops the animation (no burst)");
+    CHECK (page.getLanes().size() == 2 && page.areLanesFullyShown(), "the previous stems are still there and visible");
+    fail = false;
+
+    ed.reset();
+    pump (50);
+}
+
+/** Frames of the claw animation, for looking at (SnaggerTests --claw DIR). */
+static void renderClawFrames (const juce::File& dir)
+{
+    std::cout << "\n[claw frames]\n";
+    dir.createDirectory();
+    SeparationAnimation a;
+    juce::Array<juce::Colour> colours { theme::stemColour ("vocals"), theme::stemColour ("drums"),
+                                        theme::stemColour ("bass"), theme::stemColour ("other") };
+    for (auto size : { juce::Point<int> (1250, 520), juce::Point<int> (640, 300) })
+    {
+        a.setSize (size.x, size.y);
+        a.setStatus ("Separating (2 of 4) on 8 cores", 0.43f);
+        int frame = 0;
+        for (double t = 0.0; t < SeparationAnimation::loopLength; t += 0.15)
+        {
+            a.freezeAt (t);
+            auto img = a.createComponentSnapshot (a.getLocalBounds());
+            auto f = dir.getChildFile ("claw-" + juce::String (size.x) + "-" + juce::String (frame++).paddedLeft ('0', 3) + ".png");
+            juce::FileOutputStream out (f);
+            if (out.openedOk()) { out.setPosition (0); out.truncate(); juce::PNGImageFormat().writeImageToStream (img, out); }
+        }
+        for (double bt = 0.0; bt < SeparationAnimation::burstLength; bt += 0.1)
+        {
+            a.freezeAt (2.2, bt, colours);
+            auto img = a.createComponentSnapshot (a.getLocalBounds());
+            auto f = dir.getChildFile ("claw-" + juce::String (size.x) + "-" + juce::String (frame++).paddedLeft ('0', 3) + ".png");
+            juce::FileOutputStream out (f);
+            if (out.openedOk()) { out.setPosition (0); out.truncate(); juce::PNGImageFormat().writeImageToStream (img, out); }
+        }
+    }
+    std::cout << "  wrote frames to " << dir.getFullPathName() << "\n";
+}
+
 static void savePng (juce::Component& c, const juce::File& f, float scale = 1.0f)
 {
     auto img = c.createComponentSnapshot (c.getLocalBounds(), true, scale);
@@ -906,6 +1296,25 @@ static void renderScreens (const juce::File& dir)
     pump (200);
     savePng (*ed, dir.getChildFile ("3-stems.png"));
 
+    // the claw animation that plays while stems are being separated, and its burst into the stems
+    {
+        auto& stemsPage = ed->getStemsPage();
+        auto& claw = stemsPage.getClaw();
+        claw.setStatus ("Separating (2 of 4) on 8 cores", 0.43f);
+        claw.freezeAt (1.9);
+        pump (50);
+        savePng (*ed, dir.getChildFile ("3b-stems-separating.png"));
+        juce::Array<juce::Colour> colours;
+        for (auto* n : { "vocals", "drums", "bass", "other" })
+            colours.add (theme::stemColour (n));
+        claw.freezeAt (2.2, 0.55, colours);
+        if (claw.onExplodeProgress) claw.onExplodeProgress (0.55f / (float) SeparationAnimation::burstLength);
+        pump (50);
+        savePng (*ed, dir.getChildFile ("3c-stems-burst.png"));
+        claw.stop();
+        pump (50);
+    }
+
     ed->showTab (Tab::library);
     pump (200);
     savePng (*ed, dir.getChildFile ("4-library.png"));
@@ -951,13 +1360,20 @@ int main (int argc, char** argv)
     testWebCapture();
     testProcessor();
     testLinks();
+    testVocalRemoval();
     testStemParts();
     snag::StudioPageTester::run();
+    testKnobTyping();
+    testClawAnimation();
     testProcessAudio();
     if (args.contains ("--network"))
         testNetwork();
     if (args.contains ("--ai"))
         testBuiltinAi();
+
+    const int clawIdx = args.indexOf ("--claw");
+    if (clawIdx >= 0 && clawIdx + 1 < args.size())
+        renderClawFrames (juce::File (args[clawIdx + 1]));
 
     const int shotIdx = args.indexOf ("--shots");
     if (shotIdx >= 0 && shotIdx + 1 < args.size())

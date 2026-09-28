@@ -7,6 +7,7 @@ chop it, pitch it, split vocals from music, and drag the result straight onto a 
 
 ![Studio](docs/screenshots/studio.png)
 ![Stems](docs/screenshots/stems.png)
+![Separating](docs/screenshots/separating.png)
 
 | Format | Where it works |
 |---|---|
@@ -45,6 +46,8 @@ Every capture lands in the **Session tray** at the bottom. Tray clips are saved 
 - **Tone:** gain, 24 dB/oct low cut / high cut.
 - The PITCH & TIME and TONE knobs apply as you turn them (you hear the change, even while it plays) and always
   work from the original sound; **DEFAULT** puts that panel back to the original. Each sample remembers its knobs.
+- **Double-click the number under any knob** to type an exact value (`-3.5`, `+7`, `8k`, `off`...), then Return
+  (Esc cancels).
 - **Chop:** AUTO CHOP (transient detection with sensitivity), EQUAL slices, or alt-click to add markers by hand.
 - **MIDI pads:** chop 1 plays on C3, chop 2 on C#3, and so on. Play them from your MIDI keyboard or the on-screen pads.
   One-shot or gated. **KEYS mode** plays the sample chromatically instead.
@@ -57,9 +60,13 @@ Every capture lands in the **Session tray** at the bottom. Tray clips are saved 
 - **AI Studio (built in, the default):** studio-quality AI separation (Demucs v4) running natively inside the
   plug-in on all your CPU cores - no Python, no GPU, works offline. Each model (about 50-80 MB) downloads once,
   the first time it's needed.
-  - *Vocals + Music* uses the fine-tuned vocal model; the music is exactly the original minus the vocals.
+  - *Vocals + Music* uses the fine-tuned vocal model. The music is the original with the voice taken out by a
+    spectral mask (not just subtracted), so echoes and bits of voice the AI only half caught don't leak through.
   - *Drums / Bass / Other* use the 4-part model; *Guitar / Piano* the 6-part model.
-  - *AI Studio Max:* four fine-tuned models, one per part - the cleanest result, about 4x slower.
+  - *AI Studio Max:* four fine-tuned models, one per part - the cleanest result, about 4x slower. For
+    *Vocals + Music* the music is built from all four, so it's the cleanest instrumental.
+- While it works, the gold claw grabs the sound and pulls a piece out, over and over, with the progress below;
+  when the stems are ready the track bursts into pieces and the stems appear. It scales with the window.
 - **Quick Split:** instant and rough - handy for a quick preview on stereo mixes.
 - **AI via Python (optional):** the same models through PyTorch - only worth it if you have an NVIDIA graphics card.
 - Play / stop each stem, or the mix. Click or drag in any stem to move the playhead - playback starts there,
