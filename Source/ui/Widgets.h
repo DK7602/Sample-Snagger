@@ -40,12 +40,18 @@ public:
 
     juce::Slider slider;
     std::function<juce::String (double)> formatter;
+    std::function<void()> onChange;          // any value change (drag, wheel, double-click reset...)
+    std::function<void()> onGestureStart;    // the user grabbed the knob
+
+    void setValueSilently (double v)        { slider.setValue (v, juce::dontSendNotification); repaint(); }
+    double getDefault() const noexcept      { return defaultValue; }
 
     void resized() override;
     void paint (juce::Graphics&) override;
 
 private:
     juce::String caption, suffix;
+    double defaultValue = 0.0;
 };
 
 //==============================================================================

@@ -43,6 +43,8 @@ Every capture lands in the **Session tray** at the bottom. Tray clips are saved 
 - **Pitch & Time:** high-quality pitch shifting and time-stretching (Signalsmith Stretch) with formant
   preservation, old-school *Tape* varispeed, BPM detection and **MATCH BPM** to your DAW's tempo.
 - **Tone:** gain, 24 dB/oct low cut / high cut.
+- The PITCH & TIME and TONE knobs apply as you turn them (you hear the change, even while it plays) and always
+  work from the original sound; **DEFAULT** puts that panel back to the original. Each sample remembers its knobs.
 - **Chop:** AUTO CHOP (transient detection with sensitivity), EQUAL slices, or alt-click to add markers by hand.
 - **MIDI pads:** chop 1 plays on C3, chop 2 on C#3, and so on. Play them from your MIDI keyboard or the on-screen pads.
   One-shot or gated. **KEYS mode** plays the sample chromatically instead.
@@ -50,13 +52,14 @@ Every capture lands in the **Session tray** at the bottom. Tray clips are saved 
 - **SAVE** writes a WAV into your sample library.
 
 ### 3. STEMS - separate vocals and music
+- **Pick the parts you want** from the menu: any mix of *Vocals, Music (everything but vocals), Drums, Bass,
+  Guitar, Piano, Other* - or a preset. Sample Snagger picks the right AI model for you.
 - **AI Studio (built in, the default):** studio-quality AI separation (Demucs v4) running natively inside the
-  plug-in on all your CPU cores - no Python, no GPU, works offline. The model (about 80 MB) downloads once, the
-  first time you use it.
-  - *Vocals + Music* uses the fine-tuned vocal model; the music stem is exactly the original minus the vocals.
-  - *4 stems:* vocals, drums, bass, other.
-  - *AI Studio Max:* four fine-tuned models, one per stem - the cleanest result, about 4x slower.
-  - *AI 6 Stems:* adds guitar and piano.
+  plug-in on all your CPU cores - no Python, no GPU, works offline. Each model (about 50-80 MB) downloads once,
+  the first time it's needed.
+  - *Vocals + Music* uses the fine-tuned vocal model; the music is exactly the original minus the vocals.
+  - *Drums / Bass / Other* use the 4-part model; *Guitar / Piano* the 6-part model.
+  - *AI Studio Max:* four fine-tuned models, one per part - the cleanest result, about 4x slower.
 - **Quick Split:** instant and rough - handy for a quick preview on stereo mixes.
 - **AI via Python (optional):** the same models through PyTorch - only worth it if you have an NVIDIA graphics card.
 - Play / stop each stem, or the mix. Click or drag in any stem to move the playhead - playback starts there,

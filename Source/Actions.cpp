@@ -359,13 +359,81 @@ juce::String engineName (Engine e)
     return {};
 }
 
-void separate (SnaggerProcessor& p, Clip::Ptr clip, Engine engine, bool fourStems)
+const juce::StringArray& allStemParts()
+{
+    static const juce::StringArray parts { "vocals", "music", "drums", "bass", "guitar", "piano", "other" };
+    return parts;
+}
+
+static bool needsSixParts (const juce::StringArray& parts)  { return parts.contains ("guitar") || parts.contains ("piano"); }
+static bool vocalsAndMusicOnly (const juce::StringArray& parts)
+{
+    for (auto& part : parts)
+        if (part != "vocals" && part != "music")
+            return false;
+    return true;
+}
+
+ai::Mode aiModeFor (Engine engine, const juce::StringArray& parts)
+{
+    if (needsSixParts (parts))       return ai::Mode::sixStems;
+    if (vocalsAndMusicOnly (parts))  return ai::Mode::vocalsMusic;
+    return engine == Engine::aiMax ? ai::Mode::fourStemsMax : ai::Mode::fourStems;
+}
+
+/** Keeps just the parts that were asked for, in menu order. "music" is everything but the vocals:
+    the original minus the vocal stem, so vocals + music always add up to the original exactly. */
+static std::vector<std::pair<juce::String, AudioData::Ptr>> chooseParts (const std::vector<std::pair<juce::String, AudioData::Ptr>>& raw,
+                                                                        const juce::StringArray& parts, const AudioData& input)
+{
+    auto find = [&raw] (const juce::String& name) -> AudioData::Ptr
+    {
+        for (auto& r : raw)
+            if (r.first == name || (name == "music" && (r.first == "no_vocals" || r.first == "instrumental")))
+                return r.second;
+        return nullptr;
+    };
+
+    std::vector<std::pair<juce::String, AudioData::Ptr>> out;
+    for (auto& part : allStemParts())
+    {
+        if (! parts.contains (part))
+            continue;
+        auto a = find (part);
+        if (a == nullptr && part == "music")
+        {
+            if (auto v = find ("vocals"))
+            {
+                const int n = input.getNumSamples();
+                const int chans = juce::jmax (v->getNumChannels(), input.getNumChannels());
+                juce::AudioBuffer<float> m (chans, n);
+                for (int c = 0; c < chans; ++c)
+                {
+                    m.copyFrom (c, 0, input.buffer, juce::jmin (c, input.getNumChannels() - 1), 0, n);
+                    m.addFrom (c, 0, v->buffer, juce::jmin (c, v->getNumChannels() - 1), 0, juce::jmin (n, v->getNumSamples()), -1.0f);
+                }
+                a = AudioData::make (std::move (m), input.sampleRate);
+            }
+        }
+        if (a != nullptr)
+            out.push_back ({ part, a });
+    }
+    return out;
+}
+
+void separate (SnaggerProcessor& p, Clip::Ptr clip, Engine engine, const juce::StringArray& partsIn)
 {
     if (clip == nullptr || clip->audio == nullptr)
     {
         notify (p, "Pick a sample in the tray first.", true);
         return;
     }
+    auto parts = partsIn;
+    if (parts.isEmpty())
+        parts = { "vocals", "music" };
+    if (engine == Engine::ai6)
+        engine = Engine::ai;   // the 6-part model is picked automatically now
+    const bool fourStems = ! vocalsAndMusicOnly (parts);
 
     auto audio = clip->audio;
     auto clipId = clip->id;
@@ -403,7 +471,12 @@ void separate (SnaggerProcessor& p, Clip::Ptr clip, Engine engine, bool fourStem
 
     if (engine == Engine::quick)
     {
-        p.jobs.start ("Quick Split", [audio, fourStems, makeStem] (Job& job)
+        if (needsSixParts (parts))
+        {
+            notify (p, "Quick Split can't find guitar or piano - pick AI Studio for those.", true);
+            return;
+        }
+        p.jobs.start ("Quick Split", [audio, fourStems, parts, makeStem] (Job& job)
         {
             job.setStatus ("Analysing the mix");
             auto r = QuickSplit::separate (*audio, fourStems, [&job] (float pr) { job.setProgress (pr); }, job.cancelCheck());
@@ -412,8 +485,11 @@ void separate (SnaggerProcessor& p, Clip::Ptr clip, Engine engine, bool fourStem
                 if (r.error != "Cancelled") job.fail (r.error);
                 return;
             }
+            std::vector<std::pair<juce::String, AudioData::Ptr>> raw;
             for (auto& s : r.stems)
-                job.clips.push_back (makeStem (s.name, s.audio));
+                raw.push_back ({ s.name, s.audio });
+            for (auto& [name, a] : chooseParts (raw, parts, *audio))
+                job.clips.push_back (makeStem (name, a));
             job.text = r.note;
         }, finish);
         return;
@@ -425,22 +501,22 @@ void separate (SnaggerProcessor& p, Clip::Ptr clip, Engine engine, bool fourStem
 
     if (engine != Engine::python && ai::isAvailable())
     {
-        const auto mode = engine == Engine::ai6 ? ai::Mode::sixStems
-                        : ! fourStems            ? ai::Mode::vocalsMusic
-                        : engine == Engine::aiMax ? ai::Mode::fourStemsMax
-                                                  : ai::Mode::fourStems;
+        const auto mode = aiModeFor (engine, parts);
         const auto baseUrl = p.getSettings().getString ("aiModelBaseUrl");
         const int downloadMB = ai::downloadMegabytesFor (mode);
         if (downloadMB > 0)
             notify (p, "First time: downloading the AI model (" + juce::String (downloadMB) + " MB). After that it works offline.");
 
-        p.jobs.start ("AI Split", [audio, mode, baseUrl, makeStem] (Job& job)
+        p.jobs.start ("AI Split", [audio, mode, baseUrl, parts, makeStem] (Job& job)
         {
             std::vector<ai::Stem> stems;
             if (! ai::separate (*audio, mode, job, baseUrl, stems))
                 return;
+            std::vector<std::pair<juce::String, AudioData::Ptr>> raw;
             for (auto& st : stems)
-                job.clips.push_back (makeStem (st.name, st.audio));
+                raw.push_back ({ st.name, st.audio });
+            for (auto& [name, a] : chooseParts (raw, parts, *audio))
+                job.clips.push_back (makeStem (name, a));
         }, finish);
         return;
     }
@@ -460,8 +536,8 @@ void separate (SnaggerProcessor& p, Clip::Ptr clip, Engine engine, bool fourStem
     }
 
     auto script = tools.writeAiScript();
-    const juce::String model = engine == Engine::aiMax ? "htdemucs_ft" : (engine == Engine::ai6 ? "htdemucs_6s" : "htdemucs");
-    const bool twoStems = ! fourStems && engine != Engine::ai6;
+    const juce::String model = needsSixParts (parts) ? "htdemucs_6s" : (engine == Engine::aiMax ? "htdemucs_ft" : "htdemucs");
+    const bool twoStems = ! fourStems;
     auto ffmpeg = tools.getPath (ToolManager::Tool::ffmpeg);
 
     p.jobs.start ("AI Split", [=] (Job& job)
@@ -521,14 +597,17 @@ void separate (SnaggerProcessor& p, Clip::Ptr clip, Engine engine, bool fourStem
         }
 
         job.setStatus ("Loading stems");
+        std::vector<std::pair<juce::String, AudioData::Ptr>> raw;
         for (auto& [name, file] : stems)
         {
             auto r = audioio::loadFile (file, ffmpeg);
             if (r.audio == nullptr) continue;
             // Demucs works at 44.1 kHz; match the source rate so stems line up with the original.
             auto a = std::abs (r.audio->sampleRate - audio->sampleRate) > 0.5 ? edit::resample (*r.audio, audio->sampleRate) : r.audio;
-            job.clips.push_back (makeStem (name, a));
+            raw.push_back ({ name, a });
         }
+        for (auto& [name, a] : chooseParts (raw, parts, *audio))
+            job.clips.push_back (makeStem (name, a));
         dir.deleteRecursively();
         if (job.clips.empty())
             job.fail ("AI Split produced no readable stems");

@@ -43,7 +43,32 @@ struct Clip final : juce::ReferenceCountedObject
 
     AudioData::Ptr audio;
     std::vector<int> slices;    // chop points (sample positions, sorted, excluding 0)
-    double bpm = 0.0;
+    double bpm = 0.0;           // tempo of the original (before the LENGTH knob)
+
+    /** The live PITCH & TIME / TONE knobs. While any of them is away from its default,
+        `adjustBase` holds the audio as it was before, and `audio` is that audio rendered with them. */
+    struct Adjust
+    {
+        float semitones = 0.0f;
+        double length = 1.0;            // 0.5 .. 2.0 of the original length
+        bool formants = true, tape = false;
+        float gainDb = 0.0f;
+        float lowCut = 0.0f;            // Hz, 0 = off
+        float highCut = 0.0f;           // Hz, 0 = off
+
+        bool pitchNeutral() const noexcept { return std::abs (semitones) < 0.01f && std::abs (length - 1.0) < 0.0005; }
+        bool toneNeutral() const noexcept  { return std::abs (gainDb) < 0.01f && lowCut <= 0.0f && highCut <= 0.0f; }
+        bool isNeutral() const noexcept    { return pitchNeutral() && toneNeutral(); }
+        bool operator== (const Adjust& o) const noexcept
+        {
+            return std::abs (semitones - o.semitones) < 0.001f && std::abs (length - o.length) < 1.0e-6
+                && formants == o.formants && tape == o.tape && std::abs (gainDb - o.gainDb) < 0.001f
+                && std::abs (lowCut - o.lowCut) < 0.01f && std::abs (highCut - o.highCut) < 0.01f;
+        }
+        bool operator!= (const Adjust& o) const noexcept { return ! (*this == o); }
+    };
+    Adjust adjust;
+    AudioData::Ptr adjustBase;
 
     juce::File cacheFile;       // where the session keeps this clip on disk
 
@@ -55,11 +80,13 @@ struct Clip final : juce::ReferenceCountedObject
         AudioData::Ptr audio;
         std::vector<int> slices;
         juce::String label;
+        Adjust adjust;
+        AudioData::Ptr adjustBase;
     };
 
     void pushUndo (const juce::String& label)
     {
-        undoStack.push_back ({ audio, slices, label });
+        undoStack.push_back ({ audio, slices, label, adjust, adjustBase });
         if (undoStack.size() > 30)
             undoStack.erase (undoStack.begin());
         redoStack.clear();
@@ -73,9 +100,11 @@ struct Clip final : juce::ReferenceCountedObject
         if (undoStack.empty()) return {};
         auto s = undoStack.back();
         undoStack.pop_back();
-        redoStack.push_back ({ audio, slices, s.label });
+        redoStack.push_back ({ audio, slices, s.label, adjust, adjustBase });
         audio = s.audio;
         slices = s.slices;
+        adjust = s.adjust;
+        adjustBase = s.adjustBase;
         return s.label;
     }
 
@@ -84,9 +113,11 @@ struct Clip final : juce::ReferenceCountedObject
         if (redoStack.empty()) return {};
         auto s = redoStack.back();
         redoStack.pop_back();
-        undoStack.push_back ({ audio, slices, s.label });
+        undoStack.push_back ({ audio, slices, s.label, adjust, adjustBase });
         audio = s.audio;
         slices = s.slices;
+        adjust = s.adjust;
+        adjustBase = s.adjustBase;
         return s.label;
     }
 
@@ -116,7 +147,7 @@ inline juce::String prettyStemName (const juce::String& s)
     if (s == "bass")    return "Bass";
     if (s == "other")   return "Other";
     if (s == "guitar")  return "Guitar";
-    if (s == "piano")   return "Keys";
+    if (s == "piano")   return "Piano";
     if (s == "melodic") return "Melodic";
     return s.substring (0, 1).toUpperCase() + s.substring (1);
 }

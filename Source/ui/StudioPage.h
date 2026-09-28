@@ -36,6 +36,7 @@ private:
 //==============================================================================
 class StudioPage : public juce::Component, private juce::ChangeListener, private juce::Timer
 {
+    friend struct StudioPageTester;
 public:
     explicit StudioPage (EditorContext&);
     ~StudioPage() override;
@@ -58,6 +59,17 @@ private:
     enum class SliceFix { keep, crop, remove };
     void applyEdit (const juce::String& label, bool needsSelection, SliceFix fix,
                     std::function<AudioData::Ptr (const AudioData&, int start, int end)> op);
+    void applyEditRange (const juce::String& label, int start, int end, SliceFix fix,
+                         std::function<AudioData::Ptr (const AudioData&, int start, int end)> op);
+
+    // PITCH & TIME / TONE knobs are live: every move re-renders the original with all of them
+    Clip::Adjust knobsToAdjust() const;
+    void setKnobsFrom (const Clip::Adjust&);
+    void knobsChanged();
+    void startAdjustRender();
+    void adjustRendered (AudioData::Ptr oldAudio);   // UI follow-up once a render landed
+    bool adjustJobRunning = false, adjustPending = false;
+    juce::uint32 adjustSerial = 0, lastAdjustUndoMs = 0;
 
     void play();
     void stop();
@@ -104,19 +116,18 @@ private:
     Knob stretchKnob { "Length", 50.0, 200.0, 100.0, 1.0, "%" };
     Knob bpmKnob     { "Target BPM", 60.0, 200.0, 120.0, 0.5 };
     juce::ToggleButton formantToggle { "Formants" }, tapeToggle { "Tape" };
-    juce::TextButton applyPitchBtn { "APPLY" }, matchBpmBtn { "MATCH BPM" };
+    juce::TextButton pitchDefaultBtn { "DEFAULT" }, matchBpmBtn { "MATCH BPM" };
 
     Knob gainKnob    { "Gain",     -24.0, 24.0, 0.0, 0.5, " dB" };
     Knob lowCutKnob  { "Low cut",  0.0, 1000.0, 0.0, 1.0, " Hz" };
     Knob highCutKnob { "High cut", 1000.0, 20000.0, 20000.0, 10.0, " Hz" };
-    juce::TextButton applyGainBtn { "GAIN" }, applyFilterBtn { "FILTER" };
+    juce::TextButton toneDefaultBtn { "DEFAULT" };
 
     Knob sensKnob    { "Sensitivity", 0.0, 100.0, 55.0, 1.0, "%" };
     juce::TextButton autoChopBtn { "AUTO CHOP" }, equalBtn { "EQUAL" }, clearChopsBtn { "CLEAR" };
     juce::ComboBox equalCount, midiModeBox;
     juce::ToggleButton oneShotToggle { "One-shot" };
 
-    bool pitchJobRunning = false;
 };
 
 } // namespace snag

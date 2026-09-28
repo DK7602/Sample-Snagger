@@ -194,6 +194,104 @@ private:
 };
 
 //==============================================================================
+static juce::String partMenuName (const juce::String& part)
+{
+    return part == "music" ? juce::String ("Music (everything but vocals)") : prettyStemName (part);
+}
+
+PartsPicker::PartsPicker() : juce::Button ("parts")
+{
+    setTooltip ("Which parts to pull out - tick as many as you like");
+    setMouseCursor (juce::MouseCursor::PointingHandCursor);
+}
+
+juce::String PartsPicker::summary() const
+{
+    if (parts.size() == 2 && parts.contains ("vocals") && parts.contains ("music"))
+        return "Vocals + Music";
+    juce::StringArray names;
+    for (auto& part : actions::allStemParts())
+        if (parts.contains (part))
+            names.add (prettyStemName (part));
+    return names.joinIntoString (", ");
+}
+
+void PartsPicker::setParts (const juce::StringArray& p)
+{
+    parts.clear();
+    for (auto& part : actions::allStemParts())
+        if (p.contains (part))
+            parts.add (part);
+    if (parts.isEmpty())
+        parts = { "vocals", "music" };
+    repaint();
+    if (onChange) onChange();
+}
+
+void PartsPicker::paintButton (juce::Graphics& g, bool highlighted, bool down)
+{
+    auto r = getLocalBounds().toFloat().reduced (2.0f);
+    const float corner = juce::jmin (6.0f, r.getHeight() * 0.3f);
+    satinSurface (g, r, corner, highlighted, down, true);
+    goldBorder (g, r.reduced (0.6f), corner, 1.0f, highlighted ? 0.75f : 0.32f);
+
+    juce::Path arrow;
+    const float ax = r.getRight() - 14.0f, ay = r.getCentreY();
+    arrow.addTriangle (ax - 4.0f, ay - 2.0f, ax + 4.0f, ay - 2.0f, ax, ay + 3.0f);
+    glowPath (g, arrow, col::red, isEnabled() ? 0.8f : 0.2f);
+
+    g.setColour (isEnabled() ? col::text : col::textFaint);
+    g.setFont (ui (12.0f, true));
+    g.drawFittedText (summary(), r.reduced (10.0f, 0.0f).withTrimmedRight (18.0f).toNearestInt(), juce::Justification::centredLeft, 1, 0.75f);
+}
+
+void PartsPicker::clicked()  { showMenu(); }
+
+void PartsPicker::showMenu()
+{
+    auto has = [this] (std::initializer_list<const char*> want)
+    {
+        if ((int) want.size() != parts.size()) return false;
+        for (auto* w : want) if (! parts.contains (w)) return false;
+        return true;
+    };
+
+    juce::PopupMenu m;
+    m.addSectionHeader ("Presets");
+    m.addItem (100, "Vocals + Music", true, has ({ "vocals", "music" }));
+    m.addItem (101, "Vocals, Drums, Bass, Other", true, has ({ "vocals", "drums", "bass", "other" }));
+    m.addItem (102, "Everything (+ guitar, piano)", true, has ({ "vocals", "drums", "bass", "guitar", "piano", "other" }));
+    m.addSeparator();
+    m.addSectionHeader ("Pick parts - tick as many as you like");
+    const auto& all = actions::allStemParts();
+    for (int i = 0; i < all.size(); ++i)
+        m.addItem (1 + i, partMenuName (all[i]), true, parts.contains (all[i]));
+
+    juce::Component::SafePointer<PartsPicker> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMinimumWidth (getWidth()),
+                     [safe] (int result)
+    {
+        if (safe == nullptr || result == 0)
+            return;
+        if (result == 100) { safe->setParts ({ "vocals", "music" }); return; }
+        if (result == 101) { safe->setParts ({ "vocals", "drums", "bass", "other" }); return; }
+        if (result == 102) { safe->setParts ({ "vocals", "drums", "bass", "guitar", "piano", "other" }); return; }
+
+        const auto part = actions::allStemParts()[result - 1];
+        auto next = safe->parts;
+        if (next.contains (part))
+        {
+            if (next.size() > 1)   // keep at least one
+                next.removeString (part);
+        }
+        else
+            next.add (part);
+        safe->setParts (next);
+        safe->showMenu();   // stay open for more ticks
+    });
+}
+
+//==============================================================================
 StemsPage::StemsPage (EditorContext& c) : ctx (c), proc (c.getProcessor())
 {
     addAndMakeVisible (topPanel);
@@ -208,7 +306,6 @@ StemsPage::StemsPage (EditorContext& c) : ctx (c), proc (c.getProcessor())
 
     engineBox.addItem (actions::engineName (actions::Engine::ai), 2);
     engineBox.addItem (actions::engineName (actions::Engine::aiMax), 3);
-    engineBox.addItem (actions::engineName (actions::Engine::ai6), 4);
     engineBox.addItem (actions::engineName (actions::Engine::quick), 1);
     engineBox.addSeparator();
     engineBox.addItem (actions::engineName (actions::Engine::python), 5);
@@ -216,11 +313,18 @@ StemsPage::StemsPage (EditorContext& c) : ctx (c), proc (c.getProcessor())
     engineBox.onChange = [this] { timerCallback(); };
     addAndMakeVisible (engineBox);
 
-    stemsBox.addItem ("Vocals + Music", 1);
-    stemsBox.addItem ("Vocals, Drums, Bass, Other", 2);
-    stemsBox.setSelectedId (1, juce::dontSendNotification);
-    stemsBox.onChange = [this] { timerCallback(); };
-    addAndMakeVisible (stemsBox);
+    {
+        auto saved = juce::StringArray::fromTokens (proc.getSettings().getString ("stemParts"), ",", "");
+        saved.removeEmptyStrings();
+        if (! saved.isEmpty())
+            partsPicker.setParts (saved);
+    }
+    partsPicker.onChange = [this]
+    {
+        proc.getSettings().setString ("stemParts", partsPicker.parts.joinIntoString (","));
+        timerCallback();
+    };
+    addAndMakeVisible (partsPicker);
 
     engineNote.setFont (ui (11.0f));
     engineNote.setColour (juce::Label::textColourId, col::textDim);
@@ -336,7 +440,8 @@ void StemsPage::rebuild()
 void StemsPage::timerCallback()
 {
     const int id = engineBox.getSelectedId();
-    const bool fourStems = stemsBox.getSelectedId() == 2;
+    const auto& parts = partsPicker.parts;
+    const bool sixParts = parts.contains ("guitar") || parts.contains ("piano");
     juce::String note;
     bool warn = false;
 
@@ -347,7 +452,11 @@ void StemsPage::timerCallback()
     };
 
     if (id == 1)
-        note = "Instant, but only a rough split (it guesses from stereo placement). Use AI Studio for clean stems.";
+    {
+        warn = sixParts;
+        note = sixParts ? "Quick Split can't find guitar or piano - pick AI Studio for those."
+                        : "Instant, but only a rough split (it guesses from stereo placement). Use AI Studio for clean stems.";
+    }
     else if (id == 5)
     {
         warn = ! proc.getTools().isAvailable (ToolManager::Tool::ai);
@@ -359,18 +468,24 @@ void StemsPage::timerCallback()
         warn = true;
         note = ai::unavailableReason();
     }
-    else if (id == 4)
-        note = "Six stems: vocals, drums, bass, guitar, piano, other." + dl (ai::Mode::sixStems);
-    else if (id == 3 && fourStems)
-        note = "Four specialised AI models, one per stem - cleanest result, about 4x slower." + dl (ai::Mode::fourStemsMax);
-    else if (! fourStems)
-        note = "Studio-quality AI vocal split, runs right here on your computer." + dl (ai::Mode::vocalsMusic);
     else
-        note = "Studio-quality AI, runs right here on your computer." + dl (ai::Mode::fourStems);
+    {
+        const auto engine = id == 3 ? actions::Engine::aiMax : actions::Engine::ai;
+        const auto mode = actions::aiModeFor (engine, parts);
+        if (mode == ai::Mode::vocalsMusic)
+            note = "Fine-tuned AI vocal model - the cleanest vocals, and the music is exactly what's left.";
+        else if (mode == ai::Mode::sixStems)
+            note = juce::String ("6-part AI model (vocals, drums, bass, guitar, piano, other).")
+                 + (id == 3 ? " Max has no guitar / piano models, so it uses this one." : "");
+        else if (mode == ai::Mode::fourStemsMax)
+            note = "Four specialised AI models, one per part - cleanest result, about 4x slower.";
+        else
+            note = "Studio-quality AI, runs right here on your computer.";
+        note << dl (mode);
+    }
 
     engineNote.setText (note, juce::dontSendNotification);
     engineNote.setColour (juce::Label::textColourId, warn ? col::redHot : col::textDim);
-    stemsBox.setEnabled (id != 4);
 
     if (proc.isPreviewing())
         for (auto* l : lanes) l->repaint();
@@ -424,8 +539,8 @@ void StemsPage::separateNow()
 
     const int id = engineBox.getSelectedId();
     auto engine = id == 1 ? actions::Engine::quick : id == 2 ? actions::Engine::ai : id == 3 ? actions::Engine::aiMax
-                : id == 4 ? actions::Engine::ai6 : actions::Engine::python;
-    actions::separate (proc, src, engine, stemsBox.getSelectedId() == 2);
+                : actions::Engine::python;
+    actions::separate (proc, src, engine, partsPicker.parts);
 }
 
 void StemsPage::updateGains()
@@ -494,7 +609,7 @@ void StemsPage::resized()
     auto row = right.removeFromTop (40);
     separateBtn.setBounds (row.removeFromRight (170));
     row.removeFromRight (10);
-    stemsBox.setBounds (row.removeFromRight (210).reduced (0, 5));
+    partsPicker.setBounds (row.removeFromRight (230).reduced (0, 5));
     row.removeFromRight (8);
     engineBox.setBounds (row.reduced (0, 5));
     engineNote.setBounds (right.removeFromTop (22));

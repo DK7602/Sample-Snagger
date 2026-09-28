@@ -82,7 +82,9 @@ Knob::Knob (const juce::String& captionIn, double min, double max, double def, d
     slider.setDoubleClickReturnValue (true, def);
     slider.setRotaryParameters (juce::MathConstants<float>::pi * 1.25f, juce::MathConstants<float>::pi * 2.75f, true);
     slider.setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
-    slider.onValueChange = [this] { repaint(); };
+    defaultValue = def;
+    slider.onValueChange = [this] { repaint(); if (onChange) onChange(); };
+    slider.onDragStart = [this] { if (onGestureStart) onGestureStart(); };
     addAndMakeVisible (slider);
 }
 

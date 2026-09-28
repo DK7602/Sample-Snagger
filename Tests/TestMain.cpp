@@ -482,6 +482,136 @@ static void testProcessAudio()
     CHECK (openMs < 9000.0 && ! cap.isRunning(), "browser process audio opens and closes cleanly");
 }
 
+/** Dominant frequency of channel 0 by zero crossings (fine for a sine). */
+static double zeroCrossHz (const AudioData& a)
+{
+    const float* x = a.buffer.getReadPointer (0);
+    int zc = 0;
+    const int n = a.getNumSamples();
+    for (int i = 1; i < n; ++i)
+        if ((x[i - 1] < 0.0f) != (x[i] < 0.0f)) ++zc;
+    return zc * 0.5 / (n / a.sampleRate);
+}
+
+static void testStemParts()
+{
+    std::cout << "\n[stem parts]\n";
+    CHECK (actions::aiModeFor (actions::Engine::ai, { "vocals", "music" }) == ai::Mode::vocalsMusic, "vocals + music uses the fine-tuned vocal model");
+    CHECK (actions::aiModeFor (actions::Engine::ai, { "drums" }) == ai::Mode::fourStems, "drums alone uses the 4-part model");
+    CHECK (actions::aiModeFor (actions::Engine::aiMax, { "drums", "bass" }) == ai::Mode::fourStemsMax, "Max uses the fine-tuned models");
+    CHECK (actions::aiModeFor (actions::Engine::ai, { "vocals", "piano" }) == ai::Mode::sixStems, "guitar / piano use the 6-part model");
+
+    SnaggerProcessor p;
+    juce::StringArray messages;
+    p.onNotify = [&messages] (const juce::String& m, bool err) { messages.add ((err ? "ERR: " : "") + m); };
+    auto demo = makeDemoMix (44100.0, 4.0);
+    Clip::Ptr c (new Clip());
+    c->name = "Mix";
+    c->audio = demo.mix;
+    p.session.add (c, true);
+    auto waitJobs = [&p]
+    {
+        pump (200);
+        for (int i = 0; i < 600 && p.jobs.isBusy(); ++i) pump (100);
+        pump (200);
+    };
+
+    actions::separate (p, c, actions::Engine::quick, { "drums", "music" });
+    waitJobs();
+    auto stems = p.session.getStemsOf (*c);
+    juce::StringArray names;
+    for (auto& st : stems) names.add (st->stemName);
+    CHECK (names.joinIntoString (",") == "music,drums", "only the picked parts come back, in menu order (" + names.joinIntoString (",") + ")");
+
+    actions::separate (p, c, actions::Engine::quick, { "vocals", "music" });
+    waitJobs();
+    stems = p.session.getStemsOf (*c);
+    if (stems.size() == 2)
+    {
+        auto sum = edit::mix ({ stems[0]->audio, stems[1]->audio }, { 1, 1 });
+        double maxErr = 0;
+        for (int i = 0; i < sum->getNumSamples(); ++i)
+            maxErr = juce::jmax (maxErr, (double) std::abs (sum->buffer.getSample (0, i) - demo.mix->buffer.getSample (0, i)));
+        CHECK (maxErr < 1e-4, "vocals + music add up to the original exactly");
+    }
+    else
+        CHECK (false, "vocals + music came back");
+
+    actions::separate (p, c, actions::Engine::quick, { "guitar" });
+    waitJobs();
+    CHECK (messages.size() > 0 && messages[messages.size() - 1].contains ("guitar"), "Quick Split explains it can't do guitar / piano");
+    p.onNotify = nullptr;
+}
+
+namespace snag
+{
+/** Drives the STUDIO knobs the way a person would. */
+struct StudioPageTester
+{
+    static void run()
+    {
+        std::cout << "\n[studio knobs - live, with DEFAULT]\n";
+        auto p = std::make_unique<SnaggerProcessor>();
+        p->prepareToPlay (44100.0, 512);
+        auto ed = std::unique_ptr<SnaggerEditor> (dynamic_cast<SnaggerEditor*> (p->createEditor()));
+        ed->setSize (1280, 820);
+        auto& page = ed->getStudioPage();
+
+        // a 440 Hz tone
+        juce::AudioBuffer<float> b (2, 44100 * 2);
+        for (int i = 0; i < b.getNumSamples(); ++i)
+            for (int ch = 0; ch < 2; ++ch)
+                b.setSample (ch, i, 0.25f * (float) std::sin (6.283185307 * 440.0 * i / 44100.0));
+        Clip::Ptr c (new Clip());
+        c->name = "Tone";
+        c->audio = AudioData::make (std::move (b), 44100.0);
+        auto original = c->audio;
+        p->session.add (c, true);
+        page.setClip (c);
+
+        auto settle = [&p]
+        {
+            pump (400);
+            for (int i = 0; i < 300 && p->jobs.isBusy(); ++i) pump (100);
+            pump (300);
+        };
+
+        page.pitchKnob.slider.setValue (12.0);   // up an octave
+        settle();
+        CHECK (std::abs (zeroCrossHz (*c->audio) - 880.0) < 25.0, "moving PITCH applies straight away (" + juce::String (zeroCrossHz (*c->audio), 0) + " Hz)");
+        CHECK (std::abs (page.pitchKnob.slider.getValue() - 12.0) < 0.01, "and the knob stays where it was put");
+        CHECK (c->adjustBase == original, "the original is kept");
+
+        const float peakPitched = c->audio->buffer.getMagnitude (0, 0, c->audio->getNumSamples());
+        page.gainKnob.slider.setValue (6.0);
+        settle();
+        const float peakLoud = c->audio->buffer.getMagnitude (0, 0, c->audio->getNumSamples());
+        CHECK (std::abs (juce::Decibels::gainToDecibels (peakLoud / peakPitched) - 6.0f) < 0.6f, "GAIN applies on top of the pitch change");
+        CHECK (std::abs (zeroCrossHz (*c->audio) - 880.0) < 25.0, "  ...keeping the pitch");
+
+        page.stretchKnob.slider.setValue (150.0);
+        settle();
+        CHECK (std::abs (c->audio->getNumSamples() - 44100 * 3) < 4410, "LENGTH 150% makes it 1.5x as long");
+
+        page.pitchDefaultBtn.triggerClick();
+        settle();
+        CHECK (std::abs (zeroCrossHz (*c->audio) - 440.0) < 15.0 && std::abs (c->audio->getNumSamples() - 44100 * 2) < 100,
+               "PITCH & TIME DEFAULT restores the original pitch and length");
+        CHECK (std::abs (page.pitchKnob.slider.getValue()) < 0.01 && std::abs (page.stretchKnob.slider.getValue() - 100.0) < 0.01, "  ...and its knobs");
+        CHECK (std::abs (page.gainKnob.slider.getValue() - 6.0) < 0.01, "  ...leaving TONE alone");
+
+        page.toneDefaultBtn.triggerClick();
+        settle();
+        CHECK (c->audio == original && c->adjustBase == nullptr, "TONE DEFAULT too: the exact original is back");
+
+        page.undo();
+        CHECK (std::abs (page.gainKnob.slider.getValue() - 6.0) < 0.01, "undo brings the knob back with the sound");
+
+        ed.reset();
+    }
+};
+}
+
 static void testLinks()
 {
     std::cout << "\n[HQ snag links]\n";
@@ -821,6 +951,8 @@ int main (int argc, char** argv)
     testWebCapture();
     testProcessor();
     testLinks();
+    testStemParts();
+    snag::StudioPageTester::run();
     testProcessAudio();
     if (args.contains ("--network"))
         testNetwork();

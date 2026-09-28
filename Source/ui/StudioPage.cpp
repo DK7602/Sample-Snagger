@@ -289,13 +289,13 @@ StudioPage::StudioPage (EditorContext& c)
     {
         if (clip == nullptr) return;
         int fs, fe; fadeRange (true, fs, fe);
-        applyEdit ("Fade in", false, SliceFix::keep, [fs, fe] (const AudioData& a, int, int) { return edit::fade (a, fs, fe, true); });
+        applyEditRange ("Fade in", fs, fe, SliceFix::keep, [] (const AudioData& a, int s, int e) { return edit::fade (a, s, e, true); });
     };
     editButtons[5]->onClick = [this, fadeRange]
     {
         if (clip == nullptr) return;
         int fs, fe; fadeRange (false, fs, fe);
-        applyEdit ("Fade out", false, SliceFix::keep, [fs, fe] (const AudioData& a, int, int) { return edit::fade (a, fs, fe, false); });
+        applyEditRange ("Fade out", fs, fe, SliceFix::keep, [] (const AudioData& a, int s, int e) { return edit::fade (a, s, e, false); });
     };
     editButtons[6]->onClick = [this] { applyEdit ("Reverse", false, SliceFix::keep, [] (const AudioData& a, int s, int e) { return edit::reverse (a, s, e); }); };
     editButtons[7]->onClick = [this] { applyEdit ("Mono", false, SliceFix::keep, [] (const AudioData& a, int, int) { return edit::toMono (a); }); };
@@ -306,30 +306,17 @@ StudioPage::StudioPage (EditorContext& c)
     formantToggle.setToggleState (true, juce::dontSendNotification);
     formantToggle.setTooltip ("Keep formants: voices stay natural when pitching (no chipmunk)");
     tapeToggle.setTooltip ("Old-school varispeed: pitch and speed change together");
-    applyPitchBtn.setTooltip ("Apply pitch / length (high-quality Signalsmith engine)");
-    matchBpmBtn.setTooltip ("Stretch the sample from its detected BPM to the target BPM");
-    setStyle (applyPitchBtn, "red");
-    applyPitchBtn.onClick = [this]
+    pitchDefaultBtn.setTooltip ("Back to the original pitch and length");
+    matchBpmBtn.setTooltip ("Set LENGTH so the sample plays at the target BPM");
+    pitchDefaultBtn.onClick = [this]
     {
-        if (clip == nullptr || pitchJobRunning) return;
-        const float st = (float) pitchKnob.slider.getValue();
-        const double len = stretchKnob.slider.getValue() / 100.0;
-        if (std::abs (st) < 0.01f && std::abs (len - 1.0) < 0.001) { ctx.toast ("Set PITCH or LENGTH first."); return; }
-        pitchJobRunning = true;
-        juce::Component::SafePointer<StudioPage> safe (this);
-        actions::pitchTime (proc, clip, st, len, formantToggle.getToggleState(), tapeToggle.getToggleState(), [safe] (bool ok)
-        {
-            if (safe == nullptr) return;
-            safe->pitchJobRunning = false;
-            if (! ok) return;
-            safe->pitchKnob.slider.setValue (0.0);
-            safe->stretchKnob.slider.setValue (100.0);
-            safe->wave.audioChanged();
-            safe->refreshInfo();
-        });
+        pitchKnob.setValueSilently (pitchKnob.getDefault());
+        stretchKnob.setValueSilently (stretchKnob.getDefault());
+        lastAdjustUndoMs = 0;   // its own undo step
+        knobsChanged();
     };
     matchBpmBtn.onClick = [this] { matchBpm(); };
-    for (auto* comp : std::initializer_list<juce::Component*> { &pitchKnob, &stretchKnob, &bpmKnob, &formantToggle, &tapeToggle, &applyPitchBtn, &matchBpmBtn })
+    for (auto* comp : std::initializer_list<juce::Component*> { &pitchKnob, &stretchKnob, &bpmKnob, &formantToggle, &tapeToggle, &pitchDefaultBtn, &matchBpmBtn })
         addAndMakeVisible (comp);
 
     // tone
@@ -338,27 +325,26 @@ StudioPage::StudioPage (EditorContext& c)
     lowCutKnob.formatter  = [] (double v) { return v < 10.0 ? juce::String ("Off") : juce::String ((int) v) + " Hz"; };
     highCutKnob.formatter = [] (double v) { return v > 19900.0 ? juce::String ("Off") : (v >= 1000.0 ? juce::String (v / 1000.0, 1) + " kHz" : juce::String ((int) v) + " Hz"); };
     gainKnob.formatter = [] (double v) { return (v > 0 ? "+" : "") + juce::String (v, 1) + " dB"; };
-    applyGainBtn.setTooltip ("Apply gain to the selection (or whole sample)");
-    applyFilterBtn.setTooltip ("Apply the low / high cut filters (24 dB/oct)");
-    applyGainBtn.onClick = [this]
+    toneDefaultBtn.setTooltip ("Back to the original gain and no filters");
+    toneDefaultBtn.onClick = [this]
     {
-        const float db = (float) gainKnob.slider.getValue();
-        if (std::abs (db) < 0.01f) { ctx.toast ("Turn the GAIN knob first."); return; }
-        applyEdit ("Gain", false, SliceFix::keep, [db] (const AudioData& a, int s, int e) { return edit::gain (a, s, e, db); });
-        gainKnob.slider.setValue (0.0);
+        gainKnob.setValueSilently (gainKnob.getDefault());
+        lowCutKnob.setValueSilently (lowCutKnob.getDefault());
+        highCutKnob.setValueSilently (highCutKnob.getDefault());
+        lastAdjustUndoMs = 0;
+        knobsChanged();
     };
-    applyFilterBtn.onClick = [this]
-    {
-        const float lo = (float) lowCutKnob.slider.getValue();
-        const float hi = (float) highCutKnob.slider.getValue();
-        if (lo < 10.0f && hi > 19900.0f) { ctx.toast ("Set LOW CUT or HIGH CUT first."); return; }
-        applyEdit ("Filter", false, SliceFix::keep, [lo, hi] (const AudioData& a, int, int)
-        {
-            return edit::filter (a, lo < 10.0f ? 0.0f : lo, hi > 19900.0f ? 0.0f : hi);
-        });
-    };
-    for (auto* comp : std::initializer_list<juce::Component*> { &gainKnob, &lowCutKnob, &highCutKnob, &applyGainBtn, &applyFilterBtn })
+    for (auto* comp : std::initializer_list<juce::Component*> { &gainKnob, &lowCutKnob, &highCutKnob, &toneDefaultBtn })
         addAndMakeVisible (comp);
+
+    // every knob / switch in PITCH & TIME and TONE applies as you move it
+    for (auto* k : { &pitchKnob, &stretchKnob, &gainKnob, &lowCutKnob, &highCutKnob })
+    {
+        k->onChange = [this] { knobsChanged(); };
+        k->onGestureStart = [this] { lastAdjustUndoMs = 0; };   // each new grab is its own undo step
+    }
+    formantToggle.onClick = [this] { lastAdjustUndoMs = 0; knobsChanged(); };
+    tapeToggle.onClick    = [this] { lastAdjustUndoMs = 0; knobsChanged(); };
 
     // chop & play
     setStyle (autoChopBtn, "red");
@@ -475,6 +461,8 @@ void StudioPage::timerCallback()
 void StudioPage::setClip (Clip::Ptr c)
 {
     clip = c;
+    setKnobsFrom (clip != nullptr ? clip->adjust : Clip::Adjust());
+    lastAdjustUndoMs = 0;
     wave.setClip (c);
     pads.setClip (c);
     overview.repaint();
@@ -483,7 +471,7 @@ void StudioPage::setClip (Clip::Ptr c)
 
     const bool has = clip != nullptr;
     for (auto* b : editButtons) b->setEnabled (has);
-    for (auto* comp : std::initializer_list<juce::Component*> { &applyPitchBtn, &matchBpmBtn, &applyGainBtn, &applyFilterBtn, &autoChopBtn,
+    for (auto* comp : std::initializer_list<juce::Component*> { &pitchDefaultBtn, &matchBpmBtn, &toneDefaultBtn, &autoChopBtn,
                                                                 &equalBtn, &clearChopsBtn, &playBtn, &stopBtn, &saveBtn, &detectBpmBtn, &dragHandle })
         comp->setEnabled (has);
     dragHandle.setAlpha (has ? 1.0f : 0.4f);
@@ -519,7 +507,10 @@ void StudioPage::refreshInfo()
     if (clip->slices.size() > 0)
         info << "   " << (int) clip->sliceBoundaries().size() - 1 << " CHOPS";
     infoLabel.setText (info, juce::dontSendNotification);
-    bpmLabel.setText (clip->bpm > 0 ? juce::String (clip->bpm, 1) + " BPM" : "BPM  -", juce::dontSendNotification);
+    double shownBpm = clip->bpm;
+    if (shownBpm > 0 && clip->adjustBase != nullptr)
+        shownBpm = clip->adjust.tape ? shownBpm * std::pow (2.0, clip->adjust.semitones / 12.0) : shownBpm / clip->adjust.length;
+    bpmLabel.setText (shownBpm > 0 ? juce::String (shownBpm, 1) + " BPM" : "BPM  -", juce::dontSendNotification);
 
     const double sr = a.sampleRate;
     if (wave.hasSelection())
@@ -543,17 +534,48 @@ void StudioPage::applyEdit (const juce::String& label, bool needsSelection, Slic
         ctx.toast ("Select a region first (drag across the waveform).");
         return;
     }
-
     const int n = clip->audio->getNumSamples();
-    const int s = wave.hasSelection() ? wave.getSelectionStart() : 0;
-    const int e = wave.hasSelection() ? wave.getSelectionEnd() : n;
+    applyEditRange (label, wave.hasSelection() ? wave.getSelectionStart() : 0, wave.hasSelection() ? wave.getSelectionEnd() : n, fix, op);
+}
+
+void StudioPage::applyEditRange (const juce::String& label, int s, int e, SliceFix fix,
+                                 std::function<AudioData::Ptr (const AudioData&, int, int)> op)
+{
+    if (clip == nullptr || clip->audio == nullptr)
+        return;
 
     auto result = op (*clip->audio, s, e);
     if (result == nullptr)
         return;
 
     clip->pushUndo (label);
+    lastAdjustUndoMs = 0;
+
+    // With the knobs away from default, the edit also goes into the original (same moment in time),
+    // so moving a knob later re-renders the edited sound instead of losing the edit.
+    AudioData::Ptr newBase;
+    if (clip->adjustBase != nullptr)
+    {
+        const auto& base = *clip->adjustBase;
+        const double k = (double) base.getNumSamples() / (double) juce::jmax (1, clip->audio->getNumSamples());
+        const int bs = juce::jlimit (0, base.getNumSamples(), juce::roundToInt (s * k));
+        const int be = juce::jlimit (bs, base.getNumSamples(), juce::roundToInt (e * k));
+        if (label == "Normalize")
+        {
+            // normalise what you hear: the same gain on the original
+            float peak = 0.0f;
+            for (int c = 0; c < clip->audio->getNumChannels(); ++c)
+                peak = juce::jmax (peak, clip->audio->buffer.getMagnitude (c, s, juce::jmax (0, e - s)));
+            if (peak > 1.0e-6f)
+                newBase = edit::gain (base, bs, be, -0.3f - juce::Decibels::gainToDecibels (peak));
+        }
+        else
+            newBase = op (base, bs, be);
+    }
+
     clip->audio = result;
+    if (newBase != nullptr)
+        clip->adjustBase = newBase;
 
     std::vector<int> fixed;
     for (auto m : clip->slices)
@@ -575,6 +597,156 @@ void StudioPage::applyEdit (const juce::String& label, bool needsSelection, Slic
     refreshInfo();
     pads.repaint();
     overview.repaint();
+
+    if (newBase != nullptr)
+        startAdjustRender();   // exact version of what's on screen
+}
+
+//==============================================================================
+Clip::Adjust StudioPage::knobsToAdjust() const
+{
+    Clip::Adjust a;
+    a.semitones = (float) pitchKnob.slider.getValue();
+    a.length    = stretchKnob.slider.getValue() / 100.0;
+    a.formants  = formantToggle.getToggleState();
+    a.tape      = tapeToggle.getToggleState();
+    a.gainDb    = (float) gainKnob.slider.getValue();
+    const double lo = lowCutKnob.slider.getValue(), hi = highCutKnob.slider.getValue();
+    a.lowCut  = lo < 10.0 ? 0.0f : (float) lo;
+    a.highCut = hi > 19900.0 ? 0.0f : (float) hi;
+    return a;
+}
+
+void StudioPage::setKnobsFrom (const Clip::Adjust& a)
+{
+    pitchKnob.setValueSilently (a.semitones);
+    stretchKnob.setValueSilently (a.length * 100.0);
+    formantToggle.setToggleState (a.formants, juce::dontSendNotification);
+    tapeToggle.setToggleState (a.tape, juce::dontSendNotification);
+    gainKnob.setValueSilently (a.gainDb);
+    lowCutKnob.setValueSilently (a.lowCut > 0.0f ? a.lowCut : lowCutKnob.getDefault());
+    highCutKnob.setValueSilently (a.highCut > 0.0f ? a.highCut : highCutKnob.getDefault());
+}
+
+void StudioPage::knobsChanged()
+{
+    if (clip == nullptr || clip->audio == nullptr)
+        return;
+    const auto a = knobsToAdjust();
+    if (a == clip->adjust)
+        return;
+
+    // one undo step per knob grab / button press, however long the drag
+    const auto now = juce::Time::getMillisecondCounter();
+    if (lastAdjustUndoMs == 0 || now - lastAdjustUndoMs > 1500)
+        clip->pushUndo ("Pitch / tone");
+    lastAdjustUndoMs = now;
+
+    if (clip->adjustBase == nullptr)
+        clip->adjustBase = clip->audio;   // the original, kept until everything is back at default
+    clip->adjust = a;
+    refreshInfo();
+
+    // re-render shortly after the knob stops moving
+    const auto serial = ++adjustSerial;
+    juce::Component::SafePointer<StudioPage> safe (this);
+    juce::Timer::callAfterDelay (140, [safe, serial]
+    {
+        if (safe != nullptr && safe->adjustSerial == serial)
+            safe->startAdjustRender();
+    });
+}
+
+void StudioPage::startAdjustRender()
+{
+    if (clip == nullptr || clip->adjustBase == nullptr)
+        return;
+    if (adjustJobRunning)
+    {
+        adjustPending = true;   // render again with the latest settings once this one lands
+        return;
+    }
+
+    auto c = clip;
+    auto base = c->adjustBase;
+    const auto adj = c->adjust;
+    auto& p = proc;
+    juce::Component::SafePointer<StudioPage> safe (this);
+
+    // Applies a finished render to the clip - also when the window was closed meanwhile.
+    auto land = [&p, c, base, adj, safe] (AudioData::Ptr result)
+    {
+        if (result == nullptr || c->adjust != adj || c->adjustBase != base)
+            return;   // knobs moved on, or undo: a newer render is coming
+        auto old = c->audio;
+        const double ratio = old != nullptr && old->getNumSamples() > 0 ? (double) result->getNumSamples() / (double) old->getNumSamples() : 1.0;
+        for (auto& s : c->slices)
+            s = (int) std::round (s * ratio);
+        c->audio = result;
+        if (adj.isNeutral())
+            c->adjustBase = nullptr;   // back to the original
+        p.session.clipChanged (c.get());
+        if (safe != nullptr && safe->clip == c)
+            safe->adjustRendered (old);
+        else if (p.getSamplerClip() == c)
+            p.setSamplerClip (c);
+    };
+
+    if (adj.isNeutral())
+    {
+        land (base);
+        return;
+    }
+
+    adjustJobRunning = true;
+    proc.jobs.start (adj.pitchNeutral() ? "Tone" : (adj.tape ? "Varispeed" : "Pitch & Time"), [base, adj] (Job& job)
+    {
+        job.setStatus ("Rendering");
+        job.audio = edit::renderAdjust (*base, adj);
+    },
+    [safe, land] (Job& job)
+    {
+        if (! job.isCancelled())
+            land (job.audio);
+        if (safe != nullptr)
+        {
+            safe->adjustJobRunning = false;
+            if (safe->adjustPending)
+            {
+                safe->adjustPending = false;
+                safe->startAdjustRender();
+            }
+        }
+    });
+}
+
+void StudioPage::adjustRendered (AudioData::Ptr oldAudio)
+{
+    const int oldLen = oldAudio != nullptr ? oldAudio->getNumSamples() : 0;
+    const int newLen = clip->audio->getNumSamples();
+    const double ratio = oldLen > 0 ? (double) newLen / (double) oldLen : 1.0;
+
+    const bool wasPlaying = proc.isPreviewing() && proc.getPreviewSource() == oldAudio.get();
+    const double pos = wasPlaying ? proc.getPreviewPosition() : -1.0;
+
+    if (wave.hasSelection() && std::abs (ratio - 1.0) > 1.0e-6)
+        wave.setSelection (juce::roundToInt (wave.getSelectionStart() * ratio), juce::roundToInt (wave.getSelectionEnd() * ratio));
+
+    wave.audioChanged();
+    syncSampler();
+    refreshInfo();
+    pads.repaint();
+    overview.repaint();
+
+    // keep playing from the same moment, now with the new sound
+    if (wasPlaying)
+    {
+        const int from = juce::jlimit (0, juce::jmax (0, newLen - 1), juce::roundToInt (pos * ratio));
+        if (wave.hasSelection())
+            proc.previewClip (*clip, juce::jlimit (wave.getSelectionStart(), wave.getSelectionEnd(), from), wave.getSelectionEnd(), loopBtn.getToggleState());
+        else
+            proc.previewClip (*clip, from, -1, loopBtn.getToggleState());
+    }
 }
 
 void StudioPage::play()
@@ -592,6 +764,8 @@ void StudioPage::undo()
 {
     if (clip == nullptr || ! clip->canUndo()) return;
     auto what = clip->undo();
+    setKnobsFrom (clip->adjust);
+    lastAdjustUndoMs = 0;
     proc.session.clipChanged (clip.get());
     wave.audioChanged();
     syncSampler();
@@ -604,6 +778,8 @@ void StudioPage::redo()
 {
     if (clip == nullptr || ! clip->canRedo()) return;
     auto what = clip->redo();
+    setKnobsFrom (clip->adjust);
+    lastAdjustUndoMs = 0;
     proc.session.clipChanged (clip.get());
     wave.audioChanged();
     syncSampler();
@@ -624,7 +800,8 @@ void StudioPage::detectBpm()
         ctx.toast ("Couldn't find a steady tempo in this sample.", true);
         return;
     }
-    clip->bpm = bpm;
+    // stored for the original, so LENGTH / MATCH BPM always start from the same place
+    clip->bpm = clip->adjustBase != nullptr && ! clip->adjust.tape ? bpm * clip->adjust.length : bpm;
     proc.session.clipChanged (clip.get(), false);
     refreshInfo();
     ctx.toast ("Tempo: " + juce::String (bpm, 1) + " BPM");
@@ -638,15 +815,15 @@ void StudioPage::matchBpm()
     if (clip->bpm <= 0)
         return;
     const double target = bpmKnob.slider.getValue();
-    const double ratio = clip->bpm / target;
-    if (std::abs (ratio - 1.0) < 0.002) { ctx.toast ("Already at " + juce::String (target, 1) + " BPM"); return; }
-    if (ratio < 0.25 || ratio > 4.0) { ctx.toast ("That's too big a tempo change.", true); return; }
-    juce::Component::SafePointer<StudioPage> safe (this);
-    actions::pitchTime (proc, clip, tapeToggle.getToggleState() ? (float) (12.0 * std::log2 (1.0 / ratio)) : 0.0f, ratio,
-                        true, tapeToggle.getToggleState(), [safe] (bool ok)
-    {
-        if (safe != nullptr && ok) { safe->wave.audioChanged(); safe->refreshInfo(); }
-    });
+    const double ratio = clip->bpm / target;   // new length, relative to the original
+    if (ratio < 0.5 || ratio > 2.0) { ctx.toast ("That's too big a tempo change (the LENGTH knob goes from 50% to 200%).", true); return; }
+
+    lastAdjustUndoMs = 0;
+    if (tapeToggle.getToggleState())
+        pitchKnob.setValueSilently (12.0 * std::log2 (1.0 / ratio));
+    stretchKnob.setValueSilently (ratio * 100.0);
+    knobsChanged();
+    ctx.toast ("Matched " + juce::String (clip->bpm, 1) + " BPM to " + juce::String (target, 1) + " BPM");
 }
 
 void StudioPage::rename()
@@ -759,7 +936,7 @@ void StudioPage::resized()
         formantToggle.setBounds (right.removeFromTop (26));
         tapeToggle.setBounds (right.removeFromTop (26));
         right.removeFromTop (4);
-        applyPitchBtn.setBounds (right.removeFromTop (juce::jmin (30, right.getHeight() / 2 - 3)));
+        pitchDefaultBtn.setBounds (right.removeFromTop (juce::jmin (30, right.getHeight() / 2 - 3)));
         right.removeFromTop (6);
         matchBpmBtn.setBounds (right.removeFromTop (juce::jmin (30, right.getHeight())));
     }
@@ -772,9 +949,7 @@ void StudioPage::resized()
         gainKnob.setBounds (c.removeFromLeft (kw));
         lowCutKnob.setBounds (c.removeFromLeft (kw));
         highCutKnob.setBounds (c);
-        applyGainBtn.setBounds (buttons.removeFromLeft (buttons.getWidth() / 2 - 3));
-        buttons.removeFromLeft (6);
-        applyFilterBtn.setBounds (buttons);
+        toneDefaultBtn.setBounds (buttons.withSizeKeepingCentre (juce::jmin (buttons.getWidth(), 160), buttons.getHeight()));
     }
 
     // chop & play

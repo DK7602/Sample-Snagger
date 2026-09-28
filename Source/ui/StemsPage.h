@@ -8,6 +8,25 @@ namespace snag
 class StemLane;
 
 //==============================================================================
+/** Dropdown with tick boxes: any mix of vocals, music, drums, bass, guitar, piano, other,
+    plus a few presets. The menu stays open while you tick parts. */
+class PartsPicker : public juce::Button
+{
+public:
+    PartsPicker();
+    juce::StringArray parts { "vocals", "music" };
+    std::function<void()> onChange;
+    juce::String summary() const;
+    void setParts (const juce::StringArray&);
+
+    void paintButton (juce::Graphics&, bool highlighted, bool down) override;
+    void clicked() override;
+
+private:
+    void showMenu();
+};
+
+//==============================================================================
 /** Separate the selected sample into vocals / music (or drums, bass, other...),
     audition them solo / muted, then edit, save or drag any stem into your DAW. */
 class StemsPage : public juce::Component, private juce::ChangeListener, private juce::Timer
@@ -45,7 +64,8 @@ private:
 
     Panel topPanel;
     juce::Label sourceLabel, sourceInfo, engineNote;
-    juce::ComboBox engineBox, stemsBox;
+    juce::ComboBox engineBox;
+    PartsPicker partsPicker;
     IconButton separateBtn { "separate", theme::icons::scissors(), "SEPARATE", "redFill" };
 
     juce::OwnedArray<StemLane> lanes;

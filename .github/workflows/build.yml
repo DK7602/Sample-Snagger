@@ -230,6 +230,7 @@ jobs:
             After installing, rescan plug-ins in your DAW. Sample Snagger is an instrument, so put it on an instrument / MIDI track.
             Open Settings (gear icon) once and click INSTALL ALL for HQ downloads and the AI stem models.
 
-            **New in 1.2:** a new look (glitter glass, polished gold title, gold-rimmed glass windows, brushed black knobs),
-            LIVE REC on every site on Windows 11, HQ SNAG falls back to the file a page is playing, cleaner AI music
-            stems (vocals now cancel out properly), and a playhead with play / stop on every stem.
+            **New in 1.3:** PITCH & TIME and TONE knobs apply as you turn them (DEFAULT restores the original), and the
+            STEMS menu lets you pick any mix of vocals, music, drums, bass, guitar, piano and other.
+            **1.2:** new look, LIVE REC on every site on Windows 11, HQ SNAG falls back to the file a page is playing,
+            cleaner AI music stems, and a playhead with play / stop on every stem.

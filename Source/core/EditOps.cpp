@@ -289,6 +289,18 @@ AudioData::Ptr resample (const AudioData& a, double newRate)
     return AudioData::make (std::move (b), newRate);
 }
 
+AudioData::Ptr renderAdjust (const AudioData& original, const Clip::Adjust& adj)
+{
+    AudioData::Ptr a = AudioData::make (copyOf (original), original.sampleRate);
+    if (! adj.pitchNeutral())
+        a = pitchTime (*a, adj.semitones, adj.length, adj.formants, adj.tape);
+    if (std::abs (adj.gainDb) >= 0.01f)
+        a = gain (*a, 0, a->getNumSamples(), adj.gainDb);
+    if (adj.lowCut > 0.0f || adj.highCut > 0.0f)
+        a = filter (*a, adj.lowCut, adj.highCut);
+    return a;
+}
+
 AudioData::Ptr pitchTime (const AudioData& a, float semitones, double lengthRatio, bool keepFormants, bool tape)
 {
     if (tape)

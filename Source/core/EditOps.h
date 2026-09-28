@@ -24,6 +24,9 @@ namespace snag::edit
 
     AudioData::Ptr resample    (const AudioData&, double newSampleRate);
 
+    /** The STUDIO knobs applied to the original: pitch / length, then gain, then low / high cut. */
+    AudioData::Ptr renderAdjust (const AudioData& original, const Clip::Adjust&);
+
     /** Sums several (equal-rate) layers with gains. */
     AudioData::Ptr mix         (const std::vector<AudioData::Ptr>& layers, const std::vector<float>& gains);
 

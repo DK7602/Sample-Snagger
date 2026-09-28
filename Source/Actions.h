@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PluginProcessor.h"
+#include "core/AiStems.h"
 
 /** High-level operations that run as background jobs and add results to the session.
     They only touch the processor, so they keep working if the editor window is closed. */
@@ -30,8 +31,15 @@ namespace snag::actions
     enum class Engine { quick, ai, aiMax, ai6, python };
     juce::String engineName (Engine);
 
-    /** Split a clip into stems; adds the stems to the session right after the clip. */
-    void separate (SnaggerProcessor&, Clip::Ptr clip, Engine engine, bool fourStems);
+    /** Every part the stems menu offers, in display order: vocals, music (everything but the
+        vocals), drums, bass, guitar, piano, other. */
+    const juce::StringArray& allStemParts();
+
+    /** Which AI model a choice of parts needs (guitar / piano -> the 6-part model, etc.). */
+    ai::Mode aiModeFor (Engine, const juce::StringArray& parts);
+
+    /** Split a clip into the chosen parts; adds them to the session right after the clip. */
+    void separate (SnaggerProcessor&, Clip::Ptr clip, Engine engine, const juce::StringArray& parts);
 
     /** Install / update a helper tool. */
     void installTool (SnaggerProcessor&, ToolManager::Tool tool, std::function<void (bool)> onDone = {});
