@@ -95,25 +95,12 @@ BrowsePage::BrowsePage (EditorContext& c) : ctx (c), proc (c.getProcessor())
     }
 
 #if JUCE_WEB_BROWSER
-    using Opts = juce::WebBrowserComponent::Options;
-    auto opts = Opts{}
-                  .withBackend (Opts::Backend::webview2)
-                  .withKeepPageLoadedWhenBrowserIsHidden()
-                  .withWinWebView2Options (Opts::WinWebView2{}
-                                              .withUserDataFolder (paths::webDataDir())
-                                              .withBackgroundColour (col::bg0)
-                                              .withStatusBarDisabled());
-   #if JUCE_MAC || JUCE_LINUX
-    // A regular Safari user agent so sites serve their full desktop players.
-    opts = opts.withUserAgent ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15");
-   #endif
-
-    browser = std::make_unique<Browser> (*this, opts);
-    addAndMakeVisible (*browser);
-
-    backBtn.onClick   = [this] { browser->goBack(); };
-    fwdBtn.onClick    = [this] { browser->goForward(); };
-    reloadBtn.onClick = [this] { browser->refresh(); };
+    // The web view itself is created lazily, once this page is really on screen
+    // (see createBrowserIfNeeded). Hosts and build tools sometimes construct the editor
+    // without ever showing it, and a native web view must not be started then.
+    backBtn.onClick   = [this] { if (browser != nullptr) browser->goBack(); };
+    fwdBtn.onClick    = [this] { if (browser != nullptr) browser->goForward(); };
+    reloadBtn.onClick = [this] { if (browser != nullptr) browser->refresh(); };
 #endif
     homeBtn.onClick = [this] { goTo (homeUrl); };
 
@@ -167,9 +154,8 @@ BrowsePage::BrowsePage (EditorContext& c) : ctx (c), proc (c.getProcessor())
     updateCaptureUi();
     startTimerHz (10);
 
-#if JUCE_WEB_BROWSER
-    goTo (homeUrl);
-#endif
+    pendingUrl = homeUrl;
+    urlField.setText (homeUrl, false);
 }
 
 BrowsePage::~BrowsePage()
@@ -178,11 +164,45 @@ BrowsePage::~BrowsePage()
     capture.reset();
 }
 
+void BrowsePage::createBrowserIfNeeded()
+{
+#if JUCE_WEB_BROWSER
+    if (browser != nullptr || ! isShowing())
+        return;
+
+    using Opts = juce::WebBrowserComponent::Options;
+    auto opts = Opts{}
+                  .withBackend (Opts::Backend::webview2)
+                  .withKeepPageLoadedWhenBrowserIsHidden()
+                  .withWinWebView2Options (Opts::WinWebView2{}
+                                              .withUserDataFolder (paths::webDataDir())
+                                              .withBackgroundColour (col::bg0)
+                                              .withStatusBarDisabled());
+   #if JUCE_MAC || JUCE_LINUX
+    // A regular Safari user agent so sites serve their full desktop players.
+    opts = opts.withUserAgent ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15");
+   #endif
+
+    browser = std::make_unique<Browser> (*this, opts);
+    addAndMakeVisible (*browser);
+    browser->setBounds (browserArea.reduced (1));
+
+    auto url = pendingUrl.isNotEmpty() ? pendingUrl : juce::String (homeUrl);
+    pendingUrl = {};
+    browser->goToURL (url);
+    if (capture != nullptr) capture->pageChanged();
+    repaint();
+#endif
+}
+
 void BrowsePage::evaluate (const juce::String& js, WebCapture::ResultCallback cb)
 {
 #if JUCE_WEB_BROWSER
     if (browser == nullptr)
+    {
+        if (cb) cb (juce::var());
         return;
+    }
     juce::WeakReference<BrowsePage> weak (this);
     browser->evaluateJavascript (js, [weak, cb] (juce::WebBrowserComponent::EvaluationResult r)
     {
@@ -244,14 +264,24 @@ void BrowsePage::goTo (juce::String url)
     updateCaptureUi();
 
 #if JUCE_WEB_BROWSER
-    browser->goToURL (url);
-    if (capture != nullptr) capture->pageChanged();
+    if (browser != nullptr)
+    {
+        browser->goToURL (url);
+        if (capture != nullptr) capture->pageChanged();
+    }
+    else
+    {
+        pendingUrl = url;
+        createBrowserIfNeeded();
+    }
 #endif
 }
 
 void BrowsePage::pageVisibilityChanged (bool nowVisible)
 {
     pageVisible = nowVisible;
+    if (nowVisible)
+        createBrowserIfNeeded();
     if (capture == nullptr)
         return;
 
@@ -407,6 +437,9 @@ void BrowsePage::toggleInputRec()
 //==============================================================================
 void BrowsePage::timerCallback()
 {
+    if (pageVisible)
+        createBrowserIfNeeded();
+
     if (capture != nullptr)
         meter.setLevel (capture->isArmed() ? capture->getLevel() : 0.0f);
 

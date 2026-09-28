@@ -39,6 +39,7 @@ private:
     void snagHq();
     void toggleInputRec();
     void evaluate (const juce::String& js, WebCapture::ResultCallback cb);
+    void createBrowserIfNeeded();
     void withPageInfo (std::function<void (const juce::var&)> cb);
 
     EditorContext& ctx;
@@ -68,7 +69,7 @@ private:
     IconButton importBtn   { "import", theme::icons::folder(), "IMPORT" };
     IconButton recInputBtn { "recinput", theme::icons::mic(), "REC INPUT" };
 
-    juce::String currentUrl, currentTitle;
+    juce::String currentUrl, currentTitle, pendingUrl;
     double markIn = -1.0, markOut = -1.0;
     bool pageVisible = false;
     juce::uint32 liveRecStarted = 0;
