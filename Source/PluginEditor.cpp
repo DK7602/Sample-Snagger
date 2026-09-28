@@ -244,7 +244,8 @@ void SnaggerEditor::layoutHeader (juce::Rectangle<int> r)
     r.removeFromRight (16);
 
     // status display: job HUD + output meter behind one glass window
-    auto hudBox = r.removeFromRight (juce::jmin (438, r.getWidth() / 3 + 108));
+    // the tabs get room for their full names first; the status display takes what's left
+    auto hudBox = r.removeFromRight (juce::jlimit (240, 438, r.getWidth() - 4 * 112 - 36));
     hudGlass = hudBox.withSizeKeepingCentre (hudBox.getWidth(), 44);
     auto inner = hudBox.reduced (12, 0);
     outMeter.setBounds (inner.removeFromRight (64).withSizeKeepingCentre (64, 5));

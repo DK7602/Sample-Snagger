@@ -24,6 +24,8 @@ DisableProgramGroupPage=yes
 OutputBaseFilename=Sample-Snagger-{#AppVersion}-Windows-Setup
 SetupIconFile=icon.ico
 UninstallDisplayIcon={app}\Sample Snagger.exe
+; tells Explorer to refresh its icon cache, so an update shows the new icon straight away
+ChangesAssociations=yes
 Compression=lzma2/max
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible

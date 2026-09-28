@@ -657,6 +657,12 @@ static void renderScreens (const juce::File& dir)
     pump (150);
     savePng (*ed, dir.getChildFile ("6-studio-hidpi.png"), 2.0f);
 
+    // smallest window size: every tab name must still fit
+    ed->setSize (1040, 700);
+    ed->showTab (Tab::browse);
+    pump (150);
+    savePng (*ed, dir.getChildFile ("7-browse-min-size.png"));
+
     ed.reset();
     p->session.flushWrites();
     libDir.deleteRecursively();
