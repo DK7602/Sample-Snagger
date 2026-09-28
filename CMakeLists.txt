@@ -207,7 +207,9 @@ if(SNAGGER_BUILTIN_AI)
     target_include_directories(snagger_demucs SYSTEM PRIVATE "${eigen_SOURCE_DIR}" "${demucs_cpp_SOURCE_DIR}/src")
     target_include_directories(snagger_demucs PUBLIC Source/ai)
     set_target_properties(snagger_demucs PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON POSITION_INDEPENDENT_CODE ON)
-    target_compile_definitions(snagger_demucs PRIVATE NDEBUG EIGEN_NO_DEBUG)
+    # Eigen 3.4.0 mistakes clang and MSVC for gcc < 4.8 and turns off the Tensor SFINAE overloads
+    # demucs.cpp relies on (fixed in later Eigen). Same empty value as Eigen's own #define.
+    target_compile_definitions(snagger_demucs PRIVATE NDEBUG EIGEN_NO_DEBUG "EIGEN_HAS_SFINAE=")
     # Baseline instruction set only (SSE2 on x86-64, NEON on Apple Silicon). Building this library
     # with AVX2 would be faster, but the linker can then pick AVX2 copies of shared inline code
     # (std::vector etc.) for the whole plug-in, which would crash hosts on older CPUs.
