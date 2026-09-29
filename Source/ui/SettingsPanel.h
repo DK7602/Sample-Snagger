@@ -44,6 +44,8 @@ private:
     juce::Label libLabel;
     juce::TextButton libBtn { "CHANGE" };
     juce::TextButton audioBtn { "AUDIO / MIDI SETTINGS" };
+    juce::TextButton licencesBtn { "LICENCES" };
+    void showLicences();
     std::unique_ptr<juce::FileChooser> chooser;
 };
 

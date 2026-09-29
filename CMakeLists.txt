@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(SampleSnagger VERSION 1.4.2 LANGUAGES C CXX)
+project(SampleSnagger VERSION 1.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -138,7 +138,8 @@ juce_add_binary_data(SnaggerBinaryData
         Resources/glitter_glass.jpg
         Resources/gold_smooth.jpg
         Resources/glitter_text.jpg
-        Resources/Models/basic_pitch_nmp.onnx)
+        Resources/Models/basic_pitch_nmp.onnx
+        Resources/THIRD_PARTY_NOTICES.txt)
 
 set(SNAGGER_SOURCES
     Source/PluginProcessor.cpp

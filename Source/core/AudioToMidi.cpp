@@ -3,6 +3,8 @@
 #include "EditOps.h"
 #include "SnaggerBinaryData.h"
 #include <atomic>
+#include <algorithm>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <cmath>

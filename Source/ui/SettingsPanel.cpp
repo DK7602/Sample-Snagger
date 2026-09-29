@@ -1,4 +1,5 @@
 #include "SettingsPanel.h"
+#include "SnaggerBinaryData.h"
 #include "../PluginProcessor.h"
 #include "../Actions.h"
 #include "../core/AiStems.h"
@@ -204,6 +205,11 @@ SettingsPanel::SettingsPanel (EditorContext& c) : ctx (c), proc (c.getProcessor(
     addChildComponent (audioBtn);
     audioBtn.setVisible (proc.wrapperType == juce::AudioProcessor::wrapperType_Standalone);
 
+    setStyle (licencesBtn, "ghost");
+    licencesBtn.setTooltip ("The open-source software inside Sample Snagger, and its licences");
+    licencesBtn.onClick = [this] { showLicences(); };
+    addAndMakeVisible (licencesBtn);
+
     proc.getTools().addChangeListener (this);
     setVisible (false);
 }
@@ -277,6 +283,30 @@ void SettingsPanel::resized()
     lib.removeFromRight (10);
     lib.removeFromLeft (110);
     libLabel.setBounds (lib);
+
+    licencesBtn.setBounds (card.reduced (24, 16).removeFromBottom (32).removeFromRight (96).reduced (0, 5));
+}
+
+void SettingsPanel::showLicences()
+{
+    auto* text = new juce::TextEditor();
+    text->setMultiLine (true);
+    text->setReadOnly (true);
+    text->setScrollbarsShown (true);
+    text->setFont (theme::mono (12.0f));
+    text->setColour (juce::TextEditor::backgroundColourId, theme::col::bg1);
+    text->setColour (juce::TextEditor::textColourId, theme::col::text);
+    text->setText (juce::String::fromUTF8 (SnaggerBinary::THIRD_PARTY_NOTICES_txt, SnaggerBinary::THIRD_PARTY_NOTICES_txtSize));
+    text->setSize (720, 520);
+    juce::DialogWindow::LaunchOptions o;
+    o.content.setOwned (text);
+    o.dialogTitle = "Sample Snagger - open-source licences";
+    o.dialogBackgroundColour = theme::col::bg1;
+    o.escapeKeyTriggersCloseButton = true;
+    o.useNativeTitleBar = true;
+    o.resizable = true;
+    o.componentToCentreAround = this;
+    o.launchAsync();
 }
 
 void SettingsPanel::paint (juce::Graphics& g)
@@ -309,7 +339,7 @@ void SettingsPanel::paint (juce::Graphics& g)
     g.setFont (ui (10.5f));
     g.drawFittedText ("Everything runs on your computer. Helper tools are downloaded from their official GitHub releases into Sample Snagger's own folder. "
                       "Only sample material you have the rights to use - clear samples before releasing music.",
-                      card.reduced (24, 16).removeFromBottom (32), juce::Justification::centredLeft, 2);
+                      card.reduced (24, 16).removeFromBottom (32).withTrimmedRight (110), juce::Justification::centredLeft, 2);
 }
 
 } // namespace snag

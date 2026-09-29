@@ -1,5 +1,7 @@
 #include "OnnxLite.h"
 #include <cmath>
+#include <algorithm>
+#include <limits>
 #include <cstring>
 #include <functional>
 #include <numeric>

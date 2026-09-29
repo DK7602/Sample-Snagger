@@ -2,6 +2,8 @@
 
 #include "Page.h"
 #include "../core/AudioToMidi.h"
+#include <atomic>
+#include <memory>
 
 class SnaggerProcessor;
 

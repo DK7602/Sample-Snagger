@@ -1871,6 +1871,14 @@ static void renderScreens (const juce::File& dir)
     ed->showTab (Tab::browse);
     pump (150);
     savePng (*ed, dir.getChildFile ("7-browse-min-size.png"));
+    ed->showTab (Tab::studio);
+    for (int d = 0; d < 4; ++d)
+    {
+        studio.setDeck (d);
+        pump (100);
+        savePng (*ed, dir.getChildFile ("8-studio-min-size-" + juce::String (d) + ".png"));
+    }
+    studio.setDeck (0);
 
     ed.reset();
     p->session.flushWrites();

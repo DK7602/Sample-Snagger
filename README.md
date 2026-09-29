@@ -53,6 +53,28 @@ Every capture lands in the **Session tray** at the bottom. Tray clips are saved 
   One-shot or gated. **KEYS mode** plays the sample chromatically instead.
 - **Drag to DAW:** drag the selection, the whole sample, or *any single pad* onto a track.
 - **SAVE** writes a WAV into your sample library.
+- **Key detection:** the key and its Camelot code (e.g. *Am 8A*) show next to the BPM, found by itself when you
+  open a sample (tuning-aware, so slightly-off vinyl rips still work). Click it to pick from the likeliest keys or
+  set it yourself. **TO KEY** in PITCH & TIME shifts the sample into any key, and the PITCH knob shows the key it
+  lands on.
+
+The tool area has four tabs:
+
+- **SAMPLE** - Edit, Pitch & Time, Tone and Chop & Play (above).
+- **PADS** - click a pad and shape its sound: **GAIN, PITCH** (sampler style, like an MPC), **ATTACK, RELEASE,
+  FILTER** (low-pass one way, high-pass the other) and **REVERSE**; **COPY TO ALL PADS**. Dragging a pad into your
+  DAW gives you exactly what the pad plays.
+- **FX** - a rack for the pads and STUDIO playback: **LO-FI** (bits, sample rate, *vinyl*: crackle, hiss, wow &
+  flutter), **DRIVE** (warm saturation), **DELAY** (ping-pong, locked to your DAW's tempo - 1/32 to 1 bar, dotted
+  and triplets) and **REVERB**. Drags and saves include the effects, echoes and reverb tails included.
+- **MIDI** - **audio to MIDI**: FIND NOTES turns the sample (or the selection) into notes - melodies, bass lines
+  and chords - with Spotify's *Basic Pitch* model, built in and offline. SENSITIVITY and MIN NOTE re-shape the
+  result instantly, *Melody only* keeps one note at a time. **LISTEN**, **SAVE .MID**, or **DRAG MIDI** onto a
+  track. Tip: separate the part in STEMS first for the cleanest notes.
+
+![Pads](docs/screenshots/studio-pads.png)
+![FX](docs/screenshots/studio-fx.png)
+![MIDI](docs/screenshots/studio-midi.png)
 
 ### 3. STEMS - separate vocals and music
 - **Pick the parts you want** from the menu: any mix of *Vocals, Music (everything but vocals), Drums, Bass,
@@ -145,6 +167,8 @@ builds installers for macOS, Windows and Linux; or build locally with CMake.
 - [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) - pitch / time (MIT)
 - [demucs.cpp](https://github.com/sevagh/demucs.cpp) (MIT) with [Eigen](https://eigen.tuxfamily.org) (MPL 2.0) - the built-in
   AI engine; models are Meta's [Demucs v4](https://github.com/facebookresearch/demucs) (MIT), converted by demucs.cpp
+- [Basic Pitch](https://github.com/spotify/basic-pitch) (Apache 2.0, Spotify) - the built-in audio to MIDI; its model
+  is included unmodified (`Resources/Models`) and runs on Sample Snagger's own small ONNX reader
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) (Unlicense), [FFmpeg](https://ffmpeg.org) (LGPL/GPL, downloaded separately),
   [Deno](https://deno.com) (MIT), Python Demucs (MIT) - installed on demand, not bundled
 - Fonts: Cinzel and Montserrat (SIL Open Font License, see `Resources/Fonts`)

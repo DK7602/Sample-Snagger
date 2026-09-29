@@ -1,6 +1,7 @@
 #include "KeyDetect.h"
 #include <juce_dsp/juce_dsp.h>
 #include <array>
+#include <algorithm>
 #include <cmath>
 
 namespace snag::key

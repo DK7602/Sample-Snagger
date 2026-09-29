@@ -234,6 +234,9 @@ jobs:
             After installing, rescan plug-ins in your DAW. Sample Snagger is an instrument, so put it on an instrument / MIDI track.
             Open Settings (gear icon) once and click INSTALL ALL for HQ downloads and the AI stem models.
 
+            **New in 1.5:** key detection (with Camelot codes) and TO KEY; STUDIO tabs for PADS (gain, pitch, reverse,
+            attack, release and filter per pad), FX (lo-fi / vinyl, drive, tempo-synced delay, reverb - included in
+            drags) and MIDI (audio to MIDI with Spotify's Basic Pitch, built in: drag the notes onto a track).
             **1.4.2:** the music stem also loses voices the other parts claim too (deep, processed voices like
             "Test your might"), and the app icon's top-right corner no longer looks see-through on light desktops.
             **New in 1.4:** the music stem no longer keeps the vocals (the voice is masked out, and AI Studio Max builds the
