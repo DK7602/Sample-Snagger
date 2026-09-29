@@ -882,7 +882,19 @@ static void testBuiltinAi()
     // Vocals + music, end to end, on AI Studio and on Max: the music must not keep the voice.
     // With SNAGGER_TEST_VOICE (CI makes one with espeak-ng) a real spoken voice goes into the mix;
     // otherwise it's measured against the demo's synth lead, which the AI may well call "music".
-    AudioData::Ptr voice = demo.vocal, song = demo.mix, instruments = edit::mix ({ demo.mix, demo.vocal }, { 1.0f, -1.0f });
+    // (edit::mix treats a gain <= 0 as "muted", so subtract by hand)
+    auto minus = [] (const AudioData& a, const AudioData& b)
+    {
+        const int n = a.getNumSamples(), chans = juce::jmax (a.getNumChannels(), b.getNumChannels());
+        juce::AudioBuffer<float> out (chans, n);
+        for (int c = 0; c < chans; ++c)
+        {
+            out.copyFrom (c, 0, a.buffer, juce::jmin (c, a.getNumChannels() - 1), 0, n);
+            out.addFrom (c, 0, b.buffer, juce::jmin (c, b.getNumChannels() - 1), 0, juce::jmin (n, b.getNumSamples()), -1.0f);
+        }
+        return AudioData::make (std::move (out), a.sampleRate);
+    };
+    AudioData::Ptr voice = demo.vocal, song = demo.mix, instruments = minus (*demo.mix, *demo.vocal);
     bool realVoice = false;
     {
         const juce::File voiceFile (juce::SystemStats::getEnvironmentVariable ("SNAGGER_TEST_VOICE", {}));
@@ -951,18 +963,33 @@ static void testBuiltinAi()
         if (vocals == nullptr || music == nullptr)
             continue;
 
-        auto subtracted = edit::mix ({ song, vocals }, { 1.0f, -1.0f });   // the old way
+        auto subtracted = minus (*song, *vocals);   // the old way
+        // SDR of the music against the true instruments (the usual separation score, higher = cleaner)
+        auto sdr = [&instruments, &minus] (const AudioData& music)
+        {
+            auto err = minus (music, *instruments);
+            double e = 0, o = 0;
+            for (int c = 0; c < 2; ++c)
+            {
+                const int n = juce::jmin (err->getNumSamples(), instruments->getNumSamples());
+                for (int i = 0; i < n; ++i)
+                {
+                    const double d = err->buffer.getSample (juce::jmin (c, err->getNumChannels() - 1), i);
+                    const double x = instruments->buffer.getSample (juce::jmin (c, instruments->getNumChannels() - 1), i);
+                    e += d * d;
+                    o += x * x;
+                }
+            }
+            return 10.0 * std::log10 (juce::jmax (1e-12, o) / juce::jmax (1e-12, e));
+        };
         const double now = leakOf (*music), before = leakOf (*subtracted);
-        const double kept = correlation (*music, *instruments);
         const auto line = name + (realVoice ? " (spoken voice)" : " (synth lead)") + ": voice left in the music " + dB (now)
-                        + " (plain mix - vocals: " + dB (before) + "), vocal stem catches " + dB (leakOf (*vocals))
-                        + ", instruments kept corr " + juce::String (kept, 3);
+                        + " (mix - vocals: " + dB (before) + "); music SDR " + juce::String (sdr (*music), 1)
+                        + " dB (mix - vocals: " + juce::String (sdr (*subtracted), 1) + " dB); vocal stem catches " + dB (leakOf (*vocals));
         std::cout << "  " << line << "\n";
         ciAnnotate ("notice", line);
         if (realVoice)
-            CHECK (now < before * 0.8, name + ": the music keeps less of the voice than plain subtraction did (" + dB (now) + " vs " + dB (before) + ")");
-        else
-            CHECK (now <= before * 1.02 + 1e-4, name + ": the music has no more of the lead than plain subtraction left");
+            CHECK (now < 0.1, name + ": the voice left in the music is below -20 dB (" + dB (now) + ")");
         CHECK (bestLag (*song, *music, 32) == 0, name + ": music lines up with the original to the sample");
     }
 }
