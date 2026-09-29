@@ -18,6 +18,7 @@
 #include "../Source/core/KeyDetect.h"
 #include "../Source/core/PadFx.h"
 #include "../Source/core/FxRack.h"
+#include "../Source/core/AudioToMidi.h"
 #include <iostream>
 #include <thread>
 #include <set>
@@ -795,6 +796,72 @@ static void testFx()
     double diff = 0;
     for (int i = 0; i < live.getNumSamples(); ++i) diff = juce::jmax (diff, (double) std::abs (live.getSample (0, i) - off->buffer.getSample (0, i)));
     CHECK (diff < 1.0e-4, "what you drag matches what you hear (block size doesn't matter, diff " + juce::String (diff, 6) + ")");
+}
+
+/** A tone with a few harmonics and a piano-ish decay. */
+static void addNote (juce::AudioBuffer<float>& b, double sr, int midiNote, double start, double len, float amp = 0.25f)
+{
+    const double hz = 440.0 * std::pow (2.0, (midiNote - 69) / 12.0);
+    const int s0 = (int) (start * sr), s1 = juce::jmin (b.getNumSamples(), (int) ((start + len) * sr));
+    for (int i = s0; i < s1; ++i)
+    {
+        const double t = (i - s0) / sr;
+        double y = 0;
+        for (int h = 1; h <= 5; ++h) y += std::sin (6.283185307 * hz * h * t) / (h * h);
+        const double env = std::exp (-t * 1.5) * juce::jmin (1.0, t * 300.0) * juce::jmin (1.0, (len - t) * 60.0);
+        for (int c = 0; c < b.getNumChannels(); ++c) b.addSample (c, i, (float) (y * env) * amp);
+    }
+}
+
+static void testAudioToMidi()
+{
+    std::cout << "\n[audio to MIDI]\n";
+    const double sr = 44100.0;
+
+    // a melody: C4 E4 G4 C5 A4, half a second each
+    juce::AudioBuffer<float> mel (2, (int) (sr * 3.0)); mel.clear();
+    const int melody[] = { 60, 64, 67, 72, 69 };
+    for (int k = 0; k < 5; ++k) addNote (mel, sr, melody[k], 0.2 + k * 0.5, 0.45);
+    juce::String err;
+    const auto t0 = juce::Time::getMillisecondCounterHiRes();
+    auto notes = midi::transcribe (*AudioData::make (std::move (mel), sr), {}, err);
+    const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+    CHECK (err.isEmpty(), "the built-in note detector runs (" + juce::String (juce::roundToInt (ms)) + " ms for 3 s) " + err);
+    juce::StringArray got;
+    for (auto& n : notes) got.add (juce::String (n.pitch) + "@" + juce::String (n.start, 2));
+    bool melodyRight = notes.size() == 5;
+    for (size_t k = 0; melodyRight && k < 5; ++k)
+        melodyRight = notes[k].pitch == melody[k] && std::abs (notes[k].start - (0.2 + (double) k * 0.5)) < 0.06;
+    CHECK (melodyRight, "a 5-note melody comes out as the right notes at the right times (" + got.joinIntoString (" ") + ")");
+
+    // a chord: C major, held
+    juce::AudioBuffer<float> ch (2, (int) (sr * 2.0)); ch.clear();
+    for (int p : { 60, 64, 67 }) addNote (ch, sr, p, 0.3, 1.2, 0.18f);
+    auto chordAudio = AudioData::make (std::move (ch), sr);
+    midi::Posteriors post;
+    CHECK (midi::analyse (*chordAudio, post, err), "chord analysed");
+    auto chord = midi::notesFrom (post, {});
+    std::set<int> pitches;
+    for (auto& n : chord) pitches.insert (n.pitch);
+    CHECK (pitches.count (60) && pitches.count (64) && pitches.count (67) && pitches.size() <= 4,
+           "a C major chord gives C4, E4, G4 (" + midi::noteRangeText (chord) + ")");
+    midi::Options mono; mono.melodyOnly = true;
+    auto top = midi::notesFrom (post, mono);
+    CHECK (top.size() == 1, "MELODY mode keeps one note at a time (" + juce::String ((int) top.size()) + ")");
+
+    // MIDI file: tempo + notes land on the right ticks
+    std::vector<midi::Note> twoBeats { { 0.0, 0.5, 60, 0.8f }, { 0.5, 1.0, 62, 0.5f } };
+    auto mf = midi::toMidiFile (twoBeats, 120.0, "Test");
+    const auto* track = mf.getTrack (0);
+    int ons = 0; double secondOn = -1;
+    for (auto* e : *track)
+        if (e->message.isNoteOn()) { ++ons; if (e->message.getNoteNumber() == 62) secondOn = e->message.getTimeStamp(); }
+    CHECK (mf.getTimeFormat() == 960 && ons == 2 && std::abs (secondOn - 960.0) < 0.5, "MIDI file at 120 BPM: the 2nd note starts on beat 2 (tick 960)");
+    auto tmp = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("snagger-test.mid");
+    CHECK (midi::writeMidiFile (twoBeats, 120.0, "Test", tmp) && tmp.getSize() > 30, "writes a .mid file");
+    tmp.deleteFile();
+    auto heard = midi::renderNotes (twoBeats, 44100.0, 1.0);
+    CHECK (heard->getNumSamples() >= 44100 && heard->buffer.getMagnitude (0, 0, heard->getNumSamples()) > 0.05f, "LISTEN renders the notes");
 }
 
 static void testStemParts()
@@ -1647,6 +1714,7 @@ int main (int argc, char** argv)
     testKeyDetect();
     testPads();
     testFx();
+    testAudioToMidi();
     testStemParts();
     snag::StudioPageTester::run();
     testKnobTyping();
@@ -1656,6 +1724,27 @@ int main (int argc, char** argv)
         testNetwork();
     if (args.contains ("--ai"))
         testBuiltinAi();
+
+    const int bpIdx = args.indexOf ("--dump-basic-pitch");
+    if (bpIdx >= 0 && bpIdx + 2 < args.size())
+    {
+        auto loaded = audioio::loadFile (juce::File (args[bpIdx + 1]), {});
+        midi::Posteriors p; juce::String err;
+        if (loaded.audio != nullptr && midi::analyse (*loaded.audio, p, err))
+        {
+            const juce::File outFile (args[bpIdx + 2]);
+            juce::FileOutputStream o (outFile);
+            o.setPosition (0); o.truncate();
+            o.writeInt (p.frames);
+            o.write (p.note.data(), p.note.size() * 4); o.write (p.onset.data(), p.onset.size() * 4); o.write (p.contour.data(), p.contour.size() * 4);
+            auto notes = midi::notesFrom (p, {});
+            o.writeInt ((int) notes.size());
+            for (auto& n : notes) { o.writeDouble (n.start); o.writeDouble (n.end); o.writeInt (n.pitch); o.writeFloat (n.velocity); }
+            std::cout << "dumped " << p.frames << " frames, " << notes.size() << " notes\n";
+        }
+        else std::cout << "basic pitch failed: " << err << "\n";
+        return 0;
+    }
 
     const int clawIdx = args.indexOf ("--claw");
     if (clawIdx >= 0 && clawIdx + 1 < args.size())

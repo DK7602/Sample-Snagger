@@ -137,7 +137,8 @@ juce_add_binary_data(SnaggerBinaryData
         Resources/logo_256.png
         Resources/glitter_glass.jpg
         Resources/gold_smooth.jpg
-        Resources/glitter_text.jpg)
+        Resources/glitter_text.jpg
+        Resources/Models/basic_pitch_nmp.onnx)
 
 set(SNAGGER_SOURCES
     Source/PluginProcessor.cpp
@@ -157,6 +158,8 @@ set(SNAGGER_SOURCES
     Source/core/KeyDetect.cpp
     Source/core/PadFx.cpp
     Source/core/FxRack.cpp
+    Source/core/OnnxLite.cpp
+    Source/core/AudioToMidi.cpp
     Source/ui/Theme.cpp
     Source/ui/Widgets.cpp
     Source/ui/WaveformView.cpp
