@@ -1,7 +1,12 @@
 #pragma once
 
+#include <map>
+#include <set>
+
 #include "Page.h"
 #include "WaveformView.h"
+#include "StudioDecks.h"
+#include "../core/KeyDetect.h"
 
 namespace snag
 {
@@ -13,6 +18,8 @@ class SlicePads : public juce::Component, private juce::Timer
 public:
     explicit SlicePads (SnaggerProcessor&);
     void setClip (Clip::Ptr c)  { clip = c; repaint(); }
+    /** The pad the PADS tab is editing (ringed in gold when `show`). */
+    void setSelected (int index, bool show) { if (index != selected || show != showSelected) { selected = index; showSelected = show; repaint(); } }
     std::function<void (int sliceIndex)> onSliceSelected;
 
     void paint (juce::Graphics&) override;
@@ -28,7 +35,8 @@ private:
 
     SnaggerProcessor& proc;
     Clip::Ptr clip;
-    int pressed = -1, lit = -1;
+    int pressed = -1, lit = -1, selected = 0;
+    bool showSelected = false;
     juce::uint32 litUntil = 0, lastCounter = 0;
     bool dragStarted = false;
 };
@@ -49,6 +57,14 @@ public:
     void resized() override;
     void paint (juce::Graphics&) override;
     juce::Rectangle<int> headGlass, readoutGlass;
+
+    /** 0 SAMPLE, 1 PADS, 2 FX, 3 MIDI */
+    void setDeck (int);
+    int getDeck() const noexcept        { return deck; }
+    PadDeck& getPadDeck()               { return padDeck; }
+    FxDeck& getFxDeck()                 { return fxDeck; }
+    MidiDeck& getMidiDeck()             { return midiDeck; }
+    SlicePads& getPads()                { return pads; }
 
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
@@ -76,6 +92,11 @@ private:
     void undo();
     void redo();
     void detectBpm();
+    void detectKey (bool quiet);
+    void showKeyMenu();
+    void refreshKey();
+    void soundUndo (const juce::String& label, bool newGesture);
+    void soundChanged();
     void matchBpm();
     void rename();
 
@@ -88,6 +109,7 @@ private:
 
     // header row
     juce::Label nameLabel, infoLabel, bpmLabel;
+    juce::TextButton keyBtn { "KEY  -" };
     juce::TextButton detectBpmBtn { "DETECT" };
     IconButton undoBtn { "undo", theme::icons::undo(), {}, "icon" };
     IconButton redoBtn { "redo", theme::icons::redo(), {}, "icon" };
@@ -127,6 +149,18 @@ private:
     juce::TextButton autoChopBtn { "AUTO CHOP" }, equalBtn { "EQUAL" }, clearChopsBtn { "CLEAR" };
     juce::ComboBox equalCount, midiModeBox;
     juce::ToggleButton oneShotToggle { "One-shot" };
+    juce::ComboBox toKeyBox;
+
+    // tool tabs: SAMPLE (the panels above) | PADS | FX | MIDI
+    juce::OwnedArray<juce::TextButton> deckTabs;
+    juce::Label deckHint;
+    PadDeck padDeck;
+    FxDeck fxDeck;
+    MidiDeck midiDeck;
+    int deck = 0, selectedPad = 0;
+    juce::uint32 lastSoundUndoMs = 0;
+    std::map<juce::String, std::vector<std::pair<int, bool>>> keyCandidates;   // per clip id
+    std::set<juce::String> keyJobs;                                            // detections running
 
 };
 

@@ -4,6 +4,7 @@
 #include <juce_core/juce_core.h>
 #include <juce_graphics/juce_graphics.h>
 #include <vector>
+#include "SoundSettings.h"
 
 namespace snag
 {
@@ -70,6 +71,20 @@ struct Clip final : juce::ReferenceCountedObject
     Adjust adjust;
     AudioData::Ptr adjustBase;
 
+    /** Per-chop pad settings (index = chop; missing = default), the FX rack, and the key. */
+    std::vector<PadParams> pads;
+    FxSettings fx;
+    int keyTonic = -1;          // 0..11 (C..B), -1 = not detected yet
+    bool keyMinor = false, keyManual = false;
+
+    PadParams padAt (int i) const { return i >= 0 && i < (int) pads.size() ? pads[(size_t) i] : PadParams(); }
+    void setPad (int i, const PadParams& p)
+    {
+        if (i < 0) return;
+        if ((int) pads.size() <= i) pads.resize ((size_t) i + 1);
+        pads[(size_t) i] = p;
+    }
+
     juce::File cacheFile;       // where the session keeps this clip on disk
 
     bool isStem() const noexcept { return parentId.isNotEmpty(); }
@@ -82,11 +97,13 @@ struct Clip final : juce::ReferenceCountedObject
         juce::String label;
         Adjust adjust;
         AudioData::Ptr adjustBase;
+        std::vector<PadParams> pads;
+        FxSettings fx;
     };
 
     void pushUndo (const juce::String& label)
     {
-        undoStack.push_back ({ audio, slices, label, adjust, adjustBase });
+        undoStack.push_back ({ audio, slices, label, adjust, adjustBase, pads, fx });
         if (undoStack.size() > 30)
             undoStack.erase (undoStack.begin());
         redoStack.clear();
@@ -100,11 +117,13 @@ struct Clip final : juce::ReferenceCountedObject
         if (undoStack.empty()) return {};
         auto s = undoStack.back();
         undoStack.pop_back();
-        redoStack.push_back ({ audio, slices, s.label, adjust, adjustBase });
+        redoStack.push_back ({ audio, slices, s.label, adjust, adjustBase, pads, fx });
         audio = s.audio;
         slices = s.slices;
         adjust = s.adjust;
         adjustBase = s.adjustBase;
+        pads = s.pads;
+        fx = s.fx;
         return s.label;
     }
 
@@ -113,11 +132,13 @@ struct Clip final : juce::ReferenceCountedObject
         if (redoStack.empty()) return {};
         auto s = redoStack.back();
         redoStack.pop_back();
-        undoStack.push_back ({ audio, slices, s.label, adjust, adjustBase });
+        undoStack.push_back ({ audio, slices, s.label, adjust, adjustBase, pads, fx });
         audio = s.audio;
         slices = s.slices;
         adjust = s.adjust;
         adjustBase = s.adjustBase;
+        pads = s.pads;
+        fx = s.fx;
         return s.label;
     }
 

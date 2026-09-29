@@ -165,6 +165,7 @@ set(SNAGGER_SOURCES
     Source/ui/WaveformView.cpp
     Source/ui/BrowsePage.cpp
     Source/ui/StudioPage.cpp
+    Source/ui/StudioDecks.cpp
     Source/ui/StemsPage.cpp
     Source/ui/SeparationAnimation.cpp
     Source/ui/LibraryPage.cpp

@@ -59,7 +59,7 @@ bool SnaggerProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
     return true;
 }
 
-void SnaggerProcessor::prepareToPlay (double sampleRate, int)
+void SnaggerProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate > 0 ? sampleRate : 44100.0;
     for (auto& v : voices)
@@ -68,6 +68,9 @@ void SnaggerProcessor::prepareToPlay (double sampleRate, int)
         v.state = nullptr;
     }
     pRunning = false;
+    fxChain.prepare (currentSampleRate);
+    fxBus.setSize (2, juce::jmax (1024, samplesPerBlock * 2), false, true, false);
+    fxWasOn = false;
 }
 
 void SnaggerProcessor::releaseResources() {}
@@ -91,6 +94,9 @@ void SnaggerProcessor::setSamplerClip (Clip::Ptr clip, int selStart, int selEnd)
             s->selStart = 0;
             s->selEnd = n;
         }
+        s->pads = clip->pads;
+        s->fx = clip->fx;
+        s->bpm = clip->bpm;
     }
     samplerShared.publish (s);
 }
@@ -107,7 +113,7 @@ void SnaggerProcessor::sendUiNote (int note, float velocity)
 }
 
 //==============================================================================
-void SnaggerProcessor::preview (std::vector<AudioData::Ptr> layers, int start, int end, bool loop)
+void SnaggerProcessor::preview (std::vector<AudioData::Ptr> layers, int start, int end, bool loop, bool withFx)
 {
     layers.erase (std::remove (layers.begin(), layers.end(), nullptr), layers.end());
     if (layers.empty())
@@ -127,15 +133,16 @@ void SnaggerProcessor::preview (std::vector<AudioData::Ptr> layers, int start, i
         p->end = n;
     }
     p->loop = loop;
+    p->fx = withFx;
     p->serial = ++previewSerial;
     previewPlaying = true;
     previewPos = (double) p->start;
     previewShared.publish (p);
 }
 
-void SnaggerProcessor::previewClip (const Clip& clip, int start, int end, bool loop)
+void SnaggerProcessor::previewClip (const Clip& clip, int start, int end, bool loop, bool withFx)
 {
-    preview ({ clip.audio }, start, end, loop);
+    preview ({ clip.audio }, start, end, loop, withFx);
 }
 
 void SnaggerProcessor::stopPreview()
@@ -156,20 +163,6 @@ AudioData* SnaggerProcessor::getPreviewSource() const
 }
 
 //==============================================================================
-static inline float hermiteAt (const float* d, int n, double pos) noexcept
-{
-    const int i = (int) pos;
-    const float t = (float) (pos - (double) i);
-    const float y0 = d[juce::jlimit (0, n - 1, i - 1)];
-    const float y1 = d[juce::jlimit (0, n - 1, i)];
-    const float y2 = d[juce::jlimit (0, n - 1, i + 1)];
-    const float y3 = d[juce::jlimit (0, n - 1, i + 2)];
-    const float c1 = 0.5f * (y2 - y0);
-    const float c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
-    const float c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
-    return ((c3 * t + c2) * t + c1) * t + y1;
-}
-
 void SnaggerProcessor::noteOn (int note, float velocity, SamplerState::Ptr state)
 {
     if (state == nullptr || state->audio == nullptr)
@@ -179,6 +172,7 @@ void SnaggerProcessor::noteOn (int note, float velocity, SamplerState::Ptr state
     int start = 0, end = n;
     double pitch = 1.0;
     int sliceIndex = -1;
+    PadParams params;
 
     if (midiMode.load() == chops)
     {
@@ -189,12 +183,16 @@ void SnaggerProcessor::noteOn (int note, float velocity, SamplerState::Ptr state
         start = state->bounds[(size_t) idx];
         end   = state->bounds[(size_t) idx + 1];
         sliceIndex = idx;
+        if (idx < (int) state->pads.size())
+            params = state->pads[(size_t) idx];
     }
     else
     {
         start = state->selStart;
         end   = state->selEnd;
         pitch = std::pow (2.0, (note - rootNote.load()) / 12.0);
+        params.attackMs = 1.5f;
+        params.releaseMs = 40.0f;
     }
 
     // Retrigger the same note, otherwise take a free voice or steal the oldest.
@@ -213,14 +211,8 @@ void SnaggerProcessor::noteOn (int note, float velocity, SamplerState::Ptr state
 
     v->state = state;
     v->active = true;
-    v->releasing = false;
     v->note = note;
-    v->start = start;
-    v->end = end;
-    v->pos = start;
-    v->inc = (state->audio->sampleRate / currentSampleRate) * pitch;
-    v->gain = juce::jlimit (0.0f, 1.0f, velocity);
-    v->env = 0.0f;
+    v->pv.begin (*state->audio, start, end, params, currentSampleRate, pitch, juce::jlimit (0.0f, 1.0f, velocity));
     v->age = ++voiceAge;
 
     if (sliceIndex >= 0)
@@ -237,67 +229,34 @@ void SnaggerProcessor::noteOff (int note)
 
     for (auto& v : voices)
         if (v.active && v.note == note)
-            v.releasing = true;
+            v.pv.noteOff();
 }
 
 void SnaggerProcessor::renderVoices (juce::AudioBuffer<float>& out, int startSample, int num)
 {
-    const float attackStep  = 1.0f / (float) juce::jmax (1.0, currentSampleRate * 0.0015);
-    const float releaseStep = 1.0f / (float) juce::jmax (1.0, currentSampleRate * 0.040);
-    const int fadeLen = (int) juce::jmax (8.0, currentSampleRate * 0.004);
-    const int outCh = out.getNumChannels();
-
+    const float master = masterGain.load();
+    float* L = out.getWritePointer (0);
+    float* R = out.getWritePointer (1);
     for (auto& v : voices)
     {
         if (! v.active || v.state == nullptr)
             continue;
-
-        const auto& buf = v.state->audio->buffer;
-        const int n = buf.getNumSamples();
-        const float* src0 = buf.getReadPointer (0);
-        const float* src1 = buf.getReadPointer (juce::jmin (1, buf.getNumChannels() - 1));
-        const float g = v.gain * masterGain.load();
-
         for (int i = 0; i < num; ++i)
         {
-            if (v.pos >= v.end)
+            float l = 0, r = 0;
+            if (! v.pv.next (l, r))
             {
                 v.active = false;
                 v.state = nullptr;   // SamplerState is kept alive by the release pool, never freed here
                 break;
             }
-
-            if (v.releasing)
-            {
-                v.env -= releaseStep;
-                if (v.env <= 0.0f)
-                {
-                    v.active = false;
-                    v.state = nullptr;
-                    break;
-                }
-            }
-            else if (v.env < 1.0f)
-            {
-                v.env = juce::jmin (1.0f, v.env + attackStep);
-            }
-
-            const double remaining = (v.end - v.pos) / v.inc;
-            const float tail = remaining < fadeLen ? (float) (remaining / fadeLen) : 1.0f;
-            const float amp = g * v.env * tail;
-
-            const float l = hermiteAt (src0, n, v.pos) * amp;
-            const float r = hermiteAt (src1, n, v.pos) * amp;
-            out.addSample (0, startSample + i, l);
-            if (outCh > 1)
-                out.addSample (1, startSample + i, r);
-
-            v.pos += v.inc;
+            L[startSample + i] += l * master;
+            R[startSample + i] += r * master;
         }
     }
 }
 
-void SnaggerProcessor::renderPreview (juce::AudioBuffer<float>& out, int num)
+void SnaggerProcessor::renderPreview (juce::AudioBuffer<float>& dry, juce::AudioBuffer<float>& wet, int num)
 {
     auto latest = previewShared.read();
     if (latest != nullptr && latest->serial != activePreviewSerial)
@@ -323,6 +282,7 @@ void SnaggerProcessor::renderPreview (juce::AudioBuffer<float>& out, int num)
     }
 
     auto& p = *activePreview;
+    auto& out = p.fx ? wet : dry;
     const double rate = p.layers.front()->sampleRate / currentSampleRate;
     const float attack = 1.0f / (float) juce::jmax (1.0, currentSampleRate * 0.003);
     const int fadeLen = (int) juce::jmax (8.0, currentSampleRate * 0.005);
@@ -402,6 +362,9 @@ void SnaggerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     }
 
     buffer.clear();   // instrument: never pass input through (avoids feedback)
+    if (fxBus.getNumSamples() < numSamples)
+        fxBus.setSize (2, numSamples, false, false, true);   // (only if the host sends a bigger block than promised)
+    fxBus.clear (0, numSamples);
 
     auto state = samplerShared.read();
 
@@ -427,7 +390,7 @@ void SnaggerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         const int t = juce::jlimit (0, numSamples, meta.samplePosition);
         if (t > pos)
         {
-            renderVoices (buffer, pos, t - pos);
+            renderVoices (fxBus, pos, t - pos);
             pos = t;
         }
         if (m.isNoteOn())
@@ -435,12 +398,33 @@ void SnaggerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         else if (m.isNoteOff())
             noteOff (m.getNoteNumber());
         else if (m.isAllNotesOff() || m.isAllSoundOff())
-            for (auto& v : voices) v.releasing = true;
+            for (auto& v : voices) v.pv.noteOff();
     }
     if (pos < numSamples)
-        renderVoices (buffer, pos, numSamples - pos);
+        renderVoices (fxBus, pos, numSamples - pos);
 
-    renderPreview (buffer, numSamples);
+    renderPreview (buffer, fxBus, numSamples);
+
+    // FX rack (pads + STUDIO playback), synced to the host's tempo, else the sample's
+    const bool fxOn = state != nullptr && state->fx.anyOn();
+    if (fxOn)
+    {
+        if (! fxWasOn)
+            fxChain.reset();
+        const double bpm = hostBpm.load() > 0 ? hostBpm.load() : (state->bpm > 0 ? state->bpm : 120.0);
+        fxChain.process (fxBus.getWritePointer (0), fxBus.getWritePointer (1), numSamples, state->fx, bpm);
+    }
+    fxWasOn = fxOn;
+    if (buffer.getNumChannels() > 1)
+    {
+        buffer.addFrom (0, 0, fxBus, 0, 0, numSamples);
+        buffer.addFrom (1, 0, fxBus, 1, 0, numSamples);
+    }
+    else if (buffer.getNumChannels() == 1)
+    {
+        buffer.addFrom (0, 0, fxBus, 0, 0, numSamples, 0.5f);
+        buffer.addFrom (0, 0, fxBus, 1, 0, numSamples, 0.5f);
+    }
 
     float pk = 0;
     for (int c = 0; c < buffer.getNumChannels(); ++c)

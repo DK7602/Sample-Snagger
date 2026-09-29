@@ -148,6 +148,15 @@ juce::ValueTree Session::toValueTree() const
         juce::StringArray sl;
         for (auto s : c->slices) sl.add (juce::String (s));
         ct.setProperty ("slices", sl.joinIntoString (","), nullptr);
+
+        juce::StringArray pads;   // only the changed ones, as "chop:settings"
+        for (size_t i = 0; i < c->pads.size(); ++i)
+            if (! c->pads[i].isDefault())
+                pads.add (juce::String ((int) i) + ":" + c->pads[i].toString());
+        if (! pads.isEmpty()) ct.setProperty ("pads", pads.joinIntoString (";"), nullptr);
+        if (c->fx != FxSettings()) ct.setProperty ("fx", c->fx.toString(), nullptr);
+        if (c->keyTonic >= 0)
+            ct.setProperty ("key", juce::String (c->keyTonic) + (c->keyMinor ? "m" : "") + (c->keyManual ? "!" : ""), nullptr);
         t.appendChild (ct, nullptr);
     }
     return t;
@@ -191,6 +200,21 @@ void Session::restore (const juce::ValueTree& t)
         for (auto& s : juce::StringArray::fromTokens (ct.getProperty ("slices").toString(), ",", {}))
             if (s.isNotEmpty())
                 c->slices.push_back (s.getIntValue());
+
+        if (ct.hasProperty ("pads"))
+            for (auto& p : juce::StringArray::fromTokens (ct.getProperty ("pads").toString(), ";", {}))
+                if (p.containsChar (':'))
+                    c->setPad (juce::jlimit (0, 255, p.upToFirstOccurrenceOf (":", false, false).getIntValue()),
+                               PadParams::fromString (p.fromFirstOccurrenceOf (":", false, false)));
+        if (ct.hasProperty ("fx"))
+            c->fx = FxSettings::fromString (ct.getProperty ("fx").toString());
+        if (ct.hasProperty ("key"))
+        {
+            const auto k = ct.getProperty ("key").toString();
+            c->keyTonic = juce::jlimit (-1, 11, k.getIntValue());
+            c->keyMinor = k.containsChar ('m');
+            c->keyManual = k.containsChar ('!');
+        }
 
         clips.add (c);
     }

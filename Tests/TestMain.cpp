@@ -1509,6 +1509,163 @@ static void testClawAnimation()
     pump (50);
 }
 
+static void testSamplerSound()
+{
+    std::cout << "\n[sampler: pad sounds + FX, saved with the project]\n";
+    auto p = std::make_unique<SnaggerProcessor>();
+    p->prepareToPlay (44100.0, 512);
+
+    Clip::Ptr c (new Clip());
+    c->name = "Tone";
+    c->audio = makeSine (220.0, 1.0, 44100.0, 0.3f);
+    c->slices = { 22050 };                         // two chops of 0.5 s
+    PadParams loud; loud.gainDb = 6.0f;
+    c->setPad (1, loud);
+    p->session.add (c, true);
+    p->setSamplerClip (c);
+
+    auto play = [&] (int note, int blocks)
+    {
+        juce::AudioBuffer<float> out (2, 512);
+        juce::MidiBuffer m;
+        m.addEvent (juce::MidiMessage::noteOn (1, note, 1.0f), 0);
+        double sum = 0;
+        std::vector<double> perBlock;
+        for (int b = 0; b < blocks; ++b)
+        {
+            p->processBlock (out, m);
+            m.clear();
+            const double r = out.getRMSLevel (0, 0, 512);
+            perBlock.push_back (r);
+            sum += r;
+        }
+        return perBlock;
+    };
+    auto quiet = play (60, 60), boosted = play (61, 60);   // each chop plays out (0.5 s) before the next
+    const double ratio = boosted[10] / juce::jmax (1e-9, quiet[10]);
+    CHECK (std::abs (ratio - 2.0) < 0.1, "pad 2's GAIN +6 dB plays twice as loud as pad 1 (" + juce::String (ratio, 2) + "x)");
+
+    // FX: a reverb tail keeps ringing after the chop ends
+    auto tailAfter = [&]
+    {
+        auto blocks = play (60, 120);   // 0.5 s chop, then ~0.9 s more
+        double tail = 0;
+        for (size_t b = 60; b < blocks.size(); ++b) tail = juce::jmax (tail, blocks[b]);
+        return tail;
+    };
+    const double dryTail = tailAfter();
+    c->fx.reverbOn = true; c->fx.reverbMix = 0.8f; c->fx.size = 0.9f;
+    p->setSamplerClip (c);
+    const double wetTail = tailAfter();
+    CHECK (dryTail < 1e-5 && wetTail > 1e-3, "FX on the pads: the reverb rings on after the chop (" + juce::String (wetTail, 4) + ")");
+
+    // STUDIO playback goes through the FX, stems / library auditions don't
+    auto previewTail = [&] (bool fx)
+    {
+        juce::AudioBuffer<float> fresh (2, 512); juce::MidiBuffer none;
+        c->fx.reverbOn = false; p->setSamplerClip (c);                 // clear the old tail...
+        for (int b = 0; b < 4; ++b) p->processBlock (fresh, none);
+        c->fx.reverbOn = true; p->setSamplerClip (c);                  // ...and start clean
+        p->previewClip (*c, 0, 11025, false, fx);
+        double tail = 0;
+        for (int b = 0; b < 60; ++b) { p->processBlock (fresh, none); if (b > 30) tail = juce::jmax (tail, (double) fresh.getRMSLevel (0, 0, 512)); }
+        return tail;
+    };
+    CHECK (previewTail (true) > 1e-3 && previewTail (false) < 1e-5, "STUDIO playback gets the FX, other auditions stay dry");
+
+    // drag a pad: its sound + the FX, echoes included
+    auto dragged = actions::renderPadForExport (*p, *c, 1);
+    CHECK (dragged != nullptr && dragged->getNumSamples() > 22050 + 44100 / 2, "a dragged pad includes the reverb tail (" + juce::String (dragged->lengthSeconds(), 2) + " s)");
+    c->fx = {};
+    auto padOnly = actions::renderPadForExport (*p, *c, 1);
+    CHECK (padOnly != nullptr && std::abs (padOnly->getNumSamples() - 22050) <= 2 && std::abs (rmsOf (*padOnly, 2000, 10000) / rmsOf (*c->audio, 2000, 10000) - 2.0) < 0.05,
+           "a dragged pad plays like the pad (+6 dB)");
+
+    // everything comes back with the DAW project
+    c->fx.delayOn = true; c->fx.division = 3;
+    c->keyTonic = 9; c->keyMinor = true; c->keyManual = true;
+    PadParams odd; odd.reverse = true; odd.semitones = -3.0f; odd.filter = 0.4f;
+    c->setPad (0, odd);
+    juce::MemoryBlock state;
+    p->getStateInformation (state);
+    p->session.flushWrites();
+    auto q = std::make_unique<SnaggerProcessor>();
+    q->setStateInformation (state.getData(), (int) state.getSize());
+    pump (200);
+    auto back = q->session.findById (c->id);
+    CHECK (back != nullptr && back->padAt (0) == odd && back->padAt (1) == loud && back->fx == c->fx,
+           "pad sounds and FX are saved with the project");
+    CHECK (back != nullptr && back->keyTonic == 9 && back->keyMinor && back->keyManual, "...and the key");
+}
+
+struct StudioDecksTester
+{
+    static void run()
+    {
+        std::cout << "\n[studio tabs: key, pads, FX, MIDI]\n";
+        auto p = std::make_unique<SnaggerProcessor>();
+        p->prepareToPlay (44100.0, 512);
+        auto ed = std::unique_ptr<SnaggerEditor> (dynamic_cast<SnaggerEditor*> (p->createEditor()));
+        ed->setSize (1280, 820);
+        ed->showTab (Tab::studio);
+        auto& studio = ed->getStudioPage();
+
+        Clip::Ptr c (new Clip());
+        c->name = "Progression";
+        c->audio = makeProgression (2, false, 44100.0);   // D major
+        p->session.add (c, true);
+        for (int i = 0; i < 100 && (p->jobs.isBusy() || c->keyTonic < 0); ++i) pump (50);
+        CHECK (c->keyTonic == 2 && ! c->keyMinor, "opening a sample finds its key by itself (" + key::name ({ c->keyTonic, c->keyMinor }) + ")");
+
+        // chop it, pick pad 3, shape it
+        c->slices = edit::equalSlices (c->audio->getNumSamples(), 4);
+        studio.setClip (c);
+        studio.setDeck (1);
+        studio.getPads().onSliceSelected (2);
+        auto& pd = studio.getPadDeck();
+        pd.gainKnob.slider.setValue (-6.0, juce::sendNotificationSync);
+        pd.filterKnob.slider.setValue (-0.5, juce::sendNotificationSync);
+        pd.reverseToggle.setToggleState (true, juce::dontSendNotification);
+        pd.reverseToggle.onClick();
+        CHECK (std::abs (c->padAt (2).gainDb + 6.0f) < 0.01f && c->padAt (2).filter < -0.4f && c->padAt (2).reverse && c->padAt (0).isDefault(),
+               "PADS tab: the knobs shape only the selected pad");
+        pd.allBtn.onClick();
+        CHECK (c->padAt (0) == c->padAt (2) && c->padAt (3) == c->padAt (2), "COPY TO ALL PADS");
+        studio.handleKey (juce::KeyPress ('z', juce::ModifierKeys::commandModifier, 0));
+        CHECK (c->padAt (0).isDefault() && c->padAt (2).reverse, "undo takes back the last pad change");
+
+        // FX
+        studio.setDeck (2);
+        auto& fd = studio.getFxDeck();
+        fd.sizeKnob.slider.setValue (80.0, juce::sendNotificationSync);
+        CHECK (c->fx.reverbOn && std::abs (c->fx.size - 0.8f) < 0.001f, "FX tab: turning a REVERB knob switches the reverb on");
+        fd.defaultBtn.onClick();
+        CHECK (! c->fx.anyOn(), "ALL OFF");
+
+        // MIDI (the sample's notes)
+        studio.setDeck (3);
+        auto& md = studio.getMidiDeck();
+        md.setRange (0, -1);
+        md.findNotes();
+        for (int i = 0; i < 200 && md.isAnalysing(); ++i) pump (50);
+        std::set<int> pcs;
+        for (auto& n : md.getNotes()) pcs.insert (n.pitch % 12);
+        const std::set<int> dMajor { 2, 4, 6, 7, 9, 11, 1 };
+        bool allInKey = ! pcs.empty();
+        for (auto pc : pcs) allInKey = allInKey && dMajor.count (pc) > 0;
+        CHECK (md.getNotes().size() >= 6 && allInKey, "MIDI tab: finds the chord notes, all in D major (" + midi::noteRangeText (md.getNotes()) + ")");
+        auto mid = actions::makeMidiFile (*p, *c, md.getNotes());
+        juce::FileInputStream in (mid);
+        juce::MidiFile mf;
+        CHECK (mid.hasFileExtension ("mid") && mf.readFrom (in) && mf.getNumTracks() == 1, "DRAG MIDI makes a real .mid file");
+        mid.deleteFile();
+
+        studio.setDeck (0);
+        ed.reset();
+        pump (50);
+    }
+};
+
 /** Frames of the claw animation, for looking at (SnaggerTests --claw DIR). */
 static void renderClawFrames (const juce::File& dir)
 {
@@ -1642,6 +1799,35 @@ static void renderScreens (const juce::File& dir)
     p->stopPreview();
     for (int i = 0; i < 4; ++i) p->processBlock (buf, midi);
 
+    // the new tool tabs
+    {
+        for (int i = 0; i < 100 && p->jobs.isBusy(); ++i) pump (50);   // key detection
+        PadParams shaped; shaped.reverse = true; shaped.filter = -0.35f; shaped.semitones = -5.0f; shaped.releaseMs = 180.0f;
+        soul->setPad (4, shaped);
+        studio.getPads().onSliceSelected (4);
+        p->stopPreview();
+        studio.setDeck (1);
+        pump (150);
+        savePng (*ed, dir.getChildFile ("2b-studio-pads.png"));
+
+        soul->fx.lofiOn = true; soul->fx.reverbOn = true; soul->fx.delayOn = true;
+        studio.getFxDeck().setClip (soul);
+        studio.setDeck (2);
+        pump (150);
+        savePng (*ed, dir.getChildFile ("2c-studio-fx.png"));
+        soul->fx = {};
+        studio.getFxDeck().setClip (soul);
+
+        studio.setDeck (3);
+        studio.getMidiDeck().setRange (0, -1);   // the whole loop
+        studio.getMidiDeck().findNotes();
+        for (int i = 0; i < 400 && studio.getMidiDeck().isAnalysing(); ++i) pump (50);
+        pump (150);
+        savePng (*ed, dir.getChildFile ("2d-studio-midi.png"));
+        studio.setDeck (0);
+        soul->pads.clear();
+    }
+
     ed->showTab (Tab::stems);
     pump (200);
     savePng (*ed, dir.getChildFile ("3-stems.png"));
@@ -1719,6 +1905,8 @@ int main (int argc, char** argv)
     snag::StudioPageTester::run();
     testKnobTyping();
     testClawAnimation();
+    testSamplerSound();
+    StudioDecksTester::run();
     testProcessAudio();
     if (args.contains ("--network"))
         testNetwork();

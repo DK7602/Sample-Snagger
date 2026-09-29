@@ -2,48 +2,12 @@
 
 #include "AudioData.h"
 #include "PadFx.h"
+#include "SoundSettings.h"
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <vector>
 
 namespace snag
 {
-
-//==============================================================================
-/** The FX rack: LO-FI -> DRIVE -> DELAY -> REVERB. Each section has a power switch; the knob
-    values are kept while a section is off. */
-struct FxSettings
-{
-    bool lofiOn = false;
-    float bits = 10.0f;         // 4 .. 16
-    float rateKHz = 18.0f;      // 2 .. 44 (sample-rate reduction)
-    float vinyl = 0.5f;         // 0 .. 1: crackle, hiss, wow & flutter, worn-out tone
-
-    bool driveOn = false;
-    float drive = 0.4f;         // 0 .. 1 (0 .. 30 dB into a warm tube-ish curve)
-    float tone = 0.6f;          // 0 dark .. 1 bright
-
-    bool delayOn = false;
-    int division = 6;           // index into delayDivisions() (1/8 dotted); synced to the tempo
-    float feedback = 0.35f;     // 0 .. 0.9
-    float delayMix = 0.3f;      // 0 .. 1
-
-    bool reverbOn = false;
-    float size = 0.55f;         // 0 .. 1
-    float reverbMix = 0.25f;    // 0 .. 1
-
-    bool anyOn() const noexcept { return lofiOn || driveOn || delayOn || reverbOn; }
-    bool operator== (const FxSettings& o) const noexcept { return toString() == o.toString(); }
-    bool operator!= (const FxSettings& o) const noexcept { return ! (*this == o); }
-
-    juce::String toString() const;
-    static FxSettings fromString (const juce::String&);
-
-    /** How long the echoes / reverb keep ringing after the sound stops (seconds). */
-    double tailSeconds (double bpm) const;
-};
-
-struct DelayDivision { const char* name; double beats; };
-const std::vector<DelayDivision>& delayDivisions();
 
 //==============================================================================
 /** Runs the FX rack on a stereo buffer. Real-time safe after prepare(). */

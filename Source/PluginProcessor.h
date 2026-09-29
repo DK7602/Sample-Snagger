@@ -7,6 +7,8 @@
 #include "core/Jobs.h"
 #include "core/Tools.h"
 #include "core/RtShared.h"
+#include "core/PadFx.h"
+#include "core/FxRack.h"
 #include <array>
 
 //==============================================================================
@@ -31,7 +33,7 @@ public:
     bool acceptsMidi() const override                      { return true; }
     bool producesMidi() const override                     { return false; }
     bool isMidiEffect() const override                     { return false; }
-    double getTailLengthSeconds() const override           { return 0.0; }
+    double getTailLengthSeconds() const override           { return 4.0; }   // FX echoes / reverb
 
     int getNumPrograms() override                          { return 1; }
     int getCurrentProgram() override                       { return 0; }
@@ -69,8 +71,9 @@ public:
 
     //==============================================================================
     // Preview player -- message thread
-    void preview (std::vector<snag::AudioData::Ptr> layers, int start, int end, bool loop);
-    void previewClip (const snag::Clip& clip, int start = 0, int end = -1, bool loop = false);
+    /** withFx: run it through the sampler clip's FX rack (STUDIO playback), not for stems / library. */
+    void preview (std::vector<snag::AudioData::Ptr> layers, int start, int end, bool loop, bool withFx = false);
+    void previewClip (const snag::Clip& clip, int start = 0, int end = -1, bool loop = false, bool withFx = false);
     void stopPreview();
     bool isPreviewing() const noexcept              { return previewPlaying.load(); }
     double getPreviewPosition() const noexcept      { return previewPos.load(); }   // in source samples
@@ -107,6 +110,9 @@ private:
         snag::AudioData::Ptr audio;
         std::vector<int> bounds;   // slice boundaries incl. 0 and end
         int selStart = 0, selEnd = 0;
+        std::vector<snag::PadParams> pads;
+        snag::FxSettings fx;
+        double bpm = 0.0;
     };
 
     struct PreviewState final : juce::ReferenceCountedObject
@@ -114,7 +120,7 @@ private:
         using Ptr = juce::ReferenceCountedObjectPtr<PreviewState>;
         std::vector<snag::AudioData::Ptr> layers;
         int start = 0, end = 0;
-        bool loop = false, stop = false;
+        bool loop = false, stop = false, fx = false;
         juce::uint32 serial = 0;
     };
 
@@ -127,11 +133,9 @@ private:
     struct Voice
     {
         SamplerState::Ptr state;
-        bool active = false, releasing = false;
+        snag::PadVoice pv;
+        bool active = false;
         int note = -1;
-        double pos = 0, inc = 1;
-        int start = 0, end = 0;
-        float gain = 1.0f, env = 0.0f;
         juce::uint32 age = 0;
     };
     std::array<Voice, 16> voices;
@@ -141,6 +145,11 @@ private:
     void noteOff (int note);
     void renderVoices (juce::AudioBuffer<float>&, int start, int num);
 
+    // FX rack on the pads + STUDIO playback
+    snag::FxChain fxChain;
+    juce::AudioBuffer<float> fxBus;
+    bool fxWasOn = false;
+
     // preview (audio thread state)
     PreviewState::Ptr activePreview;
     juce::uint32 activePreviewSerial = 0;
@@ -149,7 +158,7 @@ private:
     bool pRunning = false;
     std::atomic<bool> previewPlaying { false };
     std::atomic<double> previewPos { -1.0 };
-    void renderPreview (juce::AudioBuffer<float>&, int num);
+    void renderPreview (juce::AudioBuffer<float>& dry, juce::AudioBuffer<float>& wet, int num);
 
     // UI notes (single producer / single consumer)
     juce::AbstractFifo uiNoteFifo { 64 };

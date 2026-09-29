@@ -1,33 +1,11 @@
 #pragma once
 
 #include "AudioData.h"
+#include "SoundSettings.h"
 #include <cmath>
 
 namespace snag
 {
-
-//==============================================================================
-/** Per-pad (per-chop) sound settings. */
-struct PadParams
-{
-    float gainDb = 0.0f;        // -24 .. +12 dB
-    float semitones = 0.0f;     // -24 .. +24, sampler style (speed changes with pitch, like an MPC)
-    bool reverse = false;
-    float attackMs = 1.0f;      // 0 .. 2000 ms fade-in
-    float releaseMs = 10.0f;    // 1 .. 4000 ms: fade at the chop's end / after note-off (gated)
-    float filter = 0.0f;        // -1 .. +1: below 0 low-pass (more = darker), above 0 high-pass, 0 = off
-
-    bool isDefault() const noexcept { return *this == PadParams(); }
-    bool operator== (const PadParams& o) const noexcept
-    {
-        return std::abs (gainDb - o.gainDb) < 0.001f && std::abs (semitones - o.semitones) < 0.001f && reverse == o.reverse
-            && std::abs (attackMs - o.attackMs) < 0.01f && std::abs (releaseMs - o.releaseMs) < 0.01f && std::abs (filter - o.filter) < 0.0001f;
-    }
-    bool operator!= (const PadParams& o) const noexcept { return ! (*this == o); }
-
-    juce::String toString() const;
-    static PadParams fromString (const juce::String&);
-};
 
 /** Low-pass / high-pass cutoff for a FILTER value, and how to show it ("LP 1.2k", "HP 300", "Off"). */
 float filterCutoffHz (float filter) noexcept;

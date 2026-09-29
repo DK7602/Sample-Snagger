@@ -2,6 +2,7 @@
 
 #include "PluginProcessor.h"
 #include "core/AiStems.h"
+#include "core/AudioToMidi.h"
 
 /** High-level operations that run as background jobs and add results to the session.
     They only touch the processor, so they keep working if the editor window is closed. */
@@ -59,6 +60,20 @@ namespace snag::actions
     /** Makes a temporary WAV for dragging into a DAW. */
     juce::File makeDragFile (SnaggerProcessor&, const Clip& clip, int start = 0, int end = -1,
                              const juce::String& suffix = {});
+
+    /** The audio you'd hear for (a range of) a clip: with its FX rack, echoes / reverb ringing out. */
+    AudioData::Ptr renderForExport (SnaggerProcessor&, const Clip& clip, int start, int end);
+
+    /** One chop with its pad settings and the FX rack, for dragging into a DAW. */
+    AudioData::Ptr renderPadForExport (SnaggerProcessor&, const Clip& clip, int padIndex);
+    juce::File makePadDragFile (SnaggerProcessor&, const Clip& clip, int padIndex);
+
+    /** The tempo the FX and MIDI lock to: the DAW's, else the sample's, else 120. */
+    double exportBpm (SnaggerProcessor&, const Clip& clip);
+
+    /** Writes notes as a .mid file in the drag folder (or `dir`). */
+    juce::File makeMidiFile (SnaggerProcessor&, const Clip& clip, const std::vector<midi::Note>& notes,
+                             const juce::File& dir = {});
 
     /** A short readable name from a URL / page title. */
     juce::String niceTitle (const juce::String& titleOrUrl);

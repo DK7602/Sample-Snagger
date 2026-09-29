@@ -1,4 +1,6 @@
 #include "Actions.h"
+#include "core/FxRack.h"
+#include "core/PadFx.h"
 #include "core/AudioFileIO.h"
 #include "core/EditOps.h"
 #include "core/QuickSplit.h"
@@ -673,16 +675,58 @@ void pitchTime (SnaggerProcessor& p, Clip::Ptr clip, float semitones, double len
 }
 
 //==============================================================================
-juce::File saveToLibrary (SnaggerProcessor& p, const Clip& clip, int start, int end, const juce::String& suffix)
+double exportBpm (SnaggerProcessor& p, const Clip& clip)
 {
-    if (clip.audio == nullptr) return {};
-    auto dir = p.getSettings().getLibraryDir();
+    if (p.hostBpm.load() > 0) return p.hostBpm.load();
+    return clip.bpm > 0 ? clip.bpm : 120.0;
+}
+
+AudioData::Ptr renderForExport (SnaggerProcessor& p, const Clip& clip, int start, int end)
+{
+    if (clip.audio == nullptr) return nullptr;
     const int n = clip.audio->getNumSamples();
     if (end < 0 || end > n) end = n;
     start = juce::jlimit (0, end, start);
+    auto part = (start == 0 && end == n) ? clip.audio : edit::crop (*clip.audio, start, end);
+    if (! clip.fx.anyOn())
+        return part;
+    return renderFx (*part, clip.fx, exportBpm (p, clip));
+}
 
+AudioData::Ptr renderPadForExport (SnaggerProcessor& p, const Clip& clip, int padIndex)
+{
+    if (clip.audio == nullptr) return nullptr;
+    auto b = clip.sliceBoundaries();
+    if (padIndex < 0 || padIndex + 1 >= (int) b.size()) return nullptr;
+    auto pad = renderPad (*clip.audio, b[(size_t) padIndex], b[(size_t) padIndex + 1], clip.padAt (padIndex));
+    if (! clip.fx.anyOn())
+        return pad;
+    return renderFx (*pad, clip.fx, exportBpm (p, clip));
+}
+
+juce::File makePadDragFile (SnaggerProcessor& p, const Clip& clip, int padIndex)
+{
+    auto a = renderPadForExport (p, clip, padIndex);
+    if (a == nullptr) return {};
+    return audioio::writeDragFile (*a, clip.name + " - chop " + juce::String (padIndex + 1), p.getSettings().getExportBitDepth(), 0, a->getNumSamples());
+}
+
+juce::File makeMidiFile (SnaggerProcessor& p, const Clip& clip, const std::vector<midi::Note>& notes, const juce::File& dirIn)
+{
+    auto dir = dirIn == juce::File() ? paths::dragExportDir() : dirIn;
+    auto f = audioio::uniqueFile (dir, clip.name + " - notes", ".mid");
+    if (midi::writeMidiFile (notes, exportBpm (p, clip), clip.name, f))
+        return f;
+    return {};
+}
+
+juce::File saveToLibrary (SnaggerProcessor& p, const Clip& clip, int start, int end, const juce::String& suffix)
+{
+    auto a = renderForExport (p, clip, start, end);
+    if (a == nullptr) return {};
+    auto dir = p.getSettings().getLibraryDir();
     auto f = audioio::uniqueFile (dir, clip.name + suffix);
-    if (audioio::writeWav (*clip.audio, f, p.getSettings().getExportBitDepth(), start, end - start))
+    if (audioio::writeWav (*a, f, p.getSettings().getExportBitDepth(), 0, a->getNumSamples()))
     {
         notify (p, "Saved to library: " + f.getFileName());
         return f;
@@ -693,11 +737,9 @@ juce::File saveToLibrary (SnaggerProcessor& p, const Clip& clip, int start, int 
 
 juce::File makeDragFile (SnaggerProcessor& p, const Clip& clip, int start, int end, const juce::String& suffix)
 {
-    if (clip.audio == nullptr) return {};
-    const int n = clip.audio->getNumSamples();
-    if (end < 0 || end > n) end = n;
-    start = juce::jlimit (0, end, start);
-    return audioio::writeDragFile (*clip.audio, clip.name + suffix, p.getSettings().getExportBitDepth(), start, end - start);
+    auto a = renderForExport (p, clip, start, end);
+    if (a == nullptr) return {};
+    return audioio::writeDragFile (*a, clip.name + suffix, p.getSettings().getExportBitDepth(), 0, a->getNumSamples());
 }
 
 } // namespace snag::actions

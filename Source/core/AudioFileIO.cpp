@@ -226,7 +226,7 @@ juce::File writeDragFile (const AudioData& audio, const juce::String& name, int 
     auto dir = paths::dragExportDir();
 
     // Keep the drag folder tidy: remove exports older than a week.
-    for (auto& old : dir.findChildFiles (juce::File::findFiles, false, "*.wav"))
+    for (auto& old : dir.findChildFiles (juce::File::findFiles, false, "*.wav;*.mid"))
         if (old.getLastModificationTime() < juce::Time::getCurrentTime() - juce::RelativeTime::days (7))
             old.deleteFile();
 
