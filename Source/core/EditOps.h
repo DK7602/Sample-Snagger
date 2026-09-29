@@ -45,6 +45,11 @@ namespace snag::edit
 
     std::vector<int> equalSlices (int numSamples, int numSlices);
 
+    /** Cuts [rangeStart, rangeEnd) into exactly numChops pieces at its strongest hits: returns
+        numChops - 1 sorted cut points strictly inside the range (spread out so no chop is tiny;
+        if the audio hasn't enough hits, the longest pieces are split in half). rangeEnd < 0 = the end. */
+    std::vector<int> chopAtStrongestHits (const AudioData&, int numChops, int rangeStart = 0, int rangeEnd = -1);
+
     /** Rough tempo estimate from the onset envelope; returns 0 if unsure. */
     double estimateBpm (const AudioData&);
 

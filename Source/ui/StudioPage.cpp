@@ -394,61 +394,18 @@ StudioPage::StudioPage (EditorContext& c)
 
     // chop & play
     setStyle (autoChopBtn, "red");
-    autoChopBtn.setTooltip ("Find the hits and put a chop on each one");
-    autoChopBtn.onClick = [this]
-    {
-        if (clip == nullptr) return;
-        auto found = edit::detectTransients (*clip->audio, (float) sensKnob.slider.getValue() / 100.0f);
-        if (wave.hasSelection())
-        {
-            // only chop inside the selection, keep markers elsewhere
-            std::vector<int> keep;
-            for (auto s : clip->slices) if (s < wave.getSelectionStart() || s > wave.getSelectionEnd()) keep.push_back (s);
-            for (auto s : found) if (s > wave.getSelectionStart() && s < wave.getSelectionEnd()) keep.push_back (s);
-            keep.push_back (wave.getSelectionStart());
-            keep.push_back (wave.getSelectionEnd());
-            std::sort (keep.begin(), keep.end());
-            keep.erase (std::unique (keep.begin(), keep.end()), keep.end());
-            keep.erase (std::remove_if (keep.begin(), keep.end(), [n = clip->audio->getNumSamples()] (int v) { return v <= 0 || v >= n; }), keep.end());
-            found = keep;
-        }
-        clip->pushUndo ("Auto chop");
-        clip->slices = found;
-        clip->pads.clear();          // new chops start with a clean sound (UNDO brings the old ones back)
-        padDeck.setClip (clip, selectedPad = 0);
-        proc.session.clipChanged (clip.get(), false);
-        syncSampler();
-        wave.repaint(); pads.repaint();
-        ctx.toast (juce::String ((int) clip->sliceBoundaries().size() - 1) + " chops - play them from pads " + noteName (proc.rootNote.load()) + " and up");
-    };
+    autoChopBtn.onClick = [this] { autoChop(); };
 
-    for (int n : { 2, 4, 8, 16, 32 })
-        equalCount.addItem (juce::String (n) + " slices", n);
-    equalCount.setSelectedId (8, juce::dontSendNotification);
-    equalBtn.setTooltip ("Chop into equal slices (great for loops)");
-    equalBtn.onClick = [this]
-    {
-        if (clip == nullptr) return;
-        clip->pushUndo ("Equal chop");
-        clip->pads.clear();
-        padDeck.setClip (clip, selectedPad = 0);
-        const int n = equalCount.getSelectedId();
-        if (wave.hasSelection())
-        {
-            std::vector<int> s;
-            const int a = wave.getSelectionStart(), b = wave.getSelectionEnd();
-            s.push_back (a);
-            for (int i = 1; i < n; ++i) s.push_back (a + (int) ((juce::int64) (b - a) * i / n));
-            s.push_back (b);
-            s.erase (std::remove_if (s.begin(), s.end(), [len = clip->audio->getNumSamples()] (int v) { return v <= 0 || v >= len; }), s.end());
-            clip->slices = s;
-        }
-        else
-            clip->slices = edit::equalSlices (clip->audio->getNumSamples(), n);
-        proc.session.clipChanged (clip.get(), false);
-        syncSampler();
-        wave.repaint(); pads.repaint();
-    };
+    chopCount.addItem ("Every hit", everyHit);
+    for (int n : { 2, 3, 4, 6, 8, 12, 16, 24, 32 })
+        chopCount.addItem (juce::String (n) + " chops", n);
+    chopCount.setSelectedId (everyHit, juce::dontSendNotification);
+    chopCount.setTooltip ("How many chops: a number makes AUTO CHOP cut at the strongest hits "
+                          "and EQUAL cut evenly. \"Every hit\" lets SENSITIVITY decide.");
+    chopCount.onChange = [this] { chopCountChanged(); };
+    equalBtn.onClick = [this] { equalChop(); };
+    chopCountChanged();
+
     clearChopsBtn.onClick = [this]
     {
         if (clip == nullptr || clip->slices.empty()) return;
@@ -474,7 +431,7 @@ StudioPage::StudioPage (EditorContext& c)
     oneShotToggle.setTooltip ("On: chops play to the end. Off: chops stop when you release the key.");
     oneShotToggle.onClick = [this] { proc.oneShot = oneShotToggle.getToggleState(); };
 
-    for (auto* comp : std::initializer_list<juce::Component*> { &sensKnob, &autoChopBtn, &equalCount, &equalBtn, &clearChopsBtn, &midiModeBox, &oneShotToggle })
+    for (auto* comp : std::initializer_list<juce::Component*> { &sensKnob, &autoChopBtn, &chopCount, &equalBtn, &clearChopsBtn, &midiModeBox, &oneShotToggle })
         addAndMakeVisible (comp);
 
     // ---- tool tabs ----
@@ -491,7 +448,7 @@ StudioPage::StudioPage (EditorContext& c)
     deckTabs[1]->setTooltip ("The sound of each pad: gain, pitch, reverse, attack, release, filter");
     deckTabs[2]->setTooltip ("Lo-fi / vinyl, drive, delay and reverb");
     deckTabs[3]->setTooltip ("Turn a melody or chords into MIDI");
-    deckHint.setFont (ui (11.0f));
+    deckHint.setFont (ui (12.5f));
     deckHint.setColour (juce::Label::textColourId, col::textDim);
     deckHint.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (deckHint);
@@ -525,7 +482,7 @@ void StudioPage::setDeck (int d)
         comp->setVisible (sample);
     for (auto* b : editButtons) b->setVisible (sample);
     const bool chops = deck == 0 || deck == 1;
-    for (auto* comp : std::initializer_list<juce::Component*> { &chopPanel, &sensKnob, &autoChopBtn, &equalCount, &equalBtn, &clearChopsBtn, &midiModeBox, &oneShotToggle })
+    for (auto* comp : std::initializer_list<juce::Component*> { &chopPanel, &sensKnob, &autoChopBtn, &chopCount, &equalBtn, &clearChopsBtn, &midiModeBox, &oneShotToggle })
         comp->setVisible (chops);
     padDeck.setVisible (deck == 1);
     fxDeck.setVisible (deck == 2);
@@ -1114,6 +1071,97 @@ bool StudioPage::handleKey (const juce::KeyPress& k)
 }
 
 //==============================================================================
+void StudioPage::chopCountChanged()
+{
+    const bool every = chopCount.getSelectedId() == everyHit;
+    sensKnob.setEnabled (every);
+    sensKnob.setAlpha (every ? 1.0f : 0.4f);
+    sensKnob.setTooltip (every ? "How picky AUTO CHOP is: higher finds quieter hits (more chops)"
+                               : "Only used with \"Every hit\" - with a number, AUTO CHOP picks the strongest hits");
+    const auto n = juce::String (chopCount.getSelectedId());
+    autoChopBtn.setTooltip (every ? "Put a chop on every hit (SENSITIVITY sets how many)"
+                                  : "Cut into " + n + " chops at the strongest hits");
+    equalBtn.setTooltip (every ? "Cut into equal chops - pick how many in the list"
+                               : "Cut into " + n + " equal chops (great for loops)");
+}
+
+void StudioPage::autoChop()
+{
+    if (clip == nullptr || clip->audio == nullptr) return;
+    const int len = clip->audio->getNumSamples();
+    const int count = chopCount.getSelectedId();
+    const bool every = count == everyHit;
+    const bool sel = wave.hasSelection();
+    const int a = sel ? wave.getSelectionStart() : 0, b = sel ? wave.getSelectionEnd() : len;
+
+    std::vector<int> found = every ? edit::detectTransients (*clip->audio, (float) sensKnob.slider.getValue() / 100.0f)
+                                   : edit::chopAtStrongestHits (*clip->audio, count, a, b);
+    if (sel)
+    {
+        // only chop inside the selection, keep markers elsewhere
+        std::vector<int> keep;
+        for (auto s : clip->slices) if (s < a || s > b) keep.push_back (s);
+        for (auto s : found) if (s > a && s < b) keep.push_back (s);
+        keep.push_back (a);
+        keep.push_back (b);
+        std::sort (keep.begin(), keep.end());
+        keep.erase (std::unique (keep.begin(), keep.end()), keep.end());
+        keep.erase (std::remove_if (keep.begin(), keep.end(), [len] (int v) { return v <= 0 || v >= len; }), keep.end());
+        found = keep;
+    }
+    clip->pushUndo ("Auto chop");
+    clip->slices = found;
+    clip->pads.clear();          // new chops start with a clean sound (UNDO brings the old ones back)
+    padDeck.setClip (clip, selectedPad = 0);
+    proc.session.clipChanged (clip.get(), false);
+    syncSampler();
+    wave.repaint(); pads.repaint();
+
+    const int total = (int) clip->sliceBoundaries().size() - 1;
+    const auto where = "play them from pads " + noteName (proc.rootNote.load()) + " and up";
+    if (every)
+        ctx.toast (juce::String (total) + " chops, one per hit - " + where);
+    else if (sel)
+        ctx.toast (juce::String (count) + " chops in the selection (" + juce::String (total) + " in all) - " + where);
+    else
+        ctx.toast (juce::String (total) + " chops at the strongest hits - " + where);
+}
+
+void StudioPage::equalChop()
+{
+    if (clip == nullptr || clip->audio == nullptr) return;
+    const int n = chopCount.getSelectedId();
+    if (n == everyHit)
+    {
+        ctx.toast ("Pick how many equal chops first");
+        chopCount.showPopup();
+        return;
+    }
+    clip->pushUndo ("Equal chop");
+    clip->pads.clear();
+    padDeck.setClip (clip, selectedPad = 0);
+    if (wave.hasSelection())
+    {
+        std::vector<int> s;
+        const int a = wave.getSelectionStart(), b = wave.getSelectionEnd();
+        for (auto v : clip->slices) if (v < a || v > b) s.push_back (v);
+        s.push_back (a);
+        for (int i = 1; i < n; ++i) s.push_back (a + (int) ((juce::int64) (b - a) * i / n));
+        s.push_back (b);
+        std::sort (s.begin(), s.end());
+        s.erase (std::unique (s.begin(), s.end()), s.end());
+        s.erase (std::remove_if (s.begin(), s.end(), [len = clip->audio->getNumSamples()] (int v) { return v <= 0 || v >= len; }), s.end());
+        clip->slices = s;
+    }
+    else
+        clip->slices = edit::equalSlices (clip->audio->getNumSamples(), n);
+    proc.session.clipChanged (clip.get(), false);
+    syncSampler();
+    wave.repaint(); pads.repaint();
+    ctx.toast (juce::String ((int) clip->sliceBoundaries().size() - 1) + " equal chops - play them from pads "
+               + noteName (proc.rootNote.load()) + " and up");
+}
+
 void StudioPage::resized()
 {
     auto r = getLocalBounds().reduced (14, 10);
@@ -1139,7 +1187,7 @@ void StudioPage::resized()
     r.removeFromTop (6);
 
     auto tools = r.removeFromBottom (158);
-    auto tabRow = r.removeFromBottom (24);
+    auto tabRow = r.removeFromBottom (34);
     r.removeFromBottom (6);
     pads.setBounds (r.removeFromBottom (50));
     r.removeFromBottom (8);
@@ -1168,11 +1216,11 @@ void StudioPage::resized()
 
     // tool tabs
     {
-        auto t = tabRow.withTrimmedLeft (4);
+        auto t = tabRow;
         for (auto* b : deckTabs)
         {
-            b->setBounds (t.removeFromLeft (78));
-            t.removeFromLeft (4);
+            b->setBounds (t.removeFromLeft (120));
+            t.removeFromLeft (6);
         }
         deckHint.setBounds (t.withTrimmedRight (6));
     }
@@ -1255,7 +1303,7 @@ void StudioPage::resized()
         row1.removeFromLeft (6);
         clearChopsBtn.setBounds (row1);
 
-        equalCount.setBounds (row2.removeFromLeft (row2.getWidth() / 2 - 3));
+        chopCount.setBounds (row2.removeFromLeft (row2.getWidth() / 2 - 3));
         row2.removeFromLeft (6);
         equalBtn.setBounds (row2);
 

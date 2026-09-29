@@ -874,18 +874,44 @@ void SnaggerLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& 
     const bool enabled = b.isEnabled();
     const float corner = style == "chip" ? r.getHeight() * 0.5f : juce::jmin (6.0f, r.getHeight() * 0.3f);
 
-    if (style == "tab" || style == "ghost" || style == "icon")
+    if (style == "tab")
     {
-        if (style != "tab" && (highlighted || down) && enabled)
+        // big, easy-to-spot tabs: the open one is a raised satin cap with a neon underline,
+        // the others sit in black glass with a thin gold rim
+        auto t = r.reduced (1.0f);
+        const float c = juce::jmin (7.0f, t.getHeight() * 0.28f);
+        if (on)
+        {
+            juce::Path shape; shape.addRoundedRectangle (t, c);
+            neonGlow (g, shape, col::red, 8.0f, 0.28f);
+            satinSurface (g, t, c, highlighted, false, true);
+            g.setColour (col::gold.withAlpha (0.55f));
+            g.drawRoundedRectangle (t.reduced (0.5f), c, 1.0f);
+            auto ul = t.removeFromBottom (3.5f).reduced (t.getWidth() * 0.2f, 0.5f);
+            juce::Path p; p.addRoundedRectangle (ul, 1.5f);
+            glowPath (g, p, col::red, 1.0f);
+        }
+        else
+        {
+            g.setColour (juce::Colours::black.withAlpha (highlighted ? 0.72f : 0.6f));
+            g.fillRoundedRectangle (t, c);
+            if (highlighted || down)
+            {
+                g.setColour (col::gold.withAlpha (down ? 0.14f : 0.07f));
+                g.fillRoundedRectangle (t, c);
+            }
+            g.setColour (col::gold.withAlpha (highlighted ? 0.5f : 0.28f));
+            g.drawRoundedRectangle (t.reduced (0.5f), c, 1.0f);
+        }
+        return;
+    }
+
+    if (style == "ghost" || style == "icon")
+    {
+        if ((highlighted || down) && enabled)
         {
             g.setColour (col::gold.withAlpha (down ? 0.16f : 0.08f));
             g.fillRoundedRectangle (r, 6.0f);
-        }
-        if (style == "tab" && on)
-        {
-            auto ul = r.removeFromBottom (3.0f).reduced (r.getWidth() * 0.22f, 0.0f);
-            juce::Path p; p.addRoundedRectangle (ul, 1.5f);
-            glowPath (g, p, col::red, 1.0f);
         }
         return;
     }
@@ -923,7 +949,7 @@ juce::Font SnaggerLookAndFeel::getTextButtonFont (juce::TextButton& b, int h)
 {
     const auto style = b.getProperties().getWithDefault ("style", "gold").toString();
     if (style == "tab")
-        return ui (juce::jmin (13.5f, h * 0.36f), true).withExtraKerningFactor (0.16f);
+        return ui (juce::jmin (16.0f, h * 0.47f), true).withExtraKerningFactor (0.14f);
     if (style == "chip")
         return ui (juce::jmin (11.5f, h * 0.48f), true).withExtraKerningFactor (0.06f);
     return ui (juce::jmin (12.0f, h * 0.42f), true).withExtraKerningFactor (0.1f);
@@ -935,7 +961,7 @@ theme::Legend theme::buttonLegend (const juce::Button& b, bool highlighted)
     const bool on = b.getToggleState();
     Legend l { col::goldPale, false };
 
-    if (style == "tab")          l.colour = on ? col::goldLight : (highlighted ? col::goldPale : col::textDim);
+    if (style == "tab")          l.colour = on ? col::goldLight : (highlighted ? col::goldLight : col::goldPale.withAlpha (0.78f));
     else if (style == "ghost")   l.colour = highlighted ? col::goldLight : col::textDim;
     else if (style == "icon")    l.colour = highlighted ? col::goldLight : col::gold.withAlpha (0.85f);
     else if (style == "redFill") l = { col::red, true };

@@ -66,6 +66,27 @@ static AudioData::Ptr makeClicks (double sr, double seconds, double interval)
     return AudioData::make (std::move (b), sr);
 }
 
+/** Clicks at the given times (seconds) with the given levels. */
+static AudioData::Ptr makeAccentClicks (double sr, double seconds, const std::vector<std::pair<double, float>>& hits)
+{
+    juce::AudioBuffer<float> b (2, (int) (sr * seconds));
+    b.clear();
+    juce::Random rnd (7);
+    for (auto [t, level] : hits)
+    {
+        const int s0 = (int) (t * sr);
+        for (int i = 0; i < (int) (0.03 * sr) && s0 + i < b.getNumSamples(); ++i)
+        {
+            const float env = std::exp (-(float) i / (float) (0.005 * sr));
+            const float v = env * std::sin ((float) i * 2.0f * juce::MathConstants<float>::pi * 180.0f / (float) sr)
+                          + env * 0.5f * (rnd.nextFloat() * 2.0f - 1.0f);
+            b.setSample (0, s0 + i, v * 0.8f * level);
+            b.setSample (1, s0 + i, v * 0.8f * level);
+        }
+    }
+    return AudioData::make (std::move (b), sr);
+}
+
 struct DemoMix
 {
     AudioData::Ptr mix, vocal, drums, bass, keys;
@@ -297,6 +318,66 @@ static void testChopping()
 
     auto eq = edit::equalSlices (1000, 4);
     CHECK (eq.size() == 3 && eq[0] == 250 && eq[2] == 750, "equal slices");
+
+    // AUTO CHOP with a count: exactly that many chops, cut at the strongest hits
+    const double sr = 44100.0;
+    auto near = [sr] (int pos, double t) { return std::abs (pos / sr - t) < 0.015; };
+    {
+        std::vector<std::pair<double, float>> h;
+        for (double t = 0.25; t < 4.0; t += 0.5)
+            h.push_back ({ t, (std::abs (t - 1.25) < 0.01 || std::abs (t - 2.25) < 0.01 || std::abs (t - 3.25) < 0.01) ? 1.0f : 0.2f });
+        auto a = makeAccentClicks (sr, 4.25, h);
+        auto c4 = edit::chopAtStrongestHits (*a, 4);
+        CHECK (c4.size() == 3 && near (c4[0], 1.25) && near (c4[1], 2.25) && near (c4[2], 3.25),
+               "4 chops: cut at the 3 loudest hits (" + juce::String (c4.size()) + " cuts:" + [&] { juce::String t; for (auto c : c4) t << " " << juce::String (c / sr, 3); return t; }() + ")");
+    }
+    {
+        std::vector<std::pair<double, float>> h;
+        for (double t = 0.25; t < 4.0; t += 0.5)
+            h.push_back ({ t, std::abs (t - 2.25) < 0.01 ? 1.0f : (std::abs (t - 1.25) < 0.01 || std::abs (t - 3.25) < 0.01) ? 0.5f : 0.15f });
+        auto a = makeAccentClicks (sr, 4.25, h);
+        auto c2 = edit::chopAtStrongestHits (*a, 2);
+        CHECK (c2.size() == 1 && near (c2[0], 2.25), "2 chops: one cut, at the loudest hit (" + (c2.empty() ? juce::String() : juce::String (c2[0] / sr, 3)) + " s)");
+        auto r2 = edit::chopAtStrongestHits (*a, 2, (int) (1.0 * sr), (int) (3.0 * sr));
+        CHECK (r2.size() == 1 && near (r2[0], 2.25), "2 chops of a selection: the cut stays inside it, at its loudest hit");
+        auto r3 = edit::chopAtStrongestHits (*a, 3, (int) (1.0 * sr), (int) (4.0 * sr));
+        CHECK (r3.size() == 2 && near (r3[0], 2.25) && near (r3[1], 3.25), "3 chops of 1s-4s: its two loudest hits");
+    }
+    {
+        bool allExact = true;
+        juce::String sizes;
+        for (int n : { 2, 3, 4, 6, 8, 12, 16, 24, 32 })
+        {
+            auto cuts = edit::chopAtStrongestHits (*clicks, n);
+            bool ok = (int) cuts.size() == n - 1;
+            for (size_t i = 0; i < cuts.size(); ++i)
+                ok = ok && cuts[i] > 0 && cuts[i] < clicks->getNumSamples() && (i == 0 || cuts[i] > cuts[i - 1]);
+            allExact = allExact && ok;
+            sizes << (int) cuts.size() + 1 << " ";
+        }
+        CHECK (allExact, "2..32 chops always gives exactly that many, in order (" + sizes.trim() + ")");
+
+        int onHits = 0;
+        auto c8 = edit::chopAtStrongestHits (*clicks, 8);
+        for (auto c : c8)
+            for (double t = 0.25; t < 4.1; t += 0.5)
+                if (near (c, t)) { ++onHits; break; }
+        CHECK (onHits == 7, "8 chops of 8 even hits: all 7 cuts land on hits (" + juce::String (onHits) + ")");
+    }
+    {
+        // a held tone has no real hits: still exactly N chops, none of them tiny
+        juce::AudioBuffer<float> b (1, (int) (2.0 * sr));
+        for (int i = 0; i < b.getNumSamples(); ++i)
+            b.setSample (0, i, 0.3f * (float) std::sin (6.283185307 * 220.0 * i / sr));
+        auto tone = AudioData::make (std::move (b), sr);
+        auto cuts = edit::chopAtStrongestHits (*tone, 4);
+        std::vector<int> bounds { 0 };
+        bounds.insert (bounds.end(), cuts.begin(), cuts.end());
+        bounds.push_back (tone->getNumSamples());
+        int shortest = tone->getNumSamples();
+        for (size_t i = 1; i < bounds.size(); ++i) shortest = juce::jmin (shortest, bounds[i] - bounds[i - 1]);
+        CHECK (cuts.size() == 3 && shortest > (int) (0.1 * sr), "4 chops of a held tone: 4 pieces, shortest " + juce::String (shortest / sr, 2) + " s");
+    }
 }
 
 static void testQuickSplit()
@@ -978,6 +1059,50 @@ struct StudioPageTester
 
         page.undo();
         CHECK (std::abs (page.gainKnob.slider.getValue() - 6.0) < 0.01, "undo brings the knob back with the sound");
+
+        std::cout << "\n[studio chop count]\n";
+        {
+            std::vector<std::pair<double, float>> h;
+            for (double t = 0.25; t < 4.0; t += 0.5)
+                h.push_back ({ t, std::abs (t - 2.25) < 0.01 ? 1.0f : (std::abs (t - 1.25) < 0.01 || std::abs (t - 3.25) < 0.01) ? 0.6f : 0.15f });
+            Clip::Ptr k (new Clip());
+            k->name = "Beat";
+            k->audio = makeAccentClicks (44100.0, 4.25, h);
+            p->session.add (k, true);
+            page.setClip (k);
+            page.wave.setSelection (0, 0);
+
+            CHECK (page.chopCount.getSelectedId() == StudioPage::everyHit && page.sensKnob.isEnabled(), "starts on \"Every hit\" with SENSITIVITY live");
+            page.autoChop();
+            CHECK (k->slices.size() >= 7, "Every hit: a chop per hit (" + juce::String ((int) k->slices.size() + 1) + " chops)");
+
+            page.chopCount.setSelectedId (2, juce::sendNotificationSync);
+            CHECK (! page.sensKnob.isEnabled(), "picking a number greys out SENSITIVITY");
+            page.autoChop();
+            CHECK (k->slices.size() == 1 && std::abs (k->slices[0] / 44100.0 - 2.25) < 0.015, "2 chops + AUTO CHOP = 2 chops, split at the loudest hit");
+
+            page.chopCount.setSelectedId (4, juce::sendNotificationSync);
+            page.autoChop();
+            CHECK (k->sliceBoundaries().size() == 5, "4 chops + AUTO CHOP = 4 chops");
+            page.undo();
+            CHECK (k->slices.size() == 1, "  ...and UNDO goes back to the 2");
+
+            page.equalChop();
+            CHECK (k->slices == edit::equalSlices (k->audio->getNumSamples(), 4), "4 chops + EQUAL = 4 equal chops");
+
+            // a selection: only it gets chopped, the markers outside stay
+            const int a = 44100, b = 3 * 44100;
+            page.wave.setSelection (a, b);
+            page.chopCount.setSelectedId (2, juce::sendNotificationSync);
+            page.autoChop();
+            int inside = 0;
+            bool outsideKept = std::find (k->slices.begin(), k->slices.end(), edit::equalSlices (k->audio->getNumSamples(), 4)[2]) != k->slices.end();
+            for (auto s : k->slices) if (s > a && s < b) ++inside;
+            CHECK (inside == 1 && outsideKept, "2 chops on a selection: one cut inside it, the marker after it kept");
+            page.wave.setSelection (0, 0);
+            page.chopCount.setSelectedId (StudioPage::everyHit, juce::sendNotificationSync);
+            CHECK (page.sensKnob.isEnabled(), "back on \"Every hit\": SENSITIVITY is live again");
+        }
 
         ed.reset();
     }
@@ -1892,6 +2017,26 @@ int main (int argc, char** argv)
     juce::StringArray args (argv + 1, argc - 1);
 
     std::cout << "Sample Snagger test runner\n";
+
+    // --chop <file>: print where AUTO CHOP cuts a real sample at each count (for tuning)
+    const int chopIdx = args.indexOf ("--chop");
+    if (chopIdx >= 0 && chopIdx + 1 < args.size())
+    {
+        auto loaded = audioio::loadFile (juce::File (args[chopIdx + 1]), {});
+        if (loaded.audio == nullptr) { std::cout << "can't read it\n"; return 1; }
+        const auto sr = loaded.audio->sampleRate;
+        auto show = [sr] (const juce::String& label, const std::vector<int>& cuts)
+        {
+            juce::String t;
+            for (auto c : cuts) t << juce::String (c / sr, 2) << " ";
+            std::cout << label << ": " << t << "\n";
+        };
+        show ("every hit", edit::detectTransients (*loaded.audio, 0.55f));
+        for (int n : { 2, 3, 4, 6, 8, 12, 16 })
+            show (juce::String (n) + " chops", edit::chopAtStrongestHits (*loaded.audio, n));
+        return 0;
+    }
+
     auto tmp = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("snagger-tests");
     tmp.deleteRecursively();
     tmp.createDirectory();

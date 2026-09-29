@@ -66,10 +66,15 @@ public:
     MidiDeck& getMidiDeck()             { return midiDeck; }
     SlicePads& getPads()                { return pads; }
 
+    /** AUTO CHOP / EQUAL with the chosen count (in the selection if there is one). */
+    void autoChop();
+    void equalChop();
+
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void timerCallback() override;
     void refreshInfo();
+    void chopCountChanged();
     void syncSampler();
 
     enum class SliceFix { keep, crop, remove };
@@ -147,7 +152,8 @@ private:
 
     Knob sensKnob    { "Sensitivity", 0.0, 100.0, 55.0, 1.0, "%" };
     juce::TextButton autoChopBtn { "AUTO CHOP" }, equalBtn { "EQUAL" }, clearChopsBtn { "CLEAR" };
-    juce::ComboBox equalCount, midiModeBox;
+    juce::ComboBox chopCount, midiModeBox;
+    static constexpr int everyHit = 1000;     // chopCount id: let SENSITIVITY decide
     juce::ToggleButton oneShotToggle { "One-shot" };
     juce::ComboBox toKeyBox;
 

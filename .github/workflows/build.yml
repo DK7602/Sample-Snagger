@@ -234,6 +234,8 @@ jobs:
             After installing, rescan plug-ins in your DAW. Sample Snagger is an instrument, so put it on an instrument / MIDI track.
             Open Settings (gear icon) once and click INSTALL ALL for HQ downloads and the AI stem models.
 
+            **1.5.1:** pick how many chops (2, 3, 4 ... 32) and AUTO CHOP cuts exactly that many at the strongest hits
+            ("Every hit" keeps the SENSITIVITY knob in charge); the SAMPLE / PADS / FX / MIDI tabs are bigger and easier to spot.
             **New in 1.5:** key detection (with Camelot codes) and TO KEY; STUDIO tabs for PADS (gain, pitch, reverse,
             attack, release and filter per pad), FX (lo-fi / vinyl, drive, tempo-synced delay, reverb - included in
             drags) and MIDI (audio to MIDI with Spotify's Basic Pitch, built in: drag the notes onto a track).

@@ -611,6 +611,110 @@ std::vector<int> equalSlices (int numSamples, int numSlices)
     return r;
 }
 
+std::vector<int> chopAtStrongestHits (const AudioData& a, int numChops, int rangeStart, int rangeEnd)
+{
+    const int n = a.getNumSamples();
+    if (rangeEnd < 0 || rangeEnd > n) rangeEnd = n;
+    rangeStart = juce::jlimit (0, n, rangeStart);
+    numChops = juce::jlimit (1, 128, numChops);
+    const int len = rangeEnd - rangeStart;
+    const int wanted = numChops - 1;
+    std::vector<int> cuts;
+    if (wanted <= 0 || len < numChops * 2)
+        return cuts;
+
+    // candidates: every local peak of the onset curve. The curve is log-scaled (great for finding hits,
+    // but a quiet hit and a loud one look alike), so they're ranked by how much louder it gets right there.
+    struct Hit { int pos; float score; };
+    std::vector<Hit> hits;
+    const int chans = a.getNumChannels();
+    auto rms = [&] (int from, int to)
+    {
+        from = juce::jlimit (0, n, from); to = juce::jlimit (0, n, to);
+        if (to <= from) return 0.0f;
+        double sum = 0;
+        for (int c = 0; c < chans; ++c)
+        {
+            const float* d = a.buffer.getReadPointer (c);
+            for (int i = from; i < to; ++i) sum += (double) d[i] * d[i];
+        }
+        return (float) std::sqrt (sum / ((double) (to - from) * chans));
+    };
+    const auto ms = [&a] (double m) { return (int) (m * 0.001 * a.sampleRate); };
+    auto o = computeOnsetEnvelope (a);
+    const int frames = (int) o.env.size();
+    const int medRadius = 12;
+    std::vector<float> tmp;
+    for (int f = 1; f < frames - 1; ++f)
+    {
+        const float v = o.env[(size_t) f];
+        if (v < o.env[(size_t) f - 1] || v < o.env[(size_t) f + 1])
+            continue;
+        tmp.clear();
+        for (int k = juce::jmax (0, f - medRadius); k <= juce::jmin (frames - 1, f + medRadius); ++k)
+            tmp.push_back (o.env[(size_t) k]);
+        std::nth_element (tmp.begin(), tmp.begin() + (long) tmp.size() / 2, tmp.end());
+        const float prominence = v - tmp[tmp.size() / 2];
+        if (prominence < 0.01f)
+            continue;
+        const int pos = f * o.hop + 512 - ms (4.0);   // same placement as detectTransients
+        if (pos <= rangeStart || pos >= rangeEnd)
+            continue;
+        const float jump = juce::jmax (0.0f, rms (pos - ms (5), pos + ms (30)) - rms (pos - ms (60), pos - ms (15)));
+        hits.push_back ({ pos, jump + prominence * 1.0e-3f });
+    }
+    std::sort (hits.begin(), hits.end(), [] (const Hit& x, const Hit& y) { return x.score > y.score; });
+
+    // strongest first, keeping every piece a fair size (so 4 chops aren't three blips and one long tail)
+    const double share = (double) len / numChops;
+    auto pick = [&] (int minGap)
+    {
+        for (const auto& h : hits)
+        {
+            if ((int) cuts.size() >= wanted) break;
+            if (h.pos - rangeStart < minGap || rangeEnd - h.pos < minGap) continue;
+            bool clear = true;
+            for (auto c : cuts)
+                if (std::abs (c - h.pos) < minGap) { clear = false; break; }
+            if (clear)
+                cuts.push_back (h.pos);
+        }
+    };
+    const int hardMin = (int) juce::jmin (0.07 * a.sampleRate, share * 0.5);
+    pick (juce::jmax (hardMin, (int) (share * 0.3)));
+    pick (hardMin);                                            // not enough? allow closer hits
+
+    // still short (a sustained sound with few hits): split the longest pieces in half
+    while ((int) cuts.size() < wanted)
+    {
+        std::vector<int> b { rangeStart };
+        std::vector<int> sorted (cuts);
+        std::sort (sorted.begin(), sorted.end());
+        b.insert (b.end(), sorted.begin(), sorted.end());
+        b.push_back (rangeEnd);
+        size_t longest = 0;
+        for (size_t i = 1; i + 1 < b.size(); ++i)
+            if (b[i + 1] - b[i] > b[longest + 1] - b[longest]) longest = i;
+        if (b[longest + 1] - b[longest] < 2)
+            break;
+        cuts.push_back (b[longest] + (b[longest + 1] - b[longest]) / 2);
+    }
+
+    // land on zero crossings, never far enough to leave the range or pass a neighbour
+    std::sort (cuts.begin(), cuts.end());
+    const auto placed = cuts;
+    for (size_t i = 0; i < cuts.size(); ++i)
+    {
+        const int prev = i > 0 ? placed[i - 1] : rangeStart;
+        const int next = i + 1 < placed.size() ? placed[i + 1] : rangeEnd;
+        const int room = juce::jmin (placed[i] - prev, next - placed[i]) / 3;
+        const int reach = juce::jmin ((int) (0.0015 * a.sampleRate), room);
+        if (reach > 0)
+            cuts[i] = snapToZeroCrossing (a, placed[i], reach);
+    }
+    return cuts;
+}
+
 double estimateBpm (const AudioData& a)
 {
     if (a.lengthSeconds() < 2.5)

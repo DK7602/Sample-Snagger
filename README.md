@@ -48,7 +48,9 @@ Every capture lands in the **Session tray** at the bottom. Tray clips are saved 
   work from the original sound; **DEFAULT** puts that panel back to the original. Each sample remembers its knobs.
 - **Double-click the number under any knob** to type an exact value (`-3.5`, `+7`, `8k`, `off`...), then Return
   (Esc cancels).
-- **Chop:** AUTO CHOP (transient detection with sensitivity), EQUAL slices, or alt-click to add markers by hand.
+- **Chop:** pick how many chops (2, 3, 4 ... 32) and AUTO CHOP cuts exactly that many at the strongest hits, or EQUAL
+  cuts them evenly. "Every hit" puts a chop on each hit instead, with SENSITIVITY deciding how many. With a selection,
+  only the selection is chopped. Alt-click adds a marker by hand.
 - **MIDI pads:** chop 1 plays on C3, chop 2 on C#3, and so on. Play them from your MIDI keyboard or the on-screen pads.
   One-shot or gated. **KEYS mode** plays the sample chromatically instead.
 - **Drag to DAW:** drag the selection, the whole sample, or *any single pad* onto a track.
