@@ -89,6 +89,17 @@ Knob::Knob (const juce::String& captionIn, double min, double max, double def, d
     addAndMakeVisible (slider);
 }
 
+/** A value as people write it: "0", "7", "-3.5" - never "1.33e-15" (step snapping can leave tiny
+    floating-point dust, e.g. on Apple Silicon, where -24 + 240 * 0.1 isn't exactly 0). */
+static juce::String plainNumber (double v, int decimals)
+{
+    const double r = std::round (v);
+    if (decimals <= 0 || std::abs (v - r) < 1.0e-6)
+        return juce::String ((juce::int64) r);
+    auto s = juce::String (v, decimals);
+    return s.startsWithChar ('-') && s.substring (1).containsOnly ("0.") ? s.substring (1) : s;
+}
+
 juce::Rectangle<int> Knob::valueArea() const
 {
     return getLocalBounds().removeFromBottom (28).removeFromTop (15).withSizeKeepingCentre (juce::jmin (getWidth(), 90), 17);
@@ -121,7 +132,7 @@ void Knob::startTyping()
     t.setColour (juce::TextEditor::outlineColourId, theme::col::gold);
     t.setColour (juce::TextEditor::focusedOutlineColourId, theme::col::red);
     const double v = slider.getValue();
-    t.setText (juce::String (v, slider.getInterval() >= 1.0 ? 0 : (std::abs (v - std::round (v)) < 1.0e-6 ? 0 : 1)), false);
+    t.setText (plainNumber (v, slider.getInterval() >= 1.0 ? 0 : 1), false);
     t.onReturnKey = [this] { finishTyping (true); };
     t.onEscapeKey = [this] { finishTyping (false); };
     t.onFocusLost = [this] { finishTyping (true); };
@@ -176,7 +187,8 @@ void Knob::paint (juce::Graphics& g)
     auto bottom = r.removeFromBottom (28.0f);
 
     auto valueText = formatter ? formatter (slider.getValue())
-                               : juce::String (slider.getValue(), slider.getInterval() >= 1.0 ? 0 : 1) + suffix;
+                               : (slider.getInterval() >= 1.0 ? plainNumber (slider.getValue(), 0)
+                                                              : juce::String (std::abs (slider.getValue()) < 0.05 ? 0.0 : slider.getValue(), 1)) + suffix;
     g.setColour (col::goldPale);
     g.setFont (ui (11.0f, true));
     if (typing == nullptr)

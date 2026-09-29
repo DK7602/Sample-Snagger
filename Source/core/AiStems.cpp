@@ -243,9 +243,27 @@ bool separate (const AudioData& input, Mode mode, Job& job, const juce::String& 
     if (mode == Mode::vocalsMusic)
     {
         auto vocals = toSourceRate (combined[6], combined[7], sr, n);
+
+        // The same model's own guess at everything that isn't voice (drums + bass + other) tells the
+        // mask where the music is. It's a better reference than "mix - vocals", which still holds
+        // whatever the vocal estimate missed (echoes, doubles, breaths).
+        AudioData::Ptr others;
+        if (combined.size() >= 8 && ! combined[0].empty())
+        {
+            const size_t len = combined[0].size();
+            std::vector<float> l (len, 0.0f), r (len, 0.0f);
+            for (int s = 0; s < 3; ++s)
+                for (size_t i = 0; i < len && i < combined[(size_t) (s * 2)].size(); ++i)
+                {
+                    l[i] += combined[(size_t) (s * 2)][i];
+                    r[i] += combined[(size_t) (s * 2 + 1)][i];
+                }
+            others = toSourceRate (l, r, sr, n);
+        }
+
         job.setStatus ("Taking the vocals out of the music");
         stems.push_back ({ "vocals", vocals });
-        stems.push_back ({ "music", edit::musicWithoutVocals (input, *vocals, nullptr) });
+        stems.push_back ({ "music", edit::musicWithoutVocals (input, *vocals, others.get()) });
     }
     else
     {

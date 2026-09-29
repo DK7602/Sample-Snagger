@@ -880,22 +880,47 @@ static void testBuiltinAi()
     }
 
     // Vocals + music, end to end, on AI Studio and on Max: the music must not keep the voice.
-    // (Measured against the lead line we mixed in: how much of it is still in the music.)
-    auto leakOf = [&demo] (const AudioData& music)
+    // With SNAGGER_TEST_VOICE (CI makes one with espeak-ng) a real spoken voice goes into the mix;
+    // otherwise it's measured against the demo's synth lead, which the AI may well call "music".
+    AudioData::Ptr voice = demo.vocal, song = demo.mix, instruments = edit::mix ({ demo.mix, demo.vocal }, { 1.0f, -1.0f });
+    bool realVoice = false;
+    {
+        const juce::File voiceFile (juce::SystemStats::getEnvironmentVariable ("SNAGGER_TEST_VOICE", {}));
+        if (voiceFile.existsAsFile())
+        {
+            auto r = audioio::loadFile (voiceFile, {});
+            if (r.audio != nullptr && r.audio->getNumSamples() > 1000)
+            {
+                auto v = edit::resample (*r.audio, demo.mix->sampleRate);
+                const int n = demo.mix->getNumSamples();
+                juce::AudioBuffer<float> b (2, n);
+                for (int c = 0; c < 2; ++c)
+                    for (int i = 0; i < n; ++i)   // loop the phrase for the whole demo
+                        b.setSample (c, i, v->buffer.getSample (juce::jmin (c, v->getNumChannels() - 1), i % v->getNumSamples()));
+                auto rms = [] (const juce::AudioBuffer<float>& x) { return x.getRMSLevel (0, 0, x.getNumSamples()); };
+                b.applyGain (0.8f * rms (demo.mix->buffer) / juce::jmax (1.0e-6f, rms (b)));   // about as loud as the band
+                voice = AudioData::make (std::move (b), demo.mix->sampleRate);
+                instruments = demo.mix;   // the synth lead stays in, as an instrument
+                song = edit::mix ({ demo.mix, voice }, { 1.0f, 1.0f });
+                realVoice = true;
+                std::cout << "  (testing with a spoken voice from " << voiceFile.getFileName() << ")\n";
+            }
+        }
+    }
+    auto leakOf = [&voice] (const AudioData& music)
     {
         double num = 0, den = 0;
-        const int n = juce::jmin (music.getNumSamples(), demo.vocal->getNumSamples());
+        const int n = juce::jmin (music.getNumSamples(), voice->getNumSamples());
         for (int c = 0; c < 2; ++c)
             for (int i = 0; i < n; ++i)
             {
-                const double v = demo.vocal->buffer.getSample (c, i);
+                const double v = voice->buffer.getSample (c, i);
                 num += music.buffer.getSample (juce::jmin (c, music.getNumChannels() - 1), i) * v;
                 den += v * v;
             }
         return den > 0 ? std::abs (num / den) : 0.0;
     };
     auto dB = [] (double x) { return juce::String (20.0 * std::log10 (juce::jmax (1e-6, x)), 1) + " dB"; };
-    auto instruments = edit::mix ({ demo.mix, demo.vocal }, { 1.0f, -1.0f });
 
     for (auto engine : { actions::Engine::ai, actions::Engine::aiMax })
     {
@@ -905,7 +930,7 @@ static void testBuiltinAi()
         p.onNotify = [&errors] (const juce::String& m, bool err) { if (err) errors.add (m); };
         Clip::Ptr c (new Clip());
         c->name = "Demo";
-        c->audio = demo.mix;
+        c->audio = song;
         p.session.add (c, true);
 
         const auto t0 = juce::Time::getMillisecondCounterHiRes();
@@ -926,15 +951,19 @@ static void testBuiltinAi()
         if (vocals == nullptr || music == nullptr)
             continue;
 
-        auto subtracted = edit::mix ({ demo.mix, vocals }, { 1.0f, -1.0f });   // the old way
+        auto subtracted = edit::mix ({ song, vocals }, { 1.0f, -1.0f });   // the old way
         const double now = leakOf (*music), before = leakOf (*subtracted);
         const double kept = correlation (*music, *instruments);
-        const auto line = name + ": lead left in the music " + dB (now) + " (plain mix - vocals: " + dB (before)
-                        + "), instruments kept corr " + juce::String (kept, 3);
+        const auto line = name + (realVoice ? " (spoken voice)" : " (synth lead)") + ": voice left in the music " + dB (now)
+                        + " (plain mix - vocals: " + dB (before) + "), vocal stem catches " + dB (leakOf (*vocals))
+                        + ", instruments kept corr " + juce::String (kept, 3);
         std::cout << "  " << line << "\n";
         ciAnnotate ("notice", line);
-        CHECK (now <= before * 1.02 + 1e-4, name + ": the music has less of the voice than plain subtraction left");
-        CHECK (bestLag (*demo.mix, *music, 32) == 0, name + ": music lines up with the original to the sample");
+        if (realVoice)
+            CHECK (now < before * 0.8, name + ": the music keeps less of the voice than plain subtraction did (" + dB (now) + " vs " + dB (before) + ")");
+        else
+            CHECK (now <= before * 1.02 + 1e-4, name + ": the music has no more of the lead than plain subtraction left");
+        CHECK (bestLag (*song, *music, 32) == 0, name + ": music lines up with the original to the sample");
     }
 }
 
@@ -954,6 +983,9 @@ static void testKnobTyping()
     CHECK (approx (k.parseTyped ("5k"), 5000.0) && approx (k.parseTyped ("2.5 kHz"), 2500.0), "\"5k\" / \"2.5 kHz\" read as Hz");
     CHECK (approx (k.parseTyped ("off"), 0.0), "\"off\" gives the knob's default");
     CHECK (std::isnan (k.parseTyped ("abc")), "text without a number is ignored");
+
+    // what Apple Silicon leaves after snapping 0 to the knob's 0.1 steps
+    k.setValueSilently (-24.0 + 240.0 * 0.1 + 1.33e-15);
 
     int changes = 0;
     k.onChange = [&] { ++changes; };

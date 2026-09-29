@@ -301,7 +301,13 @@ StudioPage::StudioPage (EditorContext& c)
     editButtons[7]->onClick = [this] { applyEdit ("Mono", false, SliceFix::keep, [] (const AudioData& a, int, int) { return edit::toMono (a); }); };
 
     // pitch & time
-    pitchKnob.formatter = [] (double v) { return (v > 0 ? "+" : "") + juce::String (v, std::abs (v - std::round (v)) < 0.05 ? 0 : 1) + " st"; };
+    // (knob steps can leave floating-point dust like 1.3e-15 - never show that)
+    pitchKnob.formatter = [] (double v)
+    {
+        const bool whole = std::abs (v - std::round (v)) < 0.05;
+        const auto num = whole ? juce::String ((int) std::round (v)) : juce::String (v, 1);
+        return (v > 0.05 ? "+" : "") + num + " st";
+    };
     bpmKnob.formatter = [] (double v) { return juce::String (v, 1); };
     formantToggle.setToggleState (true, juce::dontSendNotification);
     formantToggle.setTooltip ("Keep formants: voices stay natural when pitching (no chipmunk)");
@@ -324,7 +330,11 @@ StudioPage::StudioPage (EditorContext& c)
     highCutKnob.slider.setSkewFactorFromMidPoint (5000.0);
     lowCutKnob.formatter  = [] (double v) { return v < 10.0 ? juce::String ("Off") : juce::String ((int) v) + " Hz"; };
     highCutKnob.formatter = [] (double v) { return v > 19900.0 ? juce::String ("Off") : (v >= 1000.0 ? juce::String (v / 1000.0, 1) + " kHz" : juce::String ((int) v) + " Hz"); };
-    gainKnob.formatter = [] (double v) { return (v > 0 ? "+" : "") + juce::String (v, 1) + " dB"; };
+    gainKnob.formatter = [] (double v)
+    {
+        if (std::abs (v) < 0.05) return juce::String ("0.0 dB");
+        return (v > 0 ? "+" : "") + juce::String (v, 1) + " dB";
+    };
     toneDefaultBtn.setTooltip ("Back to the original gain and no filters");
     toneDefaultBtn.onClick = [this]
     {
