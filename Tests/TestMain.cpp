@@ -571,6 +571,20 @@ static void testVocalRemoval()
     CHECK (std::abs (l1) < std::abs (l0) * 0.5, "the mask takes out at least 6 dB more of the vocal than plain subtraction");
     CHECK (std::abs (l2) < std::abs (l0) * 0.25, "with the AI's other parts, at least 12 dB more");
     CHECK (keep (*fromResidual) > 0.9 && keep (*fromOthers) > 0.9, "and the instruments stay (corr " + juce::String (keep (*fromResidual), 3) + " / " + juce::String (keep (*fromOthers), 3) + ")");
+
+    // A deep, processed voice ("Test your might") that the vocal stem gets right but the other
+    // parts' estimate ALSO contains: a Wiener mask alone only turns it down ~8 dB.
+    {
+        juce::AudioBuffer<float> both (o);
+        for (int c = 0; c < 2; ++c) both.addFrom (c, 0, v, c, 0, n, 0.8f);
+        auto othersWithVoice = AudioData::make (std::move (both), sr);
+        auto exactVocals = AudioData::make (juce::AudioBuffer<float> (v), sr);
+        auto music = edit::musicWithoutVocals (*mix, *exactVocals, othersWithVoice.get());
+        const double l = leak (*music);
+        std::cout << "  voice the other parts also claim: left in the music " << dB (l) << "\n";
+        CHECK (std::abs (l) < 0.056, "a voice the other parts also claim still comes out (below -25 dB)");
+        CHECK (keep (*music) > 0.9, "and the instruments stay (corr " + juce::String (keep (*music), 3) + ")");
+    }
 }
 
 static void testStemParts()

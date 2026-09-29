@@ -234,7 +234,8 @@ jobs:
             After installing, rescan plug-ins in your DAW. Sample Snagger is an instrument, so put it on an instrument / MIDI track.
             Open Settings (gear icon) once and click INSTALL ALL for HQ downloads and the AI stem models.
 
-            **1.4.1:** the app icon's top-right corner no longer looks see-through on light desktops.
+            **1.4.2:** the music stem also loses voices the other parts claim too (deep, processed voices like
+            "Test your might"), and the app icon's top-right corner no longer looks see-through on light desktops.
             **New in 1.4:** the music stem no longer keeps the vocals (the voice is masked out, and AI Studio Max builds the
             music from all four specialist models); double-click the number under any knob to type a value; and a claw
             animation plays while stems are separating, bursting into the stems when they're ready.

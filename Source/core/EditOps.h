@@ -24,9 +24,10 @@ namespace snag::edit
 
     AudioData::Ptr resample    (const AudioData&, double newSampleRate);
 
-    /** The music with the vocals taken out, cleaner than mix - vocals: a soft spectral mask keeps
-        the mix where the instruments are louder than the vocal estimate and removes it where the
-        vocals dominate, so vocal residue the AI missed (reverb, harmonies, breaths) goes too.
+    /** The music with the vocals taken out: a soft spectral mask that, bin by bin, removes as much
+        as the strictest of three estimates says is voice - the instruments' share (Wiener), what
+        plain mix - vocals leaves, and 1 - |vocals| / |mix|. So vocal residue the AI missed (reverb,
+        harmonies, breaths) goes, and so does a voice the other parts also claim.
         `others` = the AI's estimate of everything else (drums + bass + other...), or null to use
         mix - vocals. `strength` > 1 removes vocals more aggressively. */
     AudioData::Ptr musicWithoutVocals (const AudioData& mix, const AudioData& vocals, const AudioData* others,

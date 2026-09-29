@@ -310,12 +310,14 @@ AudioData::Ptr musicWithoutVocals (const AudioData& mix, const AudioData& vocals
 
     std::vector<std::vector<float>> X ((size_t) chans, std::vector<float> ((size_t) N * 2));
     std::vector<float> V ((size_t) N * 2), O ((size_t) N * 2);
-    std::vector<float> pv ((size_t) bins), po ((size_t) bins), mask ((size_t) bins);
+    std::vector<float> pv ((size_t) bins), po ((size_t) bins), px ((size_t) bins), pr ((size_t) bins), mask ((size_t) bins);
 
     for (int start = -N + hop; start < n; start += hop)
     {
         std::fill (pv.begin(), pv.end(), 0.0f);
         std::fill (po.begin(), po.end(), 0.0f);
+        std::fill (px.begin(), px.end(), 0.0f);
+        std::fill (pr.begin(), pr.end(), 0.0f);
 
         for (int c = 0; c < chans; ++c)
         {
@@ -337,19 +339,38 @@ AudioData::Ptr musicWithoutVocals (const AudioData& mix, const AudioData& vocals
             fft.performRealOnlyForwardTransform (O.data(), true);
             for (int k = 0; k < bins; ++k)
             {
-                pv[(size_t) k] += V[(size_t) (2 * k)] * V[(size_t) (2 * k)] + V[(size_t) (2 * k + 1)] * V[(size_t) (2 * k + 1)];
-                po[(size_t) k] += O[(size_t) (2 * k)] * O[(size_t) (2 * k)] + O[(size_t) (2 * k + 1)] * O[(size_t) (2 * k + 1)];
+                const float xr = x[(size_t) (2 * k)], xi = x[(size_t) (2 * k + 1)];
+                const float vr = V[(size_t) (2 * k)], vi = V[(size_t) (2 * k + 1)];
+                const float or_ = O[(size_t) (2 * k)], oi = O[(size_t) (2 * k + 1)];
+                pv[(size_t) k] += vr * vr + vi * vi;
+                po[(size_t) k] += or_ * or_ + oi * oi;
+                px[(size_t) k] += xr * xr + xi * xi;
+                pr[(size_t) k] += (xr - vr) * (xr - vr) + (xi - vi) * (xi - vi);   // what plain subtraction leaves
             }
         }
 
-        // Wiener-style mask from the two power estimates (lightly smoothed across frequency, which
-        // keeps the "musical noise" of hard masks away); the same mask for both channels keeps the stereo image
-        for (int k = 0; k < bins; ++k)
+        // Three ways to judge how much of each bin is voice - keep whichever takes out the most:
+        //   Wiener:       the instruments' share, from the AI's estimate of them (or mix - vocals)
+        //   subtraction:  |mix - vocals| / |mix| - exact when the vocal stem is right, even for a voice
+        //                 the other parts also claim (deep, processed voices such as "Test your might")
+        //   magnitude:    1 - |vocals| / |mix| - like subtraction, but not thrown by small phase errors
+        // Powers are lightly smoothed across frequency (keeps the "musical noise" of hard masks away);
+        // one mask for both channels keeps the stereo image.
+        auto smooth = [bins] (const std::vector<float>& p, int k)
         {
             const int k0 = juce::jmax (0, k - 1), k1 = juce::jmin (bins - 1, k + 1);
-            const float sv = 0.25f * pv[(size_t) k0] + 0.5f * pv[(size_t) k] + 0.25f * pv[(size_t) k1];
-            const float so = 0.25f * po[(size_t) k0] + 0.5f * po[(size_t) k] + 0.25f * po[(size_t) k1];
-            mask[(size_t) k] = so / (so + strength * sv + 1.0e-12f);
+            return 0.25f * p[(size_t) k0] + 0.5f * p[(size_t) k] + 0.25f * p[(size_t) k1];
+        };
+        for (int k = 0; k < bins; ++k)
+        {
+            const float sv = smooth (pv, k), so = smooth (po, k), sx = smooth (px, k), sr = smooth (pr, k);
+            float g = so / (so + strength * sv + 1.0e-12f);
+            if (sx > 1.0e-12f)
+            {
+                g = juce::jmin (g, std::sqrt (sr / sx));
+                g = juce::jmin (g, juce::jmax (0.0f, 1.0f - std::sqrt (sv / sx)));
+            }
+            mask[(size_t) k] = juce::jlimit (0.0f, 1.0f, g);
         }
 
         for (int c = 0; c < chans; ++c)
