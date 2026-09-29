@@ -154,6 +154,9 @@ set(SNAGGER_SOURCES
     Source/core/WebCapture.cpp
     Source/core/ProcessAudioCapture.cpp
     Source/core/AiStems.cpp
+    Source/core/KeyDetect.cpp
+    Source/core/PadFx.cpp
+    Source/core/FxRack.cpp
     Source/ui/Theme.cpp
     Source/ui/Widgets.cpp
     Source/ui/WaveformView.cpp

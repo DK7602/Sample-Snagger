@@ -15,8 +15,12 @@
 #include "../Source/core/WebCapture.h"
 #include "../Source/core/AiStems.h"
 #include "../Source/core/ProcessAudioCapture.h"
+#include "../Source/core/KeyDetect.h"
+#include "../Source/core/PadFx.h"
+#include "../Source/core/FxRack.h"
 #include <iostream>
 #include <thread>
+#include <set>
 #include <atomic>
 
 using namespace snag;
@@ -585,6 +589,212 @@ static void testVocalRemoval()
         CHECK (std::abs (l) < 0.056, "a voice the other parts also claim still comes out (below -25 dB)");
         CHECK (keep (*music) > 0.9, "and the instruments stay (corr " + juce::String (keep (*music), 3) + ")");
     }
+}
+
+/** Chords I-IV-V-I (major) or i-iv-V-i (minor) with a bass line, 1 s each, in any key. */
+static AudioData::Ptr makeProgression (int tonic, bool minor, double sr, double cents = 0.0, bool drums = false)
+{
+    const int third = minor ? 3 : 4;
+    const int chords[4][3] = { { 0, third, 7 }, { 5, 5 + (minor ? 3 : 4), 12 }, { 7, 11, 14 }, { 0, third, 7 } };
+    const int n = (int) (sr * 4.0);
+    juce::AudioBuffer<float> b (2, n);
+    b.clear();
+    juce::Random rng (tonic * 2 + (minor ? 1 : 0));
+    const double tune = std::pow (2.0, cents / 1200.0);
+    for (int ch = 0; ch < 4; ++ch)
+    {
+        const int s0 = (int) (ch * sr), s1 = (int) ((ch + 1) * sr);
+        for (int v = 0; v < 4; ++v)
+        {
+            const int note = v < 3 ? 60 + ((tonic + chords[ch][v]) % 12) : 36 + (tonic + chords[ch][0]) % 12;   // + bass
+            const double f = 440.0 * std::pow (2.0, (note - 69) / 12.0) * tune;
+            for (int i = s0; i < s1; ++i)
+            {
+                const double t = (i - s0) / sr;
+                double y = 0;
+                for (int h = 1; h <= 6; ++h) y += std::sin (6.283185307 * f * h * t) / h;
+                const float env = (float) (std::exp (-t * 1.5) * juce::jmin (1.0, t * 200.0));
+                const float g = v < 3 ? 0.08f : 0.12f;
+                b.addSample (0, i, (float) y * env * g);
+                b.addSample (1, i, (float) y * env * g);
+            }
+        }
+    }
+    if (drums)   // kick + noisy hats on every 8th
+        for (int i = 0; i < n; ++i)
+        {
+            const double t = std::fmod (i / sr, 0.25);
+            const float kick = (float) (std::sin (6.283 * 55.0 * t * (1.0 + 2.0 * std::exp (-t * 40.0))) * std::exp (-t * 12.0) * 0.4);
+            const float hat = (rng.nextFloat() * 2.0f - 1.0f) * (float) std::exp (-std::fmod (i / sr, 0.125) * 60.0) * 0.15f;
+            for (int c = 0; c < 2; ++c) b.addSample (c, i, kick + hat);
+        }
+    return AudioData::make (std::move (b), sr);
+}
+
+static void testKeyDetect()
+{
+    std::cout << "\n[key detection]\n";
+    int right = 0, rightNoisy = 0, rightDetuned = 0;
+    juce::StringArray misses;
+    for (int tonic = 0; tonic < 12; ++tonic)
+        for (bool minor : { false, true })
+        {
+            const key::Key expected { tonic, minor };
+            const auto k = key::detect (*makeProgression (tonic, minor, 44100.0));
+            if (k == expected) ++right; else misses.add (key::name (expected) + "->" + key::name (k));
+            if (key::detect (*makeProgression (tonic, minor, 48000.0, 0.0, true)) == expected) ++rightNoisy;
+            if (key::detect (*makeProgression (tonic, minor, 44100.0, 30.0)) == expected) ++rightDetuned;
+        }
+    CHECK (right == 24, "all 24 keys found (" + juce::String (right) + "/24) " + misses.joinIntoString (" "));
+    CHECK (rightNoisy >= 23, "with drums on top: " + juce::String (rightNoisy) + "/24");
+    CHECK (rightDetuned >= 23, "on a recording 30 cents sharp: " + juce::String (rightDetuned) + "/24");
+    const auto tuned = key::detect (*makeProgression (9, true, 44100.0, 30.0));
+    CHECK (std::abs (tuned.tuningCents - 30.0f) <= 6.0f, "and it measures the tuning (" + juce::String (tuned.tuningCents, 1) + " cents)");
+
+    CHECK (key::name ({ 9, true }) == "Am" && key::camelot ({ 9, true }) == "8A", "A minor = Am = 8A");
+    CHECK (key::name ({ 0, false }) == "C" && key::camelot ({ 0, false }) == "8B", "C major = 8B");
+    CHECK (key::camelot ({ 7, false }) == "9B" && key::camelot ({ 11, false }) == "1B" && key::camelot ({ 5, false }) == "7B", "Camelot wheel: G 9B, B 1B, F 7B");
+    CHECK (key::camelot ({ 4, true }) == "9A" && key::camelot ({ 2, true }) == "7A", "Em 9A, Dm 7A");
+    CHECK (key::semitonesTo ({ 9, true }, 11) == 2 && key::semitonesTo ({ 9, true }, 3) == -6 + 0 || key::semitonesTo ({ 9, true }, 3) == 6 - 12,
+           "A minor -> B minor is +2, -> D# is the nearest way round");
+    CHECK (key::name (key::Key { 9, true }.transposed (2)) == "Bm" && key::name (key::Key { 0, false }.transposed (-1)) == "B", "transposing keys");
+    CHECK (key::longName ({ 10, false }) == "B flat major", "long names (" + key::longName ({ 10, false }) + ")");
+}
+
+static AudioData::Ptr makeSine (double hz, double seconds, double sr = 44100.0, float amp = 0.5f)
+{
+    juce::AudioBuffer<float> b (2, (int) (sr * seconds));
+    for (int i = 0; i < b.getNumSamples(); ++i)
+        for (int c = 0; c < 2; ++c)
+            b.setSample (c, i, amp * (float) std::sin (6.283185307 * hz * i / sr));
+    return AudioData::make (std::move (b), sr);
+}
+
+static double rmsOf (const AudioData& a, int start = 0, int len = -1, int ch = 0)
+{
+    if (len < 0) len = a.getNumSamples() - start;
+    return a.buffer.getRMSLevel (ch, start, juce::jmax (1, len));
+}
+
+static int zeroCrossings (const AudioData& a, int start, int len)
+{
+    int z = 0;
+    for (int i = start + 1; i < start + len && i < a.getNumSamples(); ++i)
+        if ((a.buffer.getSample (0, i - 1) < 0) != (a.buffer.getSample (0, i) < 0)) ++z;
+    return z;
+}
+
+static void testPads()
+{
+    std::cout << "\n[per-pad controls]\n";
+    const double sr = 44100.0;
+    auto tone = makeSine (440.0, 1.0, sr);
+    const int s = 11025, e = 33075;   // a 0.5 s chop
+
+    auto plain = renderPad (*tone, s, e, {});
+    double maxDiff = 0;
+    for (int i = 2000; i < plain->getNumSamples() - 2000; ++i)
+        maxDiff = juce::jmax (maxDiff, (double) std::abs (plain->buffer.getSample (0, i) - tone->buffer.getSample (0, s + i)));
+    CHECK (std::abs (plain->getNumSamples() - (e - s)) <= 2 && maxDiff < 1.0e-4, "default pad plays the chop untouched (max diff " + juce::String (maxDiff, 6) + ")");
+
+    PadParams loud; loud.gainDb = 6.0f;
+    CHECK (std::abs (rmsOf (*renderPad (*tone, s, e, loud), 4000, 10000) / rmsOf (*plain, 4000, 10000) - 2.0) < 0.02, "GAIN +6 dB doubles it");
+
+    PadParams up; up.semitones = 12.0f;
+    auto high = renderPad (*tone, s, e, up);
+    CHECK (std::abs (high->getNumSamples() - (e - s) / 2) <= 3, "PITCH +12 plays twice as fast (sampler style)");
+    CHECK (std::abs (zeroCrossings (*high, 1000, 8000) - 2 * zeroCrossings (*plain, 1000, 8000)) <= 3, "... an octave higher");
+
+    PadParams rev; rev.reverse = true;
+    auto chirp = AudioData::make ([&] { juce::AudioBuffer<float> b (2, 44100); for (int i = 0; i < 44100; ++i) for (int c = 0; c < 2; ++c) b.setSample (c, i, (float) i / 44100.0f); return b; }(), sr);
+    auto back = renderPad (*chirp, 1000, 21000, rev);
+    CHECK (back->buffer.getSample (0, 5000) > back->buffer.getSample (0, 15000) && std::abs (back->buffer.getSample (0, 5000) - chirp->buffer.getSample (0, 21000 - 1 - 5000)) < 1.0e-3,
+           "REVERSE plays it backwards");
+
+    auto bright = makeSine (6000.0, 1.0, sr), deep = makeSine (80.0, 1.0, sr);
+    PadParams lp; lp.filter = -0.6f;
+    PadParams hp; hp.filter = 0.5f;
+    const double lpDrop = juce::Decibels::gainToDecibels (rmsOf (*renderPad (*bright, s, e, lp), 4000, 10000) / rmsOf (*renderPad (*bright, s, e, {}), 4000, 10000));
+    const double hpDrop = juce::Decibels::gainToDecibels (rmsOf (*renderPad (*deep, s, e, hp), 4000, 10000) / rmsOf (*renderPad (*deep, s, e, {}), 4000, 10000));
+    const double lpPass = juce::Decibels::gainToDecibels (rmsOf (*renderPad (*deep, s, e, lp), 4000, 10000) / rmsOf (*renderPad (*deep, s, e, {}), 4000, 10000));
+    CHECK (lpDrop < -20.0 && std::abs (lpPass) < 1.5, "FILTER low-pass (" + filterText (lp.filter) + ") cuts 6 kHz by " + juce::String (lpDrop, 1) + " dB, keeps 80 Hz");
+    CHECK (hpDrop < -15.0, "FILTER high-pass (" + filterText (hp.filter) + ") cuts 80 Hz by " + juce::String (hpDrop, 1) + " dB");
+    CHECK (filterText (0.0f) == "Off" && filterText (-1.0f).startsWith ("LP") && filterText (1.0f).startsWith ("HP"), "filter readout");
+
+    PadParams slow; slow.attackMs = 400.0f;
+    auto swell = renderPad (*tone, s, e, slow);
+    CHECK (rmsOf (*swell, 0, 2000) < 0.1 * rmsOf (*plain, 0, 2000) + 1e-4 && rmsOf (*swell, 17640, 2000) > 0.9 * rmsOf (*plain, 17640, 2000),
+           "ATTACK fades it in");
+    PadParams longRel; longRel.releaseMs = 150.0f;
+    auto faded = renderPad (*tone, s, e, longRel);
+    const int n = faded->getNumSamples();
+    CHECK (rmsOf (*faded, n - 2205, 2205) < 0.5 * rmsOf (*plain, n - 2205, 2205), "RELEASE fades the chop's end");
+
+    PadParams any; any.gainDb = -3.5f; any.semitones = 7.0f; any.reverse = true; any.attackMs = 12.0f; any.releaseMs = 300.0f; any.filter = -0.25f;
+    CHECK (PadParams::fromString (any.toString()) == any && PadParams::fromString ({}).isDefault(), "pad settings save and load");
+}
+
+static void testFx()
+{
+    std::cout << "\n[FX rack]\n";
+    const double sr = 44100.0;
+    auto tone = makeSine (220.0, 1.0, sr, 0.4f);
+
+    auto same = renderFx (*tone, {}, 120.0);
+    CHECK (same->getNumSamples() == tone->getNumSamples() && std::abs (rmsOf (*same) - rmsOf (*tone)) < 1e-6, "all off: untouched");
+
+    // an impulse through the delay: echoes land on the beat grid, ping-ponging left / right
+    juce::AudioBuffer<float> imp (2, (int) sr); imp.clear(); imp.setSample (0, 100, 1.0f); imp.setSample (1, 100, 1.0f);
+    auto click = AudioData::make (std::move (imp), sr);
+    FxSettings d; d.delayOn = true; d.division = 8; /* 1/4 */ d.feedback = 0.5f; d.delayMix = 0.5f;
+    auto echo = renderFx (*click, d, 120.0);
+    auto peakNear = [&] (int ch, double t) { return echo->buffer.getMagnitude (ch, (int) (100 + t * sr) - 300, 600); };
+    CHECK (peakNear (0, 0.5) > 0.2f && peakNear (1, 0.5) < 0.05f, "DELAY 1/4 at 120 BPM: first echo after 0.5 s, on the left");
+    CHECK (peakNear (1, 1.0) > 0.1f, "second echo 0.5 s later on the right (ping-pong)");
+    CHECK (echo->getNumSamples() > click->getNumSamples(), "the echoes ring out past the end (" + juce::String (echo->getNumSamples() / sr, 2) + " s)");
+    auto fast = renderFx (*click, d, 150.0);
+    CHECK (fast->buffer.getMagnitude (0, (int) (100 + 0.4 * sr) - 300, 600) > 0.2f, "...and follows the tempo (150 BPM -> 0.4 s)");
+
+    FxSettings rv; rv.reverbOn = true; rv.size = 0.8f; rv.reverbMix = 0.5f;
+    auto wet = renderFx (*click, rv, 120.0);
+    CHECK (wet->getNumSamples() > click->getNumSamples() && rmsOf (*wet, (int) (sr * 0.3), (int) (sr * 0.3)) > 1e-3, "REVERB leaves a tail");
+
+    FxSettings dr; dr.driveOn = true; dr.drive = 0.8f; dr.tone = 1.0f;
+    auto hot = renderFx (*tone, dr, 120.0);
+    // harmonics: energy at 3 x 220 Hz appears
+    auto energyAt = [sr] (const AudioData& a, double hz)
+    {
+        double re = 0, im = 0;
+        for (int i = 4410; i < 4410 + 22050; ++i) { const double w = 6.283185307 * hz * i / sr; re += a.buffer.getSample (0, i) * std::cos (w); im += a.buffer.getSample (0, i) * std::sin (w); }
+        return std::sqrt (re * re + im * im);
+    };
+    const double h3 = juce::Decibels::gainToDecibels (energyAt (*hot, 660.0) / energyAt (*hot, 220.0));
+    CHECK (h3 > -30.0 && energyAt (*tone, 660.0) / energyAt (*tone, 220.0) < 0.001, "DRIVE adds harmonics (3rd at " + juce::String (h3, 1) + " dB)");
+    const double lvl = juce::Decibels::gainToDecibels (rmsOf (*hot) / rmsOf (*tone));
+    CHECK (std::abs (lvl) < 8.0, "...without a big jump in level (" + juce::String (lvl, 1) + " dB)");
+
+    FxSettings lo; lo.lofiOn = true; lo.bits = 4.0f; lo.rateKHz = 44.0f; lo.vinyl = 0.0f;
+    auto crushed = renderFx (*tone, lo, 120.0);
+    std::set<int> steps;
+    for (int i = 0; i < 20000; ++i) steps.insert (juce::roundToInt (crushed->buffer.getSample (0, i) * 1000.0f));
+    CHECK (steps.size() < 40, "LO-FI 4 bits: only a handful of levels (" + juce::String ((int) steps.size()) + ")");
+    FxSettings vin; vin.lofiOn = true; vin.bits = 16.0f; vin.rateKHz = 44.0f; vin.vinyl = 1.0f;
+    juce::AudioBuffer<float> quiet (2, (int) sr); quiet.clear();
+    auto crackle = renderFx (*AudioData::make (std::move (quiet), sr), vin, 120.0);
+    CHECK (crackle->buffer.getMagnitude (0, 0, crackle->getNumSamples()) > 0.005f, "VINYL crackles and hisses over silence");
+
+    FxSettings all; all.lofiOn = all.driveOn = all.delayOn = all.reverbOn = true; all.division = 3; all.size = 0.33f;
+    CHECK (FxSettings::fromString (all.toString()) == all && ! FxSettings::fromString ({}).anyOn(), "FX settings save and load");
+
+    // real-time chain == offline render (same code): process in odd block sizes
+    FxChain rt; rt.prepare (sr);
+    juce::AudioBuffer<float> live (tone->buffer);
+    for (int st = 0, blk = 1; st < live.getNumSamples(); st += blk, blk = blk % 997 + 13)
+        rt.process (live.getWritePointer (0, st), live.getWritePointer (1, st), juce::jmin (blk, live.getNumSamples() - st), all, 120.0);
+    auto off = renderFx (*tone, all, 120.0);
+    double diff = 0;
+    for (int i = 0; i < live.getNumSamples(); ++i) diff = juce::jmax (diff, (double) std::abs (live.getSample (0, i) - off->buffer.getSample (0, i)));
+    CHECK (diff < 1.0e-4, "what you drag matches what you hear (block size doesn't matter, diff " + juce::String (diff, 6) + ")");
 }
 
 static void testStemParts()
@@ -1434,6 +1644,9 @@ int main (int argc, char** argv)
     testProcessor();
     testLinks();
     testVocalRemoval();
+    testKeyDetect();
+    testPads();
+    testFx();
     testStemParts();
     snag::StudioPageTester::run();
     testKnobTyping();
