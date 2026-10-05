@@ -438,6 +438,8 @@ MidiDeck::MidiDeck (EditorContext& c) : ctx (c), proc (c.getProcessor())
 MidiDeck::~MidiDeck()
 {
     *alive = false;
+    if (findJob != nullptr)
+        findJob->cancel();      // nobody is left to show the result
     if (heard != nullptr && proc.getPreviewSource() == heard.get())
         proc.stopPreview();
 }
@@ -464,13 +466,23 @@ void MidiDeck::setClip (Clip::Ptr c)
         clip = c;
         rangeStart = 0; rangeEnd = -1;
     }
+    dropStaleJob();
     renote();
+}
+
+void MidiDeck::dropStaleJob()
+{
+    // The sample, the selection or the audio changed while it was listening: that result would be
+    // thrown away, so stop now and free FIND NOTES instead of making the user wait for it.
+    if (analysing && findJob != nullptr && jobKey != rangeKey())
+        findJob->cancel();
 }
 
 void MidiDeck::setRange (int s, int e)
 {
     if (s == rangeStart && e == rangeEnd) return;
     rangeStart = s; rangeEnd = e;
+    dropStaleJob();
     renote();
 }
 
@@ -483,25 +495,29 @@ void MidiDeck::findNotes()
     progress->store (0.0f);
     renote();
     auto key = rangeKey();
+    jobKey = key;
+    auto analysed = clip->audio;
     auto result = std::make_shared<midi::Posteriors>();
     auto prog = progress;
     auto alv = alive;
     juce::Component::SafePointer<MidiDeck> safe (this);
-    proc.jobs.start ("Finding notes", [src, result, prog] (Job& job)
+    findJob = proc.jobs.start ("Finding notes", [src, result, prog] (Job& job)
     {
         job.setStatus ("Listening for notes");
         juce::String err;
         if (! midi::analyse (*src, *result, err, [&job, prog] (float p) { job.setProgress (p); prog->store (p); }, job.cancelCheck()))
             if (err != "Cancelled") job.fail (err);
     },
-    [safe, alv, result, key] (Job& job)
+    [safe, alv, result, key, analysed] (Job& job)
     {
         if (! *alv || safe == nullptr) return;
         safe->analysing = false;
+        safe->findJob = nullptr;
         if (job.hasFailed()) { safe->ctx.toast (job.getError(), true); safe->renote(); return; }
         if (job.isCancelled()) { safe->renote(); return; }
         safe->post = std::move (*result);
         safe->postKey = key;
+        safe->postAudio = analysed;
         safe->renote();
     });
 }
@@ -509,7 +525,7 @@ void MidiDeck::findNotes()
 void MidiDeck::renote()
 {
     const bool has = clip != nullptr && clip->audio != nullptr;
-    const bool current = has && post.frames > 0 && postKey == rangeKey();
+    const bool current = has && post.frames > 0 && postAudio == clip->audio && postKey == rangeKey();
     if (current)
     {
         midi::Options o;

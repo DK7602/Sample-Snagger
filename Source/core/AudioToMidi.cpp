@@ -52,6 +52,23 @@ bool analyse (const AudioData& audio, Posteriors& out, juce::String& error,
         const int ch = audio.getNumChannels();
         for (int c = 0; c < ch; ++c)
             m.addFrom (0, 0, audio.buffer, c, 0, audio.getNumSamples(), 1.0f / (float) ch);
+
+        // Out-of-phase stereo (one side inverted) cancels itself when the channels are added up.
+        // If the sum lost nearly everything, listen to the difference between the sides instead.
+        if (ch >= 2 && audio.getNumSamples() > 0)
+        {
+            const int n = audio.getNumSamples();
+            auto energy = [n] (const float* d) { double e = 0; for (int i = 0; i < n; ++i) e += (double) d[i] * d[i]; return e; };
+            double each = 0;
+            for (int c = 0; c < ch; ++c) each += energy (audio.buffer.getReadPointer (c));
+            each /= ch;
+            if (each > 0 && energy (m.getReadPointer (0)) < 0.05 * each)
+            {
+                m.clear();
+                m.addFrom (0, 0, audio.buffer, 0, 0, n, 0.5f);
+                m.addFrom (0, 0, audio.buffer, 1, 0, n, -0.5f);
+            }
+        }
         mono = AudioData::make (std::move (m), audio.sampleRate);
     }
     if (std::abs (audio.sampleRate - sampleRate) > 0.5)
@@ -237,11 +254,17 @@ std::vector<Note> notesFrom (const Posteriors& P, const Options& opt)
     }
 
     // "melodia trick": pick up notes the onsets missed, strongest first
-    for (;;)
+    // Cells are only ever cleared from here on, so going through them once, strongest first (the
+    // earliest of equals, as a search for the maximum would pick), visits them in the same order as
+    // searching the whole grid again for every note - which froze the window on long samples.
+    std::vector<juce::uint32> order;
+    for (size_t q = 0; q < remaining.size(); ++q)
+        if (remaining[q] > frameThresh) order.push_back ((juce::uint32) q);
+    std::stable_sort (order.begin(), order.end(), [&remaining] (juce::uint32 a, juce::uint32 b) { return remaining[a] > remaining[b]; });
+
+    for (const size_t best : order)
     {
-        size_t best = 0;
-        for (size_t q = 1; q < remaining.size(); ++q) if (remaining[q] > remaining[best]) best = q;
-        if (remaining[best] <= frameThresh) break;
+        if (remaining[best] <= frameThresh) continue;   // already part of a note
         const int iMid = (int) (best / nPitches), f = (int) (best % nPitches);
         remaining[best] = 0.0f;
         auto clear = [&] (int t) { at (remaining, t, f) = 0.0f; if (f < maxFreqIdx) at (remaining, t, f + 1) = 0.0f; if (f > 0) at (remaining, t, f - 1) = 0.0f; };
@@ -272,18 +295,39 @@ std::vector<Note> notesFrom (const Posteriors& P, const Options& opt)
     for (auto& r : raw)
         notes.push_back ({ juce::jmax (0.0, timeOf (r.start)), timeOf (r.end), r.pitch, juce::jlimit (0.05f, 1.0f, r.amp) });
 
-    if (opt.melodyOnly)
+    if (opt.melodyOnly && notes.size() > 1)
     {
-        // one note at a time: keep the strongest, drop what overlaps it
-        std::sort (notes.begin(), notes.end(), [] (const Note& a, const Note& b)
-                   { return a.velocity * (a.end - a.start) > b.velocity * (b.end - b.start); });
+        // One note at a time, the way a single voice or a mono synth plays: a new note ends the one
+        // before it. (Dropping every note that overlaps a stronger one loses real notes whenever a
+        // line is played legato, held, or has reverb on it - each note rings into the next.)
+        auto strength = [] (const Note& n) { return (double) n.velocity * (n.end - n.start); };
+        std::sort (notes.begin(), notes.end(), [&] (const Note& a, const Note& b)
+                   { return a.start < b.start || (a.start == b.start && strength (a) > strength (b)); });
+
+        constexpr double together = 0.05;    // starts this close count as the same moment
+        constexpr double slack = 0.03;       // an overlap this small is just trimmed
+        constexpr float  newNote = 0.6f;     // a note starting inside another takes over if it is at least this sure, relatively
         std::vector<Note> kept;
         for (auto& n : notes)
         {
-            bool clash = false;
-            for (auto& k : kept)
-                if (n.start < k.end - 0.02 && k.start < n.end - 0.02) { clash = true; break; }
-            if (! clash) kept.push_back (n);
+            if (kept.empty()) { kept.push_back (n); continue; }
+            auto& cur = kept.back();
+            if (n.start >= cur.end - slack)
+            {
+                cur.end = juce::jmin (cur.end, n.start);
+                kept.push_back (n);
+            }
+            else if (n.start - cur.start < together)
+            {
+                // struck together (a chord tone, an overtone, the tail of the note before): the strongest stays
+                if (strength (n) > strength (cur)) cur = n;
+            }
+            else if (n.velocity >= newNote * cur.velocity)
+            {
+                cur.end = n.start;
+                kept.push_back (n);
+            }
+            // else: a faint blip while a note sounds - left out
         }
         notes = kept;
     }

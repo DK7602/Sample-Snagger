@@ -2,6 +2,7 @@
 
 #include "Page.h"
 #include "../core/AudioToMidi.h"
+#include "../core/Jobs.h"
 #include <atomic>
 #include <memory>
 
@@ -145,6 +146,10 @@ private:
 
     midi::Posteriors post;
     juce::String postKey;           // which clip / range / edit the analysis belongs to
+    AudioData::Ptr postAudio;       // ...and the audio itself, kept so its address (part of the key) can't be reused by a later edit
+    Job::Ptr findJob;               // the analysis in progress
+    juce::String jobKey;            // what it is analysing
+    void dropStaleJob();
     std::vector<midi::Note> notes;
     bool analysing = false;
     std::shared_ptr<std::atomic<float>> progress = std::make_shared<std::atomic<float>> (0.0f);
