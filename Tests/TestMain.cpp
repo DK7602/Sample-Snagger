@@ -930,6 +930,56 @@ static void testAudioToMidi()
     auto top = midi::notesFrom (post, mono);
     CHECK (top.size() == 1, "MELODY mode keeps one note at a time (" + juce::String ((int) top.size()) + ")");
 
+    // a legato line: every note rings 120 ms into the next one. Melody only must keep them all, cut so none overlap
+    {
+        const int line[] = { 60, 62, 64, 65, 67, 65, 64, 62, 60, 64, 67, 72 };
+        juce::AudioBuffer<float> leg (2, (int) (sr * 7.0)); leg.clear();
+        for (int k = 0; k < 12; ++k) addNote (leg, sr, line[k], 0.3 + k * 0.5, 0.62);
+        auto legato = midi::transcribe (*AudioData::make (std::move (leg), sr), mono, err);
+        bool right = legato.size() == 12, apart = true;
+        for (size_t k = 0; right && k < 12; ++k)
+            right = legato[k].pitch == line[k] && std::abs (legato[k].start - (0.3 + (double) k * 0.5)) < 0.06;
+        for (size_t k = 1; k < legato.size(); ++k)
+            apart = apart && legato[k].start >= legato[k - 1].end - 1.0e-9;
+        CHECK (right && apart, "Melody only keeps every note of a legato line, one at a time (" + juce::String ((int) legato.size()) + " of 12)");
+    }
+
+    // out-of-phase stereo (one side inverted) must not cancel to silence
+    {
+        juce::AudioBuffer<float> anti (2, (int) (sr * 3.0)); anti.clear();
+        for (int k = 0; k < 5; ++k) addNote (anti, sr, melody[k], 0.2 + k * 0.5, 0.45);
+        anti.applyGain (1, 0, anti.getNumSamples(), -1.0f);
+        auto found = midi::transcribe (*AudioData::make (std::move (anti), sr), {}, err);
+        bool right = found.size() == 5;
+        for (size_t k = 0; right && k < 5; ++k) right = found[k].pitch == melody[k];
+        CHECK (right, "out-of-phase stereo still gives its notes (" + juce::String ((int) found.size()) + " of 5)");
+    }
+
+    // a 15-minute sample's worth of analysis must turn into notes fast: the knobs redo this as you turn them
+    {
+        midi::Posteriors big;
+        big.frames = 77500;
+        big.note.assign ((size_t) big.frames * 88, 0.0f);
+        big.onset.assign ((size_t) big.frames * 88, 0.0f);
+        juce::Random rnd (11);
+        int made = 0;
+        for (int t = 10; t + 60 < big.frames; t += 6 + rnd.nextInt (12), ++made)
+        {
+            const int f = 20 + rnd.nextInt (50), len = 15 + rnd.nextInt (40);
+            const float level = 0.35f + 0.6f * rnd.nextFloat();
+            const bool struck = rnd.nextInt (3) != 0;     // the rest swell in with no onset, and are left to the frame search
+            for (int k = 0; k < len; ++k)
+                big.note[(size_t) (t + k) * 88 + (size_t) f] = level * (1.0f - 0.3f * (float) k / (float) len) * (struck ? 1.0f : juce::jmin (1.0f, (float) (k + 1) / 10.0f));
+            if (struck) big.onset[(size_t) t * 88 + (size_t) f] = 0.8f;
+        }
+        midi::Options all; all.sensitivity = 1.0f; all.minNoteMs = 30.0f;
+        const auto t1 = juce::Time::getMillisecondCounterHiRes();
+        auto many = midi::notesFrom (big, all);
+        const double took = juce::Time::getMillisecondCounterHiRes() - t1;
+        CHECK ((int) many.size() > made / 2 && took < 1500.0,
+               "15 minutes of analysis becomes notes without freezing (" + juce::String ((int) many.size()) + " notes in " + juce::String (juce::roundToInt (took)) + " ms)");
+    }
+
     // MIDI file: tempo + notes land on the right ticks
     std::vector<midi::Note> twoBeats { { 0.0, 0.5, 60, 0.8f }, { 0.5, 1.0, 62, 0.5f } };
     auto mf = midi::toMidiFile (twoBeats, 120.0, "Test");
