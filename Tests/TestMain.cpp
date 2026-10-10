@@ -1460,6 +1460,13 @@ static void testManual()
     for (auto word : { "LIVE REC", "HQ SNAG", "AUTO CHOP", "COPY TO ALL PADS", "FIND NOTES", "SEPARATE", "DRAG MIX", "INSTALL ALL", "MATCH BPM" })
         CHECK (everything.contains (word), juce::String ("the manual covers ") + word);
 
+    // where a drag can land: a DAW refuses audio on Sample Snagger's own (instrument) track
+    CHECK (everything.contains ("only takes MIDI"), "the manual says why a sound will not drop on the Sample Snagger track");
+    CHECK (DragHandle::dropHint (juce::File::getCurrentWorkingDirectory().getChildFile ("kick.wav")).contains ("audio track"),
+           "dragging a sound says to drop it on an audio track");
+    CHECK (DragHandle::dropHint (juce::File::getCurrentWorkingDirectory().getChildFile ("notes.mid")).contains ("instrument track"),
+           "dragging MIDI says to drop it on a MIDI / instrument track");
+
     // in the plug-in: the ? button and F1 open it, the keys turn its pages, Esc closes it
     auto p = std::make_unique<SnaggerProcessor>();
     p->prepareToPlay (44100.0, 512);

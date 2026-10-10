@@ -35,7 +35,7 @@ From nothing to a chopped sample on a track, in about a minute:
 2. In **BROWSE**, find a video and press play. When you hear something you like, click **20s** under *Hindsight* to grab the last 20 seconds.
 3. The capture lands in the **Session tray** at the bottom. Double-click it to open it in **STUDIO**.
 4. Pick **8 chops** in the *Chop & Play* panel and click **AUTO CHOP**. The chops appear on the pads.
-5. Play the pads from your MIDI keyboard (chop 1 is on C3), or drag any pad onto a track in your DAW.
+5. Play the pads from your MIDI keyboard (chop 1 is on C3), or drag any pad onto an audio track in your DAW.
 
 > The first time, open Settings (the gear, top right) and click INSTALL ALL. That adds the helper tools for HQ SNAG, video files and AI stems. See "Install and first run".
 
@@ -90,7 +90,7 @@ Each card is one clip. The badge shows where it came from: LIVE, DOWNLOAD, IMPOR
 |---|---|
 | Click a card | Select it. STUDIO and STEMS work on the selected clip. |
 | Double-click a card | Open it in STUDIO. |
-| Drag a card | Drop it onto a track in your DAW, or onto your desktop. |
+| Drag a card | Drop it onto an audio track in your DAW, or onto your desktop. |
 | Right-click a card | Play, Open in Studio, Separate stems, Save to library, Rename, Duplicate, Remove. |
 | IMPORT | Add audio or video files. |
 | CLEAR | Remove every clip from this session. Your library is not touched. |
@@ -182,7 +182,7 @@ The readout next to the transport shows the selection's start, end and length.
 ### SAVE and DRAG TO DAW
 
 - **SAVE** writes the selection (or the whole sample if nothing is selected) as a WAV into your library.
-- **DRAG SELECTION TO DAW / DRAG SAMPLE TO DAW**: drag this button onto a track in your DAW, or onto your desktop or a sample folder.
+- **DRAG SELECTION TO DAW / DRAG SAMPLE TO DAW**: drag this button onto an audio track in your DAW, or onto your desktop or a sample folder.
 
 ## Studio: Sample tools
 
@@ -359,7 +359,7 @@ The library holds the samples you saved. It is a normal folder on your disk, so 
 |---|---|
 | Click a row | Audition the sample. |
 | Double-click a row | Load it into the Session tray. |
-| Drag a row | Drop it onto a track in your DAW. |
+| Drag a row | Drop it onto an audio track in your DAW. |
 | Right-click a row | Load into tray, Show in folder, or Move to trash. |
 | Type in the search box | Filter the list by name. |
 | CHANGE FOLDER | Use a different folder as your library. |
@@ -371,6 +371,10 @@ Things land in the library when you click SAVE in STUDIO, save a stem in STEMS, 
 ## Getting sounds into your DAW
 
 Almost everything in Sample Snagger can be dragged straight onto a track. You can also drop it on your desktop or in a sample folder to get a file.
+
+Sounds are audio files, so drop them on an **audio track**, or on the empty space below your tracks to get a new one. Only DRAG MIDI goes on a MIDI or instrument track.
+
+> Sample Snagger's own track is an instrument track, so your DAW only lets it hold MIDI. Drag a sound over it and the DAW shows a no-entry sign, or makes a new audio track for it. That is the DAW's rule, not a fault. In the plug-in, the first few drags remind you where to drop.
 
 | Drag this | You get |
 |---|---|
@@ -474,7 +478,8 @@ Some DAWs keep certain keys, such as Space, for themselves. Click inside Sample 
 - **Sample Snagger is not in the plug-in list.** Rescan plug-ins, and look under instruments, not effects.
 - **The pads make no sound from MIDI.** Put Sample Snagger on an instrument / MIDI track, chop the sample first, and play from C3 upward (MIDI note 60, which some DAWs call C4).
 - **Mac: the DAW refuses to load it.** Run the Terminal command in "Install and first run" once.
-- **A dragged sound will not drop.** Drop audio onto an audio track, and DRAG MIDI onto a MIDI or instrument track.
+- **A dragged sound will not drop on the Sample Snagger track.** That track only takes MIDI. Drop sounds onto an audio track, or onto the empty space below your tracks for a new one. Drop DRAG MIDI onto a MIDI or instrument track.
+- **Dropping a sound made a new track.** Your DAW does that when you drop audio on the track list or on empty space. To put it on a track you already have, drop it in that audio track's lane.
 
 ### Stems
 

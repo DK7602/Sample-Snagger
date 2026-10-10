@@ -58,7 +58,8 @@ Every capture lands in the **Session tray** at the bottom. Tray clips are saved 
   only the selection is chopped. Alt-click adds a marker by hand.
 - **MIDI pads:** chop 1 plays on C3, chop 2 on C#3, and so on. Play them from your MIDI keyboard or the on-screen pads.
   One-shot or gated. **KEYS mode** plays the sample chromatically instead.
-- **Drag to DAW:** drag the selection, the whole sample, or *any single pad* onto a track.
+- **Drag to DAW:** drag the selection, the whole sample, or *any single pad* onto an audio track
+  (Sample Snagger's own track is an instrument track, so it only takes MIDI).
 - **SAVE** writes a WAV into your sample library.
 - **Key detection:** the key and its Camelot code (e.g. *Am 8A*) show next to the BPM, found by itself when you
   open a sample (tuning-aware, so slightly-off vinyl rips still work). Click it to pick from the likeliest keys or
