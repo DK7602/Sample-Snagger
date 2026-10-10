@@ -133,6 +133,7 @@ namespace snag::theme
         juce::Path reload();
         juce::Path home();
         juce::Path gear();
+        juce::Path help();
         juce::Path drag();
         juce::Path download();
         juce::Path folder();

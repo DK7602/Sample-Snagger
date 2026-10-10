@@ -17,6 +17,11 @@ chop it, pitch it, split vocals from music, and drag the result straight onto a 
 | **AAX** (optional) | Pro Tools (see [BUILD.md](BUILD.md#pro-tools-aax)) |
 | **LV2** | Linux hosts |
 
+**New here? Read the [manual](docs/MANUAL.md).** It is also built into Sample Snagger: click the **?** button in the
+title bar (or press F1) for a quick start, every control explained, shortcuts and troubleshooting.
+
+![Manual](docs/screenshots/manual.png)
+
 ---
 
 ## What it does
@@ -145,7 +150,7 @@ Quick Split and everything in STUDIO work with no tools at all.
   then REC INPUT. (Some DAWs, such as Ableton and FL Studio, don't feed audio into instrument plug-ins - use the
   browser capture, IMPORT or the standalone app there.)
 - **Keyboard:** Space play/stop · Cmd/Ctrl+Z undo · Shift+Cmd/Ctrl+Z redo · Delete cuts the selection ·
-  Cmd/Ctrl+1-4 switch tabs · Cmd/Ctrl+scroll zooms the waveform · double-click a chop selects it.
+  Cmd/Ctrl+1-4 switch tabs · Cmd/Ctrl+scroll zooms the waveform · double-click a chop selects it · F1 opens the manual.
 
 ## Where things are stored
 | | Mac | Windows |

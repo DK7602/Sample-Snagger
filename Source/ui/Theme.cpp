@@ -671,6 +671,17 @@ namespace icons
         p.setUsingNonZeroWinding (false);
         return p;
     }
+    juce::Path help()
+    {
+        // a question mark: the hook, then the dot
+        juce::Path hook;
+        hook.startNewSubPath (0.29f, 0.30f);
+        hook.cubicTo (0.29f, 0.02f, 0.73f, 0.02f, 0.73f, 0.29f);
+        hook.cubicTo (0.73f, 0.47f, 0.51f, 0.44f, 0.51f, 0.66f);
+        auto p = strokedOf (hook, 0.13f);
+        p.addEllipse (0.43f, 0.80f, 0.16f, 0.16f);
+        return p;
+    }
     juce::Path drag()
     {
         juce::Path p;

@@ -9,6 +9,7 @@
 #include "ui/StemsPage.h"
 #include "ui/LibraryPage.h"
 #include "ui/SettingsPanel.h"
+#include "ui/ManualPanel.h"
 #include "ui/ClipTray.h"
 
 //==============================================================================
@@ -32,6 +33,7 @@ public:
     void toast (const juce::String& message, bool isError = false) override;
     void showTab (snag::Tab) override;
     void openSettings() override;
+    void openManual() override;
     void chooseAndImportFiles() override;
 
     // FileDragAndDropTarget
@@ -46,11 +48,13 @@ public:
     snag::StudioPage& getStudioPage()     { return studio; }
     snag::StemsPage& getStemsPage()       { return stems; }
     snag::SettingsPanel& getSettingsPanel() { return settingsPanel; }
+    snag::ManualPanel& getManualPanel()     { return manualPanel; }
 
 private:
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void layoutHeader (juce::Rectangle<int>);
+    bool overlayOpen() const { return settingsPanel.isVisible() || manualPanel.isVisible(); }
 
     SnaggerProcessor& processor;
     juce::SharedResourcePointer<snag::SnaggerLookAndFeel> lnf;
@@ -58,6 +62,7 @@ private:
     // header
     juce::OwnedArray<juce::TextButton> tabButtons;
     snag::IconButton gearBtn   { "settings", snag::theme::icons::gear(), {}, "chip" };
+    snag::IconButton helpBtn   { "manual", snag::theme::icons::help(), {}, "chip" };
     snag::IconButton cancelBtn { "cancel", snag::theme::icons::close(), {}, "icon" };
     snag::LevelMeter outMeter;
     juce::Rectangle<int> headerArea, headerPanel, hudArea, logoArea, tabsArea, hudGlass;
@@ -73,6 +78,7 @@ private:
     snag::LibraryPage library;
     snag::ClipTray    tray;
     snag::SettingsPanel settingsPanel;
+    snag::ManualPanel manualPanel;
     snag::ToastOverlay toasts;
     juce::TooltipWindow tooltips { this, 700 };
 
