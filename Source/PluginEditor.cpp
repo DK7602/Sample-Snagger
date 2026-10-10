@@ -14,7 +14,7 @@ static int openEditors = 0;   // message thread only
 //==============================================================================
 SnaggerEditor::SnaggerEditor (SnaggerProcessor& p)
     : AudioProcessorEditor (p), processor (p),
-      browse (*this), studio (*this), stems (*this), library (*this), tray (*this), settingsPanel (*this)
+      browse (*this), studio (*this), stems (*this), library (*this), tray (*this), settingsPanel (*this), manualPanel (*this)
 {
     setLookAndFeel (&lnf.get());
     juce::LookAndFeel::setDefaultLookAndFeel (&lnf.get());   // popups, alert windows
@@ -38,6 +38,10 @@ SnaggerEditor::SnaggerEditor (SnaggerProcessor& p)
     gearBtn.onClick = [this] { openSettings(); };
     addAndMakeVisible (gearBtn);
 
+    helpBtn.setTooltip ("Manual - how everything works (F1)");
+    helpBtn.onClick = [this] { openManual(); };
+    addAndMakeVisible (helpBtn);
+
     cancelBtn.setTooltip ("Cancel");
     cancelBtn.onClick = [this] { processor.jobs.cancelAll(); };
     addChildComponent (cancelBtn);
@@ -49,6 +53,7 @@ SnaggerEditor::SnaggerEditor (SnaggerProcessor& p)
     addChildComponent (library);
     addAndMakeVisible (tray);
     addChildComponent (settingsPanel);
+    addChildComponent (manualPanel);
     addAndMakeVisible (toasts);
 
     processor.onNotify = [safe = juce::Component::SafePointer<SnaggerEditor> (this)] (const juce::String& m, bool err)
@@ -93,11 +98,11 @@ SnaggerEditor::~SnaggerEditor()
 void SnaggerEditor::showTab (Tab t)
 {
     currentTab = t;
-    browse.setVisible (t == Tab::browse);
+    browse.setVisible (t == Tab::browse && ! overlayOpen());   // (it would draw over an open overlay)
     studio.setVisible (t == Tab::studio);
     stems.setVisible (t == Tab::stems);
     library.setVisible (t == Tab::library);
-    browse.pageVisibilityChanged (t == Tab::browse && ! settingsPanel.isVisible());
+    browse.pageVisibilityChanged (t == Tab::browse && ! overlayOpen());
 
     for (int i = 0; i < tabButtons.size(); ++i)
         tabButtons[i]->setToggleState (i == (int) t, juce::dontSendNotification);
@@ -111,10 +116,20 @@ void SnaggerEditor::showTab (Tab t)
 
 void SnaggerEditor::openSettings()
 {
+    manualPanel.close();
     settingsPanel.open();
     browse.setVisible (false);   // native web views always draw on top, so hide it under the overlay
     browse.pageVisibilityChanged (false);
     settingsPanel.toFront (false);
+    toasts.toFront (false);
+}
+
+void SnaggerEditor::openManual()
+{
+    settingsPanel.close();
+    manualPanel.open();
+    browse.setVisible (false);   // native web views always draw on top, so hide it under the overlay
+    browse.pageVisibilityChanged (false);
     toasts.toFront (false);
 }
 
@@ -175,11 +190,21 @@ bool SnaggerEditor::keyPressed (const juce::KeyPress& k)
             return true;
         }
 
-    if (k == juce::KeyPress::escapeKey && settingsPanel.isVisible())
+    if (k == juce::KeyPress::F1Key)
     {
-        settingsPanel.close();
+        if (manualPanel.isVisible()) manualPanel.close(); else openManual();
         return true;
     }
+
+    if (k == juce::KeyPress::escapeKey && overlayOpen())
+    {
+        settingsPanel.close();
+        manualPanel.close();
+        return true;
+    }
+
+    if (manualPanel.isVisible())
+        return manualPanel.keyPressed (k);   // reading: the keys turn pages, they don't play or edit
 
     if (currentTab == Tab::studio && studio.handleKey (k))
         return true;
@@ -198,8 +223,8 @@ void SnaggerEditor::timerCallback()
     outMeter.setLevel (processor.outputLevel.load());
     processor.outputLevel = processor.outputLevel.load() * 0.8f;
 
-    // restore the browser when the settings overlay closes
-    if (! settingsPanel.isVisible() && currentTab == Tab::browse && ! browse.isVisible())
+    // restore the browser when the settings / manual overlay closes
+    if (! overlayOpen() && currentTab == Tab::browse && ! browse.isVisible())
     {
         browse.setVisible (true);
         browse.pageVisibilityChanged (true);
@@ -232,6 +257,7 @@ void SnaggerEditor::resized()
         page->setBounds (r);
 
     settingsPanel.setBounds (getLocalBounds());
+    manualPanel.setBounds (getLocalBounds());
     toasts.setBounds (getLocalBounds().removeFromBottom (trayHeight + 130).removeFromRight (520));
 }
 
@@ -242,14 +268,18 @@ void SnaggerEditor::layoutHeader (juce::Rectangle<int> r)
     logoArea = r.removeFromLeft (300);
 
     gearBtn.setBounds (r.removeFromRight (40).withSizeKeepingCentre (38, 38));
-    r.removeFromRight (14);
+    r.removeFromRight (4);
+    helpBtn.setBounds (r.removeFromRight (38).withSizeKeepingCentre (38, 38));
+    r.removeFromRight (12);
 
     // status display: job HUD + output meter behind one glass window
     // the tabs get room for their full names first; the status display takes what's left
-    auto hudBox = r.removeFromRight (juce::jlimit (240, 438, r.getWidth() - 4 * 112 - 36));
+    // (in a narrow window it gives up the room the manual button needs, and its meter gets shorter)
+    auto hudBox = r.removeFromRight (juce::jlimit (200, 438, r.getWidth() - 4 * 112 - 36));
     hudGlass = hudBox.withSizeKeepingCentre (hudBox.getWidth(), 42);
     auto inner = hudBox.reduced (12, 0);
-    outMeter.setBounds (inner.removeFromRight (64).withSizeKeepingCentre (64, 5));
+    const int meterW = hudBox.getWidth() < 240 ? 40 : 64;
+    outMeter.setBounds (inner.removeFromRight (meterW).withSizeKeepingCentre (meterW, 5));
     inner.removeFromRight (12);
     hudArea = inner.withSizeKeepingCentre (inner.getWidth(), 42);
     cancelBtn.setBounds (hudArea.withLeft (hudArea.getRight() - 26).withSizeKeepingCentre (22, 22));

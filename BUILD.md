@@ -66,6 +66,14 @@ SnaggerTests --network          + downloads the helper tools and runs a real HQ 
 SnaggerTests --shots <dir>      + renders every screen to PNG
 ```
 
+## The manual
+The manual is one file, `docs/MANUAL.md`. It reads as a normal page on GitHub and is also compiled into the plug-in,
+where the **?** button (or F1) shows it. To change the manual, edit that file and rebuild.
+
+The built-in view understands a small part of Markdown: `## ` starts a chapter, `### ` a heading, then paragraphs,
+`- ` bullets, `1. ` steps, `> ` notes, two-column tables, `**bold**`, `*emphasis*` and `` `code` ``. Pictures are
+only shown on GitHub. The test runner checks that no stray markup is left over.
+
 ## Code map
 ```
 Source/
@@ -86,6 +94,7 @@ Source/
     AudioFileIO.*      loading any audio/video (FFmpeg fallback), WAV export
   ai/DemucsBridge.*    runs demucs.cpp (Demucs v4 in C++/Eigen) in parallel chunks; the only code that sees Eigen
   ui/                  Theme (gold plate, black glass, satin controls, fonts, icons), pages, waveform, tray, settings
+  ui/ManualPanel.*     the built-in manual (the ? button / F1): shows docs/MANUAL.md, which is compiled in
 Resources/
   Scripts/webtap.js     injected into web pages to tap <video>/<audio> audio
   Scripts/snagger_ai.py  optional Python AI engine (GPU): installs Demucs in a private venv

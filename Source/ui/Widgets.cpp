@@ -1,4 +1,6 @@
 #include "Widgets.h"
+#include "Page.h"
+#include "../PluginProcessor.h"
 #include <limits>
 
 namespace snag
@@ -246,7 +248,7 @@ void LevelMeter::paint (juce::Graphics& g)
 DragHandle::DragHandle (const juce::String& c) : caption (c)
 {
     setMouseCursor (juce::MouseCursor::DraggingHandCursor);
-    setTooltip ("Drag onto a track in your DAW, or onto your desktop / sample folder");
+    setTooltip ("Drag onto an audio track in your DAW (not Sample Snagger's own track - that one takes MIDI), or onto your desktop / sample folder");
 }
 
 void DragHandle::paint (juce::Graphics& g)
@@ -287,10 +289,34 @@ void DragHandle::paint (juce::Graphics& g)
 void DragHandle::mouseDown (const juce::MouseEvent&) { pressed = true; }
 void DragHandle::mouseUp (const juce::MouseEvent&)   { pressed = false; dragging = false; repaint(); }
 
+juce::String DragHandle::dropHint (const juce::File& file)
+{
+    return file.hasFileExtension ("mid;midi")
+               ? "Drop it on Sample Snagger's own track, or any MIDI / instrument track."
+               : "Drop it on an audio track. The Sample Snagger track only takes MIDI.";
+}
+
+// A DAW only takes audio on audio tracks: over Sample Snagger's own (instrument) track it shows
+// a no-entry sign, which looks like a bug. So the first few drags of each kind say where to drop.
+static void showDropHint (juce::Component& source, const juce::File& file)
+{
+    auto* ctx = source.findParentComponentOfClass<EditorContext>();
+    if (ctx == nullptr || ctx->getProcessor().wrapperType == juce::AudioProcessor::wrapperType_Standalone)
+        return;
+
+    static int audioHints = 0, midiHints = 0;      // message thread only
+    auto& shown = file.hasFileExtension ("mid;midi") ? midiHints : audioHints;
+    if (shown >= 3)
+        return;
+    ++shown;
+    ctx->toast (DragHandle::dropHint (file));
+}
+
 bool DragHandle::startExternalDrag (juce::Component& source, const juce::File& file)
 {
     if (! file.existsAsFile())
         return false;
+    showDropHint (source, file);
     return juce::DragAndDropContainer::performExternalDragDropOfFiles ({ file.getFullPathName() }, false, &source);
 }
 

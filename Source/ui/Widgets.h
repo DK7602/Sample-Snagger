@@ -110,6 +110,9 @@ public:
     /** Starts an OS drag of a file; returns false if not possible. */
     static bool startExternalDrag (juce::Component& source, const juce::File& file);
 
+    /** Where a dragged file can land in a DAW: audio on an audio track, MIDI on a MIDI / instrument track. */
+    static juce::String dropHint (const juce::File& file);
+
 private:
     juce::String caption;
     bool dragging = false, pressed = false;

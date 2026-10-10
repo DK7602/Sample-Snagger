@@ -1412,6 +1412,84 @@ static void testBuiltinAi()
 
 //==============================================================================
 //==============================================================================
+static void testManual()
+{
+    std::cout << "\n[manual]\n";
+
+    // the parser, on a small page with one of everything
+    auto page = manual::parse ("# Title\n\nIntro that is not shown.\n\n## One\n\nA paragraph\nover two lines with **bold** and `code`.\n\n"
+                               "![Picture](screenshots/x.png)\n\n### Heading\n\n- first\n- second\n\n1. step one\n2. step two\n\n"
+                               "> A note with `sudo a-very-long-command --that --someone --would --want --to --copy`\n\n"
+                               "| Key | What |\n|---|---|\n| Space | Play |\n\n## Two\n\nDone.\n");
+    CHECK (page.size() == 2 && page[0].title == "One" && page[1].title == "Two", "chapters start at each ## heading");
+    using Type = manual::Block::Type;
+    std::vector<Type> types;
+    if (! page.empty())
+        for (auto& b : page[0].blocks) types.push_back (b.type);
+    CHECK ((types == std::vector<Type> { Type::paragraph, Type::heading, Type::bullet, Type::bullet, Type::step, Type::step,
+                                         Type::note, Type::tableHead, Type::tableRow }),
+           "paragraphs, headings, lists, notes and tables are told apart (pictures are left out)");
+    if (types.size() == 9)
+    {
+        auto& b = page[0].blocks;
+        CHECK (b[0].text == "A paragraph over two lines with **bold** and `code`.", "wrapped lines join into one paragraph");
+        CHECK (manual::plain (b[0].text) == "A paragraph over two lines with bold and code.", "the markup is not shown");
+        CHECK (b[5].number == 2 && b[5].text == "step two", "steps keep their numbers");
+        CHECK (b[6].copyText.startsWith ("sudo a-very-long-command"), "a long command in a note can be copied");
+        CHECK (b[8].text == "Space" && b[8].text2 == "Play", "table rows have two cells");
+    }
+
+    // the real manual
+    auto& all = manual::chapters();
+    CHECK (all.size() >= 12, juce::String ("the built-in manual has its chapters (") + juce::String ((int) all.size()) + ")");
+    bool allFilled = true, clean = true;
+    juce::String everything;
+    for (auto& c : all)
+    {
+        allFilled = allFilled && c.title.isNotEmpty() && c.blocks.size() >= 2;
+        for (auto& b : c.blocks)
+        {
+            const auto text = manual::plain (b.text) + " " + manual::plain (b.text2);
+            clean = clean && ! text.containsAnyOf ("*`|") && ! text.contains ("](") && ! b.text.startsWith ("#");
+            clean = clean && (b.text.retainCharacters ("`").length() % 2 == 0);
+            everything << text << "\n";
+        }
+    }
+    CHECK (allFilled, "every chapter has a title and something in it");
+    CHECK (clean, "no stray markup is left in the manual's text");
+    for (auto word : { "LIVE REC", "HQ SNAG", "AUTO CHOP", "COPY TO ALL PADS", "FIND NOTES", "SEPARATE", "DRAG MIX", "INSTALL ALL", "MATCH BPM" })
+        CHECK (everything.contains (word), juce::String ("the manual covers ") + word);
+
+    // where a drag can land: a DAW refuses audio on Sample Snagger's own (instrument) track
+    CHECK (everything.contains ("only takes MIDI"), "the manual says why a sound will not drop on the Sample Snagger track");
+    CHECK (DragHandle::dropHint (juce::File::getCurrentWorkingDirectory().getChildFile ("kick.wav")).contains ("audio track"),
+           "dragging a sound says to drop it on an audio track");
+    CHECK (DragHandle::dropHint (juce::File::getCurrentWorkingDirectory().getChildFile ("notes.mid")).contains ("instrument track"),
+           "dragging MIDI says to drop it on a MIDI / instrument track");
+
+    // in the plug-in: the ? button and F1 open it, the keys turn its pages, Esc closes it
+    auto p = std::make_unique<SnaggerProcessor>();
+    p->prepareToPlay (44100.0, 512);
+    auto ed = std::unique_ptr<SnaggerEditor> (dynamic_cast<SnaggerEditor*> (p->createEditor()));
+    ed->setSize (1280, 820);
+    auto& panel = ed->getManualPanel();
+    CHECK (! panel.isVisible(), "the manual starts closed");
+    ed->keyPressed (juce::KeyPress (juce::KeyPress::F1Key));
+    CHECK (panel.isVisible() && panel.getChapter() == 0, "F1 opens the manual at the first chapter");
+    ed->keyPressed (juce::KeyPress (juce::KeyPress::rightKey));
+    CHECK (panel.getChapter() == 1, "the right arrow turns to the next chapter");
+    panel.showChapter (1000);
+    CHECK (panel.getChapter() == panel.getNumChapters() - 1, "the last chapter is the end");
+    ed->openSettings();
+    CHECK (! panel.isVisible() && ed->getSettingsPanel().isVisible(), "opening Settings closes the manual");
+    ed->openManual();
+    CHECK (panel.isVisible() && ! ed->getSettingsPanel().isVisible(), "opening the manual closes Settings");
+    CHECK (panel.getChapter() == panel.getNumChapters() - 1, "the manual reopens where you left it");
+    ed->keyPressed (juce::KeyPress (juce::KeyPress::escapeKey));
+    CHECK (! panel.isVisible(), "Esc closes the manual");
+    ed->getSettingsPanel().close();
+}
+
 static void testKnobTyping()
 {
     std::cout << "\n[knobs - double-click the number to type a value]\n";
@@ -1986,6 +2064,12 @@ static void renderScreens (const juce::File& dir)
     savePng (*ed, dir.getChildFile ("5-settings.png"));
     ed->getSettingsPanel().close();
 
+    ed->openManual();
+    ed->getManualPanel().showChapter (1);
+    pump (200);
+    savePng (*ed, dir.getChildFile ("5b-manual.png"));
+    ed->getManualPanel().close();
+
     ed->showTab (Tab::studio);
     ed->toast ("Snagged in HQ: Late Night Soul Loop");
     pump (150);
@@ -1996,6 +2080,14 @@ static void renderScreens (const juce::File& dir)
     ed->showTab (Tab::browse);
     pump (150);
     savePng (*ed, dir.getChildFile ("7-browse-min-size.png"));
+
+    // ... and the manual's chapter list
+    ed->openManual();
+    ed->getManualPanel().showChapter (2);
+    pump (150);
+    savePng (*ed, dir.getChildFile ("7b-manual-min-size.png"));
+    ed->getManualPanel().showChapter (0);
+    ed->getManualPanel().close();
     ed->showTab (Tab::studio);
     for (int d = 0; d < 4; ++d)
     {
@@ -2057,6 +2149,7 @@ int main (int argc, char** argv)
     testStemParts();
     snag::StudioPageTester::run();
     testKnobTyping();
+    testManual();
     testClawAnimation();
     testSamplerSound();
     StudioDecksTester::run();

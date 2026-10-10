@@ -49,7 +49,7 @@ void SlicePads::paint (juce::Graphics& g)
         glassWindow (g, r, 7.0f, 0.6f);
         g.setColour (col::textDim);
         g.setFont (ui (12.0f));
-        g.drawText (chopsMode ? "Chop the sample (AUTO CHOP or EQUAL) to get MIDI pads - pads start at " + noteName (root) + ". Drag any pad into your DAW."
+        g.drawText (chopsMode ? "Chop the sample (AUTO CHOP or EQUAL) to get MIDI pads - pads start at " + noteName (root) + ". Drag any pad onto an audio track in your DAW."
                               : "KEYS mode: play the sample (or selection) chromatically from your MIDI keyboard - " + noteName (root) + " = original pitch.",
                     r.reduced (14.0f, 0.0f), juce::Justification::centredLeft);
         return;

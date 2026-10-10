@@ -12,7 +12,7 @@ class ClipCard : public juce::Component, public juce::SettableTooltipClient
 public:
     ClipCard (ClipTray& o, Clip::Ptr c) : owner (o), clip (c)
     {
-        setTooltip (clip->name + "\nClick: select - Double-click: edit - Drag: into your DAW - Right-click: more");
+        setTooltip (clip->name + "\nClick: select - Double-click: edit - Drag: onto an audio track in your DAW - Right-click: more");
         setMouseCursor (juce::MouseCursor::PointingHandCursor);
         setRepaintsOnMouseActivity (true);
     }
