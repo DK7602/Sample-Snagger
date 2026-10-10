@@ -139,7 +139,8 @@ juce_add_binary_data(SnaggerBinaryData
         Resources/gold_smooth.jpg
         Resources/glitter_text.jpg
         Resources/Models/basic_pitch_nmp.onnx
-        Resources/THIRD_PARTY_NOTICES.txt)
+        Resources/THIRD_PARTY_NOTICES.txt
+        docs/MANUAL.md)
 
 set(SNAGGER_SOURCES
     Source/PluginProcessor.cpp
@@ -171,6 +172,7 @@ set(SNAGGER_SOURCES
     Source/ui/SeparationAnimation.cpp
     Source/ui/LibraryPage.cpp
     Source/ui/SettingsPanel.cpp
+    Source/ui/ManualPanel.cpp
     Source/ui/ClipTray.cpp)
 
 # Everything that the plug-in and the test runner share
@@ -197,7 +199,8 @@ set(SNAGGER_DEFS
     JUCE_VST3_CAN_REPLACE_VST2=0
     JUCE_DISPLAY_SPLASH_SCREEN=0
     JUCE_REPORT_APP_USAGE=0
-    JUCE_STRICT_REFCOUNTEDPOINTER=1)
+    JUCE_STRICT_REFCOUNTEDPOINTER=1
+    SNAGGER_VERSION="${PROJECT_VERSION}")
 
 if(WIN32 AND SNAGGER_WEB_BROWSER)
     list(APPEND SNAGGER_DEFS JUCE_USE_WIN_WEBVIEW2_WITH_STATIC_LINKING=1)

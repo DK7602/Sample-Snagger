@@ -17,6 +17,7 @@ struct EditorContext
     virtual void toast (const juce::String& message, bool isError = false) = 0;
     virtual void showTab (Tab) = 0;
     virtual void openSettings() = 0;
+    virtual void openManual() = 0;
     virtual void chooseAndImportFiles() = 0;
 };
 
