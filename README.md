@@ -147,6 +147,9 @@ publish with it. A download that doesn't match is thrown away and whatever was i
 - **YouTube asks you to sign in / age-restricted videos:** Settings -> *Use cookies from* -> pick the browser
   you're logged into. Or just use LIVE REC / hindsight.
 - **HQ SNAG fails on YouTube after a while:** click **UPDATE** next to yt-dlp - sites change often and yt-dlp keeps up.
+- **A player embedded from another site (a YouTube video inside a blog post):** on Windows 11 LIVE REC hears it like
+  everything else. On macOS, Linux and Windows 10 it can't: open the video's own page (its title or logo usually links
+  there) and record it there. Players that a site embeds from itself are heard everywhere.
 - **Record system audio from other apps (Spotify, a game...):** use the standalone app, choose a loopback
   input in Audio Settings (BlackHole on Mac, "Stereo Mix" or VB-Cable on Windows) and press REC INPUT.
 - **Recording inside a DAW:** enable Sample Snagger's side-chain / audio input in your DAW and route a track into it,

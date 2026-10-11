@@ -1,5 +1,6 @@
 <!doctype html><html><body>
 <button id="wa">webaudio</button><button id="det">detached</button><button id="mes">mes</button><button id="dom">dom</button><button id="xo">xo</button><button id="feed">feed</button>
+<button id="frame">frame</button><button id="framewa">framewa</button><button id="xframe">xframe</button><button id="busy">busy</button>
 <audio id="domaudio" loop></audio>
 <script>
 // a short WAV generated in page (sine 440) so media elements have same-origin data: audio
@@ -23,4 +24,12 @@ document.getElementById('feed').onclick=async()=>{ // an endless feed: clips com
     await new Promise(r=>setTimeout(r,15)); a.pause(); a.remove(); }
   window.feedDone=true; };
 document.getElementById('dom').onclick=()=>{ const d=document.getElementById('domaudio'); d.src=wavDataUrl(550,5); d.play(); };
+// players inside frames: one of this site (an element, or Web Audio), and one of another site
+function addFrame(src){ const f=document.createElement('iframe'); f.allow='autoplay'; f.src=src; document.body.appendChild(f); }
+document.getElementById('frame').onclick=()=>addFrame('/frame.html?el');
+document.getElementById('framewa').onclick=()=>addFrame('/frame.html?wa');
+document.getElementById('xframe').onclick=()=>addFrame(location.protocol+'//127.0.0.1:'+(+location.port+1)+'/frame.html?el');
+// a page that keeps its own thread busy (a heavy player, scrolling, loading) while it plays
+document.getElementById('busy').onclick=()=>{ const d=document.getElementById('domaudio'); d.src=wavDataUrl(550,8); d.play();
+  setInterval(()=>{ const t=performance.now(); while(performance.now()-t<150){} }, 300); };
 </script></body></html>
