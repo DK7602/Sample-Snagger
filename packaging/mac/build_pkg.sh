@@ -22,9 +22,25 @@ cp -R "$ART/AU/Sample Snagger.component"   "$WORK/au/"
 cp -R "$ART/VST3/Sample Snagger.vst3"      "$WORK/vst3/"
 cp -R "$ART/Standalone/Sample Snagger.app" "$WORK/app/"
 
-pkgbuild --root "$WORK/au"   --install-location "/Library/Audio/Plug-Ins/Components" --identifier "$ID.au"   --version "$VERSION" "$WORK/au.pkg"
-pkgbuild --root "$WORK/vst3" --install-location "/Library/Audio/Plug-Ins/VST3"       --identifier "$ID.vst3" --version "$VERSION" "$WORK/vst3.pkg"
-pkgbuild --root "$WORK/app"  --install-location "/Applications"                      --identifier "$ID.app"  --version "$VERSION" "$WORK/app.pkg"
+# By default the Installer treats a bundle as "relocatable": if it finds another copy of it anywhere
+# on the Mac (the bundles .zip unpacked in Downloads, an old build folder), it updates *that* copy
+# and puts nothing in /Applications or /Library/Audio/Plug-Ins - the install "works" but the DAW
+# never sees the plug-in. This pins every bundle to its install location.
+pin_bundles() {   # <root dir> <plist to write>
+    pkgbuild --analyze --root "$1" "$2" > /dev/null
+    local i=0
+    while /usr/libexec/PlistBuddy -c "Print :$i:RootRelativeBundlePath" "$2" > /dev/null 2>&1; do
+        /usr/libexec/PlistBuddy -c "Set :$i:BundleIsRelocatable false" "$2"
+        i=$((i + 1))
+    done
+}
+pin_bundles "$WORK/au"   "$WORK/au.plist"
+pin_bundles "$WORK/vst3" "$WORK/vst3.plist"
+pin_bundles "$WORK/app"  "$WORK/app.plist"
+
+pkgbuild --root "$WORK/au"   --component-plist "$WORK/au.plist"   --install-location "/Library/Audio/Plug-Ins/Components" --identifier "$ID.au"   --version "$VERSION" "$WORK/au.pkg"
+pkgbuild --root "$WORK/vst3" --component-plist "$WORK/vst3.plist" --install-location "/Library/Audio/Plug-Ins/VST3"       --identifier "$ID.vst3" --version "$VERSION" "$WORK/vst3.pkg"
+pkgbuild --root "$WORK/app"  --component-plist "$WORK/app.plist"  --install-location "/Applications"                      --identifier "$ID.app"  --version "$VERSION" "$WORK/app.pkg"
 
 cat > "$WORK/distribution.xml" <<EOF
 <?xml version="1.0" encoding="utf-8"?>

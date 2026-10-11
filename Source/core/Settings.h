@@ -12,8 +12,8 @@ namespace paths
     juce::File appDataDir();
     juce::File toolsDir();
     juce::File sessionsDir();
-    juce::File tempDir();          // downloads, conversions, drag exports
-    juce::File dragExportDir();
+    juce::File tempDir();          // downloads, conversions
+    juce::File dragExportDir();    // Documents/Sample Snagger/Dragged to DAW: files DAW projects keep using
     juce::File webDataDir();
     juce::File defaultLibraryDir(); // ~/Documents/Sample Snagger/Samples
 

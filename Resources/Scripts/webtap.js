@@ -207,9 +207,24 @@
       return n;
     },
 
+    // Media the page has thrown away (the last track, an ad, a feed that scrolled on) is let go:
+    // its tap would otherwise stay connected for as long as the page lives.
+    prune: function (els) {
+      var i, el;
+      for (i = S.taps.length - 1; i >= 0; i--) {
+        el = S.taps[i].el;
+        if (els.indexOf(el) < 0 && (el.paused || el.ended)) S.detach(el);
+      }
+      for (i = S.blocked.length - 1; i >= 0; i--) {
+        el = S.blocked[i];
+        if (els.indexOf(el) < 0 && (el.paused || el.ended)) S.blocked.splice(i, 1);
+      }
+    },
+
     scan: function () {
       if (!S.armed) return 0;
       var els = S.mediaElements();
+      S.prune(els);
       for (var i = 0; i < els.length; i++) S.attach(els[i]);
       for (var j = 0; j < S.pageTaps.length; j++) S.hookPageTap(S.pageTaps[j]);
       return S.activeTaps();

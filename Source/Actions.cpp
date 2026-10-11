@@ -393,7 +393,8 @@ static std::vector<std::pair<juce::String, AudioData::Ptr>> chooseParts (const s
     auto find = [&raw] (const juce::String& name) -> AudioData::Ptr
     {
         for (auto& r : raw)
-            if (r.first == name || (name == "music" && (r.first == "no_vocals" || r.first == "instrumental")))
+            if (r.first == name || (name == "music" && (r.first == "no_vocals" || r.first == "instrumental"))
+                || (name == "other" && r.first == "melodic"))   // Quick Split's name for it on a mono sample
                 return r.second;
         return nullptr;
     };
@@ -416,6 +417,14 @@ static std::vector<std::pair<juce::String, AudioData::Ptr>> chooseParts (const s
                 if (! rest.empty())
                     others = edit::mix (rest, std::vector<float> (rest.size(), 1.0f));
                 a = edit::musicWithoutVocals (input, *v, others.get());
+            }
+            else if (! raw.empty())
+            {
+                // no vocal stem at all (Quick Split on a mono sample): the music is everything there is
+                std::vector<AudioData::Ptr> all;
+                for (auto& r : raw)
+                    all.push_back (r.second);
+                a = edit::mix (all, std::vector<float> (all.size(), 1.0f));
             }
         }
         if (a != nullptr)
@@ -442,7 +451,16 @@ void separate (SnaggerProcessor& p, Clip::Ptr clip, Engine engine, const juce::S
     auto clipId = clip->id;
     auto baseName = clip->name;
 
-    auto finish = [&p, clipId] (Job& job)
+    // One split per sample at a time: a second click on SEPARATE used to start the whole thing again
+    // next to the first (twice the memory, and on first use two downloads writing the same model file).
+    for (auto& running : p.jobs.getActiveJobs())
+        if (running->subject == clipId)
+        {
+            notify (p, "This sample is already being separated. Wait for it, or cancel it first (the x next to the progress bar).");
+            return;
+        }
+
+    auto finish = [&p, clipId, audio] (Job& job)
     {
         if (job.isCancelled()) return;
         if (job.hasFailed()) { notify (p, job.getError(), true); return; }
@@ -450,13 +468,30 @@ void separate (SnaggerProcessor& p, Clip::Ptr clip, Engine engine, const juce::S
         auto parent = p.session.findById (clipId);
         if (parent == nullptr) return;
 
+        if (job.clips.empty())
+        {
+            // (and whatever stems were there before stay)
+            notify (p, "Nothing came out of that split" + (job.text.isNotEmpty() ? " - " + job.text : juce::String()) + ".", true);
+            return;
+        }
+        if (parent->audio != audio)
+        {
+            notify (p, "The sample was changed while it was being separated, so these stems wouldn't line up with it. Hit SEPARATE again.", true);
+            return;
+        }
+
+        // Stay where the user is now: a long split shouldn't yank them back out of another sample.
+        const auto selected = p.session.getSelected();
+        const bool stillOnIt = selected == nullptr || selected == parent || selected->parentId == clipId;
+
         // replace any previous stems of this clip
         for (auto& old : p.session.getStemsOf (*parent))
             p.session.remove (old.get());
 
         for (auto& s : job.clips)
             p.session.add (s, false);
-        p.session.select (parent.get());
+        if (stillOnIt)
+            p.session.select (parent.get());
 
         notify (p, juce::String ((int) job.clips.size()) + " stems ready" + (job.text.isNotEmpty() ? " - " + job.text : juce::String()));
     };
@@ -678,7 +713,8 @@ void pitchTime (SnaggerProcessor& p, Clip::Ptr clip, float semitones, double len
 double exportBpm (SnaggerProcessor& p, const Clip& clip)
 {
     if (p.hostBpm.load() > 0) return p.hostBpm.load();
-    return clip.bpm > 0 ? clip.bpm : 120.0;
+    const double heard = clip.heardBpm();   // (a stretched sample plays at another tempo than its original)
+    return heard > 0 ? heard : 120.0;
 }
 
 AudioData::Ptr renderForExport (SnaggerProcessor& p, const Clip& clip, int start, int end)
@@ -713,8 +749,18 @@ juce::File makePadDragFile (SnaggerProcessor& p, const Clip& clip, int padIndex)
 
 juce::File makeMidiFile (SnaggerProcessor& p, const Clip& clip, const std::vector<midi::Note>& notes, const juce::File& dirIn)
 {
-    auto dir = dirIn == juce::File() ? paths::dragExportDir() : dirIn;
-    auto f = audioio::uniqueFile (dir, clip.name + " - notes", ".mid");
+    if (dirIn == juce::File())
+    {
+        // for a drag: like the WAVs, the same notes dragged again reuse the file that's there
+        auto dir = paths::dragExportDir();
+        auto tmp = dir.getChildFile ("drag-" + juce::String::toHexString (juce::Random::getSystemRandom().nextInt64()) + ".tmp");
+        if (midi::writeMidiFile (notes, exportBpm (p, clip), clip.name, tmp))
+            return audioio::placeOrReuse (tmp, dir, clip.name + " - notes", ".mid");
+        tmp.deleteFile();
+        return {};
+    }
+
+    auto f = audioio::uniqueFile (dirIn, clip.name + " - notes", ".mid");
     if (midi::writeMidiFile (notes, exportBpm (p, clip), clip.name, f))
         return f;
     return {};

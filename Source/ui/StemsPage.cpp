@@ -353,8 +353,14 @@ StemsPage::StemsPage (EditorContext& c) : ctx (c), proc (c.getProcessor())
     {
         std::vector<AudioData::Ptr> layers;
         std::vector<float> gains;
-        for (auto* l : lanes) { layers.push_back (l->clip->audio); gains.push_back (l->isAudible() ? 1.0f : 0.0f); }
+        bool anyAudible = false;
+        for (auto* l : lanes) { layers.push_back (l->clip->audio); gains.push_back (l->isAudible() ? 1.0f : 0.0f); anyAudible = anyAudible || l->isAudible(); }
         if (layers.empty() || shownParent == nullptr) return juce::File();
+        if (! anyAudible)
+        {
+            ctx.toast ("Every stem is muted, so the mix would be silent. Un-mute the ones you want in it.", true);
+            return juce::File();
+        }
         Clip tmp;
         tmp.name = shownParent->name + " - custom mix";
         tmp.audio = edit::mix (layers, gains);
@@ -450,9 +456,18 @@ void StemsPage::timerCallback()
     juce::String note;
     bool warn = false;
 
-    auto dl = [] (ai::Mode m)
+    // (looking at the model files means going to the disk: once every couple of seconds is plenty
+    //  for a line of text, where this used to be 15 times a second on every tab)
+    auto dl = [this] (ai::Mode m)
     {
-        const int mb = ai::downloadMegabytesFor (m);
+        const auto now = juce::Time::getMillisecondCounter();
+        if ((int) m != downloadCheckedMode || now - downloadCheckedAt > 2000)
+        {
+            downloadCheckedMode = (int) m;
+            downloadCheckedAt = now;
+            downloadMegabytes = ai::downloadMegabytesFor (m);
+        }
+        const int mb = downloadMegabytes;
         return mb > 0 ? "  First use downloads " + juce::String (mb) + " MB once." : juce::String ("  Ready - works offline.");
     };
 
@@ -657,9 +672,11 @@ void StemsPage::startMix()
     if (lanes.isEmpty()) return;
     std::vector<AudioData::Ptr> layers;
     for (auto* l : lanes) layers.push_back (l->clip->audio);
+    std::vector<float> gains;
+    for (auto* l : lanes) gains.push_back (l->isAudible() ? 1.0f : 0.0f);
     isMixPlaying = true;
-    updateGains();
-    proc.preview (layers, (int) cursor, -1, false);
+    proc.preview (layers, (int) cursor, -1, false, false, &gains);
+    for (auto* l : lanes) l->repaint();
 }
 
 void StemsPage::toggleStem (Clip::Ptr c)
@@ -670,7 +687,6 @@ void StemsPage::toggleStem (Clip::Ptr c)
     else
     {
         isMixPlaying = false;
-        for (auto& g : proc.layerGains) g = 1.0f;
         proc.previewClip (*c, (int) cursor);
     }
     for (auto* l : lanes) l->repaint();

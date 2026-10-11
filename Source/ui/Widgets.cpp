@@ -85,8 +85,23 @@ Knob::Knob (const juce::String& captionIn, double min, double max, double def, d
     slider.setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
     defaultValue = def;
     slider.onValueChange = [this] { repaint(); if (onChange) onChange(); };
-    slider.onDragStart = [this] { if (onGestureStart) onGestureStart(); };
+    slider.onDragStart = [this]
+    {
+        // The mouse wheel (or a trackpad swipe) reports every little step as a drag of its own.
+        // Taking each for a new grab made one swipe use up the whole 30-step undo history.
+        // So: holding the mouse button is a grab, and a run of wheel steps is one grab too.
+        const auto now = juce::Time::getMillisecondCounter();
+        const bool held = slider.isMouseButtonDown();
+        const bool newGesture = held || lastWheelStepMs == 0 || now - lastWheelStepMs > 700;
+        lastWheelStepMs = held ? 0 : juce::jmax ((juce::uint32) 1, now);
+        if (newGesture && onGestureStart) onGestureStart();
+    };
     addAndMakeVisible (slider);
+}
+
+Knob::~Knob()
+{
+    juce::Desktop::getInstance().removeGlobalMouseListener (this);
 }
 
 /** A value as people write it: "0", "7", "-3.5" - never "1.33e-15" (step snapping can leave tiny
@@ -132,7 +147,9 @@ void Knob::startTyping()
     t.setColour (juce::TextEditor::outlineColourId, theme::col::gold);
     t.setColour (juce::TextEditor::focusedOutlineColourId, theme::col::red);
     const double v = slider.getValue();
-    t.setText (plainNumber (v, slider.getInterval() >= 1.0 ? 0 : 1), false);
+    // (as many decimals as the knob has steps for: a value that is only looked at must not come back rounded)
+    const double step = slider.getInterval();
+    t.setText (plainNumber (v, step >= 1.0 ? 0 : (step >= 0.1 ? 1 : 2)), false);
     t.onReturnKey = [this] { finishTyping (true); };
     t.onEscapeKey = [this] { finishTyping (false); };
     t.onFocusLost = [this] { finishTyping (true); };
@@ -140,13 +157,23 @@ void Knob::startTyping()
     t.setBounds (valueArea());
     t.grabKeyboardFocus();
     t.selectAll();
+    // A click elsewhere finishes the box. (The waveform, pads and knobs never take the keyboard, so
+    // the box used to stay open and swallow Space, Delete and the like until a button was pressed.)
+    juce::Desktop::getInstance().addGlobalMouseListener (this);
     repaint();
+}
+
+void Knob::mouseDown (const juce::MouseEvent& e)
+{
+    if (typing != nullptr && typing->isVisible() && e.eventComponent != typing.get() && ! typing->isParentOf (e.eventComponent))
+        finishTyping (true);
 }
 
 void Knob::finishTyping (bool apply)
 {
     if (typing == nullptr)
         return;
+    juce::Desktop::getInstance().removeGlobalMouseListener (this);
     const auto text = typing->getText();
     // remove it after this callback has returned
     juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<Knob> (this)]
@@ -158,20 +185,44 @@ void Knob::finishTyping (bool apply)
     if (apply && text.trim().isNotEmpty())
     {
         const double v = parseTyped (text);
-        if (! std::isnan (v))
-            slider.setValue (juce::jlimit (slider.getMinimum(), slider.getMaximum(), v), juce::sendNotificationSync);
+        if (std::isfinite (v))
+        {
+            const double inRange = juce::jlimit (slider.getMinimum(), slider.getMaximum(), v);
+            if (! (onTyped && onTyped (inRange)))
+                slider.setValue (inRange, juce::sendNotificationSync);
+        }
     }
 }
 
 double Knob::parseTyped (const juce::String& textIn) const
 {
-    auto text = textIn.trim().toLowerCase();
+    auto text = textIn.trim().toLowerCase().replaceCharacter ((juce::juce_wchar) 0x2212, '-');   // (a typographic minus)
     if (text.contains ("off"))
         return defaultValue;
+
+    // Typed the way this knob writes it - "1/8", "1/4d", "12 bit" - picks that position. (Read as a
+    // plain number, "1/8" was 18: the DELAY time jumped to a whole bar.)
+    const double step = slider.getInterval();
+    if (formatter && step > 0.0 && (slider.getMaximum() - slider.getMinimum()) / step <= 4000.0)
+    {
+        auto squash = [] (const juce::String& t) { return t.toLowerCase().removeCharacters (" "); };
+        const auto wanted = squash (text);
+        for (double v = slider.getMinimum(); v <= slider.getMaximum() + step * 0.5; v += step)
+            if (squash (formatter (v)) == wanted)
+                return juce::jmin (v, slider.getMaximum());
+    }
+
     if (! text.containsAnyOf ("0123456789"))
         return std::numeric_limits<double>::quiet_NaN();
-    const double v = text.retainCharacters ("0123456789.-+,").replaceCharacter (',', '.').getDoubleValue();
-    return text.contains ("k") ? v * 1000.0 : v;   // "5k", "2.5 kHz"
+    double v = text.retainCharacters ("0123456789.-+,").replaceCharacter (',', '.').getDoubleValue();
+
+    // "5k", "2.5 kHz" - but not on a knob that counts in kHz already ("22k" on RATE is 22, not 22000)
+    if (text.containsChar ('k') && ! suffix.containsIgnoreCase ("k"))
+        v *= 1000.0;
+    // "1.5 s" on a knob that counts milliseconds
+    if (suffix.trim().equalsIgnoreCase ("ms") && text.endsWithChar ('s') && ! text.endsWith ("ms"))
+        v *= 1000.0;
+    return v;
 }
 
 void Knob::resized()

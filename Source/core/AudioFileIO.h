@@ -35,9 +35,16 @@ namespace snag::audioio
     bool writeWav (const AudioData& audio, const juce::File& dest, int bitDepth,
                    int startSample = 0, int numSamples = -1);
 
-    /** Writes a WAV with a unique name into the drag-export folder and returns it. */
+    /** Writes a WAV into the drag-export folder and returns it. Dragging the same sound again
+        gives back the file that is already there. */
     juce::File writeDragFile (const AudioData& audio, const juce::String& name, int bitDepth,
                               int startSample = 0, int numSamples = -1);
+
+    /** Moves a freshly written file into `dir` as "name.ext" ("name (2).ext", ...). If one of
+        those already holds exactly the same data, that one is returned and `written` is deleted.
+        Returns {} if the file couldn't be put in place. */
+    juce::File placeOrReuse (const juce::File& written, const juce::File& dir, const juce::String& name,
+                             const juce::String& ext = ".wav");
 
     /** Returns a non-existing file "name.wav", "name (2).wav", ... in dir. */
     juce::File uniqueFile (const juce::File& dir, const juce::String& name, const juce::String& ext = ".wav");

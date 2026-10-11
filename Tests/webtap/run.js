@@ -62,6 +62,28 @@ const cases = {
       await page.close();
     }
   }
+  // A page that keeps making and dropping players (a feed, ads, track after track) must not leave
+  // a tap behind for each of them.
+  {
+    const page = await browser.newPage();
+    page.on('pageerror', e => { console.log('PAGE ERROR feed', e.message); failed++; });
+    await page.addInitScript(tap);
+    await page.goto('http://localhost:18731/');
+    await page.evaluate(() => window.__snag.arm(true));
+    await page.click('#feed');
+    let most = 0;
+    for (let i = 0; i < 400 && !(await page.evaluate(() => !!window.feedDone)); i++) {
+      most = Math.max(most, JSON.parse(await page.evaluate(() => window.__snag.drain())).taps);   // polled, like the plug-in does
+      await page.waitForTimeout(125);
+    }
+    await page.waitForTimeout(300);
+    const r = JSON.parse(await page.evaluate(() => window.__snag.drain()));
+    const ok = most > 0 && r.taps <= 70;
+    if (!ok) failed++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'}  150 players come and go: ${r.taps} taps left (at most 70), ${most} at the busiest`);
+    await page.close();
+  }
+
   await browser.close();
   siteA.close(); siteB.close();
   console.log(failed ? `${failed} failed` : 'all passed');

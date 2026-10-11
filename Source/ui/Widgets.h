@@ -37,11 +37,14 @@ class Knob : public juce::Component, public juce::SettableTooltipClient
 public:
     Knob (const juce::String& caption, double min, double max, double def, double step = 0.0,
           const juce::String& suffix = {});
+    ~Knob() override;
 
     juce::Slider slider;
     std::function<juce::String (double)> formatter;
     std::function<void()> onChange;          // any value change (drag, wheel, double-click reset...)
-    std::function<void()> onGestureStart;    // the user grabbed the knob
+    std::function<void()> onGestureStart;    // the user grabbed the knob (a run of wheel steps counts as one grab)
+    /** Optional: gets a typed value before the knob's steps round it. Return true if it was dealt with. */
+    std::function<bool (double)> onTyped;
 
     void setValueSilently (double v)        { slider.setValue (v, juce::dontSendNotification); repaint(); }
     double getDefault() const noexcept      { return defaultValue; }
@@ -49,6 +52,7 @@ public:
     /** Double-click the number under the knob to type a value ("3.5", "-2 st", "5k", "off"...). */
     void mouseDoubleClick (const juce::MouseEvent&) override;
     void mouseMove (const juce::MouseEvent&) override;
+    void mouseDown (const juce::MouseEvent&) override;   // (while typing: any click, anywhere)
     double parseTyped (const juce::String& text) const;
     void startTyping();
 
@@ -62,6 +66,7 @@ private:
     juce::String caption, suffix;
     double defaultValue = 0.0;
     std::unique_ptr<juce::TextEditor> typing;
+    juce::uint32 lastWheelStepMs = 0;
 };
 
 //==============================================================================

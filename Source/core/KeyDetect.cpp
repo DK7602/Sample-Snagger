@@ -171,6 +171,13 @@ Key detect (const AudioData& audio)
     double bassMax = 0;
     for (auto v : bass) bassMax = juce::jmax (bassMax, v);
 
+    // Nothing with a pitch in it (silence): there is no key to report. It used to come back as
+    // whichever key happened to be first in the list.
+    double chromaSum = 0;
+    for (auto v : chroma) chromaSum += v;
+    if (! (chromaSum > 0.0))
+        return result;
+
     struct Score { double s; int tonic; bool minor; };
     std::vector<Score> scores;
     for (int t = 0; t < 12; ++t)

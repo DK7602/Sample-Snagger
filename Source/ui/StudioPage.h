@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <map>
 #include <set>
 
@@ -92,6 +93,23 @@ private:
     bool adjustJobRunning = false, adjustPending = false;
     juce::uint32 adjustSerial = 0, lastAdjustUndoMs = 0;
 
+    /** If `oldAudio` is what's playing, carries on with the clip's audio as it is now: from the
+        same moment (scaled by `ratio`), or stops when the edit moved everything (`keepPosition` false). */
+    void resumePlayback (const AudioData* oldAudio, double ratio = 1.0, bool keepPosition = true);
+    /** After the chop markers changed: the PADS tab and the gold ring follow. */
+    void chopsChanged();
+
+    // MATCH BPM (and a typed value) can ask for more than the knobs' steps allow: 77.5%, +2.27 st.
+    // The knob then sits on the nearest step and these hold what is really applied; 0 / NaN = just the knob.
+    double exactLength = 0.0, exactSemitones = std::numeric_limits<double>::quiet_NaN();
+    void setLengthKnob (double percent);
+    void setPitchKnob (double semitones);
+
+    // TARGET BPM follows the DAW's tempo until you set it yourself; a new DAW tempo takes over again.
+    double lastHostBpm = 0.0;
+    bool targetFollowsHost = true;
+    double targetBpm() const;
+
     void play();
     void stop();
     void undo();
@@ -154,6 +172,9 @@ private:
     juce::TextButton autoChopBtn { "AUTO CHOP" }, equalBtn { "EQUAL" }, clearChopsBtn { "CLEAR" };
     juce::ComboBox chopCount, midiModeBox;
     static constexpr int everyHit = 1000;     // chopCount id: let SENSITIVITY decide
+public:
+    static constexpr int maxPads = 32;        // the pad row, and what "Every hit" keeps at most
+private:
     juce::ToggleButton oneShotToggle { "One-shot" };
     juce::ComboBox toKeyBox;
 
@@ -167,6 +188,7 @@ private:
     juce::uint32 lastSoundUndoMs = 0;
     std::map<juce::String, std::vector<std::pair<int, bool>>> keyCandidates;   // per clip id
     std::set<juce::String> keyJobs;                                            // detections running
+    std::set<juce::String> keyTried;                                           // clips it has looked at by itself already
 
 };
 

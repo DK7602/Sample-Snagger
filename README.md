@@ -100,7 +100,8 @@ The tool area has four tabs:
 
 ### 4. LIBRARY
 Your saved samples (a normal folder, default `Documents/Sample Snagger/Samples`). Click to audition,
-double-click to load into the tray, drag rows into your DAW.
+double-click to load into the tray, drag rows into your DAW. `.mid` files you saved from the MIDI tab are listed
+too (drag them onto a MIDI or instrument track).
 
 ---
 
@@ -110,11 +111,13 @@ Grab the installer for your system from the **Releases** page (built automatical
 
 - **Mac:** `Sample-Snagger-x.y.z-macOS.pkg` - installs the AU, VST3 and the app.
   The builds are not notarised by Apple yet, so the first time: right-click the .pkg -> **Open**.
+  (On macOS 15 and later that choice is gone: double-click the .pkg, close the warning, then go to
+  *System Settings -> Privacy & Security* and click **Open Anyway**.)
   If a DAW refuses to load the plug-in, run once in Terminal:
   `sudo xattr -dr com.apple.quarantine "/Library/Audio/Plug-Ins/Components/Sample Snagger.component" "/Library/Audio/Plug-Ins/VST3/Sample Snagger.vst3" "/Applications/Sample Snagger.app"`
 - **Windows:** `Sample-Snagger-x.y.z-Windows-Setup.exe` - installs the VST3 into `C:\Program Files\Common Files\VST3`
   and the standalone app. (SmartScreen may warn about an unknown publisher -> *More info* -> *Run anyway*.)
-- **Linux:** unpack the `.tar.gz` and run `./install.sh`.
+- **Linux:** unpack the `.tar.gz`, and in the folder it makes run `./install.sh`.
 
 Then rescan plug-ins in your DAW. Sample Snagger is an **instrument** plug-in - put it on an instrument / MIDI track.
 
@@ -127,10 +130,11 @@ Open **Settings** (gear icon, top right):
 | **yt-dlp** | HQ SNAG from YouTube and 1,000+ sites | ~35 MB |
 | **Deno** | helps yt-dlp read YouTube reliably | ~40 MB |
 | **AI Stem Models** | the built-in AI stem separation (also downloads by itself the first time you split) | 80-160 MB |
-| **Python AI Engine** | optional - AI stems on an NVIDIA GPU (needs Python 3.9-3.13 from python.org) | ~2-3 GB |
+| **Python AI Engine** | optional - AI stems on an NVIDIA GPU (needs Python 3.9 or newer from python.org) | ~2-3 GB |
 
-Click **INSTALL ALL** for everything except the optional Python engine. They download from their official GitHub releases into
-Sample Snagger's own folder - nothing else on your system is touched. LIVE REC, hindsight grabs,
+Click **INSTALL ALL** for everything except the optional Python engine. yt-dlp and Deno come from their projects' GitHub
+releases, FFmpeg from the [ffmpeg-static](https://github.com/eugeneware/ffmpeg-static) builds on GitHub, and the AI models
+from Hugging Face. Everything goes into Sample Snagger's own folder - nothing else on your system is touched. LIVE REC, hindsight grabs,
 Quick Split and everything in STUDIO work with no tools at all.
 
 ---
@@ -151,10 +155,17 @@ Quick Split and everything in STUDIO work with no tools at all.
 | | Mac | Windows |
 |---|---|---|
 | Sample library | `~/Documents/Sample Snagger/Samples` | `Documents\Sample Snagger\Samples` |
-| Helper tools, AI models (`Models`), session cache, settings | `~/Library/Application Support/Sample Snagger` | `%APPDATA%\Sample Snagger` |
+| Sounds you dragged into a DAW | `~/Documents/Sample Snagger/Dragged to DAW` | `Documents\Sample Snagger\Dragged to DAW` |
+| Helper tools, AI models (`Models`), session cache (`Sessions`), settings | `~/Library/Application Support/Sample Snagger` | `%APPDATA%\Sample Snagger` |
 
-Session clips are cached as WAVs so projects reopen with their samples. You can delete old folders in
-`Sessions` whenever you like.
+**Dragged sounds** stay where they are: most DAWs keep reading a dropped file from that folder, so Sample Snagger
+never cleans it up. Remove files there yourself once no project uses them (or let your DAW collect its samples).
+
+**Tray clips** are cached as WAVs in `Sessions`, on this computer - they are not inside the DAW project file, so a
+project opened on another computer comes up without them (Sample Snagger says so). The audio a saved project points
+at is never changed or deleted behind its back: a copy of the project, or closing without saving, can't damage it.
+That also means old versions add up over time. Delete a folder in `Sessions` only when you no longer need the projects
+that used it.
 
 ## Sampling responsibly
 Sample Snagger captures audio you can already hear or have on disk. Clear any samples you use in released music,

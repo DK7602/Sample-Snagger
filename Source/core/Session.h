@@ -3,6 +3,7 @@
 #include "AudioData.h"
 #include <juce_data_structures/juce_data_structures.h>
 #include <juce_events/juce_events.h>
+#include <utility>
 
 namespace snag
 {
@@ -40,15 +41,40 @@ public:
     /** Blocks until pending cache writes are done (used on shutdown / tests). */
     void flushWrites();
 
-    std::function<void (const juce::String&)> onMessage;   // toast messages for the UI
+    /** How the cache folder is looked after.
+
+        A plug-in instance (the default) treats every file a saved state may point at as read-only:
+        each change to a clip's audio goes into a new file in this instance's own folder, and files
+        it didn't make, or that were part of a saved state, are never deleted. A DAW project can be
+        duplicated, saved under another name or closed without saving, and every copy must still
+        find exactly the audio it was saved with.
+
+        The standalone app brings back one session, its own, and saves it when it quits. So it keeps
+        working in that session's folder: one file per clip, replaced when the clip changes and
+        deleted when the clip is removed. */
+    void setAdoptsRestoredFolder (bool shouldAdopt) noexcept   { adoptRestoredFolder = shouldAdopt; }
+
+    /** How many clips of the last restore() had lost their cached audio. Reading it resets it. */
+    int takeMissingClipCount() noexcept  { return std::exchange (missingClips, 0); }
 
 private:
     void persist (Clip::Ptr clip);
+    juce::File freshCacheFile (const Clip&, const juce::String& tag) const;
+    bool mayDelete (const juce::File&) const;
+    void retire (const juce::File&);
 
     juce::ReferenceCountedArray<Clip> clips;
     Clip::Ptr selected;
     juce::String sessionId;
     juce::File dir;
+    bool adoptRestoredFolder = false;
+    int missingClips = 0;
+
+    // Plug-in instances: files that a saved state (DAW project) may point at. They are never
+    // deleted or overwritten - the project may be closed without saving again.
+    mutable juce::CriticalSection savedLock;
+    mutable juce::StringArray savedFiles;
+
     juce::ThreadPool writer { juce::ThreadPoolOptions{}.withThreadName ("Snagger cache").withNumberOfThreads (1) };
 };
 

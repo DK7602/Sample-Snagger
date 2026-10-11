@@ -7,6 +7,8 @@
  #include "DemucsBridge.h"
 #endif
 
+#include <mutex>
+
 namespace snag::ai
 {
 
@@ -172,6 +174,18 @@ bool separate (const AudioData& input, Mode mode, Job& job, const juce::String& 
     if (! ensureModels (mode, job, baseUrl, 0.0f, separateStart))
         return false;
 
+    // One separation at a time, across every Sample Snagger in this process: each one already uses
+    // all the cores and a few GB of memory, so two at once only makes both crawl (or run out).
+    static std::mutex oneAtATime;
+    std::unique_lock<std::mutex> turn (oneAtATime, std::defer_lock);
+    while (! turn.try_lock())
+    {
+        if (job.isCancelled())
+            return false;
+        job.setStatus ("Waiting for the other separation to finish");
+        juce::Thread::sleep (150);
+    }
+
     // Demucs runs at 44.1 kHz stereo
     job.setStatus ("Preparing audio");
     AudioData::Ptr work;
@@ -197,7 +211,8 @@ bool separate (const AudioData& input, Mode mode, Job& job, const juce::String& 
         auto model = snagai::loadModel (modelFile (m.id).getFullPathName().toStdString(), err);
         if (model == nullptr)
         {
-            job.fail (juce::String (err));
+            job.fail (juce::String (err) + " To get a fresh copy: Settings > AI Stem Models > SHOW FOLDER, delete "
+                      + juce::String (m.fileName) + ", then separate again.");
             return false;
         }
 
@@ -240,9 +255,21 @@ bool separate (const AudioData& input, Mode mode, Job& job, const juce::String& 
     const int n = input.getNumSamples();
     const double sr = input.sampleRate;
 
+    // (the 44.1 kHz copies are let go one by one as each stem is finished: a long song in six
+    //  parts would otherwise sit in memory twice over)
+    auto release = [&combined] (size_t source)
+    {
+        for (size_t ch = source * 2; ch < source * 2 + 2 && ch < combined.size(); ++ch)
+            std::vector<float>().swap (combined[ch]);
+    };
+    work = nullptr;
+
     if (mode == Mode::vocalsMusic)
     {
         auto vocals = toSourceRate (combined[6], combined[7], sr, n);
+        release (3);
+        if (job.isCancelled())
+            return false;
 
         // The same model's own guess at everything that isn't voice (drums + bass + other) tells the
         // mask where the music is. It's a better reference than "mix - vocals", which still holds
@@ -258,8 +285,12 @@ bool separate (const AudioData& input, Mode mode, Job& job, const juce::String& 
                     l[i] += combined[(size_t) (s * 2)][i];
                     r[i] += combined[(size_t) (s * 2 + 1)][i];
                 }
+            for (size_t s = 0; s < 3; ++s)
+                release (s);
             others = toSourceRate (l, r, sr, n);
         }
+        if (job.isCancelled())
+            return false;
 
         job.setStatus ("Taking the vocals out of the music");
         stems.push_back ({ "vocals", vocals });
@@ -269,9 +300,17 @@ bool separate (const AudioData& input, Mode mode, Job& job, const juce::String& 
     {
         const char* names[] = { "drums", "bass", "other", "vocals", "guitar", "piano" };
         const int sources = (int) combined.size() / 2;
-        for (int s = 0; s < sources; ++s)
+        for (int s = 0; s < sources && s < 6; ++s)
+        {
+            if (job.isCancelled())
+                return false;
             if (! combined[(size_t) (s * 2)].empty())
+            {
                 stems.push_back ({ names[s], toSourceRate (combined[(size_t) (s * 2)], combined[(size_t) (s * 2 + 1)], sr, n) });
+                release ((size_t) s);
+                job.setProgress (0.97f + 0.03f * (float) (s + 1) / (float) sources);
+            }
+        }
         // present vocals first - it's what most people are after
         std::stable_sort (stems.begin(), stems.end(), [] (const Stem& x, const Stem& y)
                           { return x.name == "vocals" && y.name != "vocals"; });

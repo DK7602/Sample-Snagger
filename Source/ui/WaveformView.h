@@ -70,6 +70,9 @@ private:
     enum class Drag { none, select, marker, selStartEdge, selEndEdge, scrub };
     Drag drag = Drag::none;
     int dragMarker = -1, anchor = 0;
+    bool markerMoved = false;               // the marker being dragged has really been moved
+    int markerStartPos = 0;
+    std::vector<int> slicesBeforeDrag;
     float hoverX = -1.0f;
     int hoverMarker = -1;
 

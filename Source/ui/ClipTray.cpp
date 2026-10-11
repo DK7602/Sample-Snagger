@@ -73,6 +73,7 @@ public:
     void mouseDown (const juce::MouseEvent& e) override
     {
         dragging = false;
+        dragStarted = false;
         auto& proc = owner.getProcessor();
         if (e.mods.isPopupMenu())
         {
@@ -90,9 +91,12 @@ public:
 
     void mouseDrag (const juce::MouseEvent& e) override
     {
-        if (dragging || e.getDistanceFromDragStart() < 6 || e.mods.isPopupMenu())
+        // One drag per press. The drag itself runs on after startExternalDrag returns, and the mouse
+        // keeps moving: without this the clip was rendered and written again on every movement.
+        if (dragging || dragStarted || e.getDistanceFromDragStart() < 6 || e.mods.isPopupMenu())
             return;
         dragging = true;
+        dragStarted = true;
         repaint();
         auto f = actions::makeDragFile (owner.getProcessor(), *clip);
         DragHandle::startExternalDrag (*this, f);
@@ -133,7 +137,7 @@ public:
             auto c = safe->clip;
             switch (r)
             {
-                case 1: for (auto& g : proc.layerGains) g = 1.0f; proc.previewClip (*c); break;
+                case 1: proc.previewClip (*c); break;
                 case 2: proc.session.select (c.get()); tray.getContext().showTab (Tab::studio); break;
                 case 3: proc.session.select (c.get()); tray.getContext().showTab (Tab::stems); break;
                 case 4: actions::saveToLibrary (proc, *c); break;
@@ -143,12 +147,14 @@ public:
                     w->addTextEditor ("name", c->name);
                     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
                     w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
-                    w->enterModalState (true, juce::ModalCallbackFunction::create ([w, c, &proc] (int res)
+                    // (the box can outlive the plug-in window, and the plug-in: only touch it through the tray)
+                    juce::Component::SafePointer<ClipTray> safeTray (&tray);
+                    w->enterModalState (true, juce::ModalCallbackFunction::create ([w, c, safeTray] (int res)
                     {
-                        if (res == 1 && w->getTextEditorContents ("name").trim().isNotEmpty())
+                        if (res == 1 && safeTray != nullptr && w->getTextEditorContents ("name").trim().isNotEmpty())
                         {
                             c->name = w->getTextEditorContents ("name").trim();
-                            proc.session.clipChanged (c.get(), false);
+                            safeTray->getProcessor().session.clipChanged (c.get(), false);
                         }
                     }), true);
                     break;
@@ -162,6 +168,13 @@ public:
                     d->audio = c->audio;
                     d->slices = c->slices;
                     d->bpm = c->bpm;
+                    // a copy is the whole sample: its pad sounds, FX, key and where the knobs are too
+                    d->pads = c->pads;
+                    d->fx = c->fx;
+                    d->keyTonic = c->keyTonic; d->keyMinor = c->keyMinor; d->keyManual = c->keyManual;
+                    d->adjust = c->adjust;
+                    d->adjustBase = c->adjustBase;
+                    d->audioAdjust = c->audioAdjust;
                     proc.session.add (d, true);
                     break;
                 }
@@ -176,7 +189,7 @@ public:
 
 private:
     WaveThumb thumb;
-    bool dragging = false;
+    bool dragging = false, dragStarted = false;
 };
 
 //==============================================================================
@@ -199,7 +212,11 @@ ClipTray::ClipTray (EditorContext& c) : ctx (c), proc (c.getProcessor())
         juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::QuestionIcon, "Clear the session?",
                                             "Removes all captured clips and stems from this session. Samples you saved to the library stay.",
                                             "Clear", "Cancel", this,
-                                            juce::ModalCallbackFunction::create ([this] (int r) { if (r == 1) { proc.stopPreview(); proc.session.clear(); } }));
+                                            juce::ModalCallbackFunction::create ([safe = juce::Component::SafePointer<ClipTray> (this)] (int r)
+                                            {
+                                                // (the question can still be up when the plug-in window has been closed)
+                                                if (r == 1 && safe != nullptr) { safe->proc.stopPreview(); safe->proc.session.clear(); }
+                                            }));
     };
     addAndMakeVisible (clearBtn);
 

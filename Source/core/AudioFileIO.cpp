@@ -221,19 +221,41 @@ juce::File uniqueFile (const juce::File& dir, const juce::String& name, const ju
     return f;
 }
 
+juce::File placeOrReuse (const juce::File& written, const juce::File& dir, const juce::String& name, const juce::String& ext)
+{
+    dir.createDirectory();
+    const auto base = paths::safeFileName (name);
+    for (int i = 1; i < 10000; ++i)
+    {
+        auto f = dir.getChildFile (base + (i == 1 ? juce::String() : " (" + juce::String (i) + ")") + ext);
+        if (! f.exists())
+        {
+            if (written.moveFileTo (f))
+                return f;
+            break;
+        }
+        if (f.getSize() == written.getSize() && f.hasIdenticalContentTo (written))
+        {
+            written.deleteFile();
+            return f;
+        }
+    }
+    written.deleteFile();
+    return {};
+}
+
 juce::File writeDragFile (const AudioData& audio, const juce::String& name, int bitDepth, int startSample, int numSamples)
 {
+    // Nothing in this folder is ever removed for the user: a DAW project that had a sound dropped
+    // into it usually keeps reading it from right here.
     auto dir = paths::dragExportDir();
-
-    // Keep the drag folder tidy: remove exports older than a week.
-    for (auto& old : dir.findChildFiles (juce::File::findFiles, false, "*.wav;*.mid"))
-        if (old.getLastModificationTime() < juce::Time::getCurrentTime() - juce::RelativeTime::days (7))
-            old.deleteFile();
-
-    auto f = uniqueFile (dir, name);
-    if (writeWav (audio, f, bitDepth, startSample, numSamples))
-        return f;
-    return {};
+    auto tmp = dir.getChildFile ("drag-" + juce::String::toHexString (juce::Random::getSystemRandom().nextInt64()) + ".tmp");
+    if (! writeWav (audio, tmp, bitDepth, startSample, numSamples))
+    {
+        tmp.deleteFile();
+        return {};
+    }
+    return placeOrReuse (tmp, dir, name);
 }
 
 } // namespace snag::audioio

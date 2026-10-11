@@ -190,10 +190,12 @@ jobs:
         run: |
           VERSION=$(grep -oP 'project\(SampleSnagger VERSION \K[0-9.]+' CMakeLists.txt)
           ART="build/SampleSnagger_artefacts/${{ env.BUILD_TYPE }}"
-          mkdir -p dist stage
-          cp -R "$ART/VST3/Sample Snagger.vst3" "$ART/LV2/Sample Snagger.lv2" "$ART/Standalone/Sample Snagger" stage/
-          cp packaging/linux/install.sh stage/
-          tar -C stage -czf "dist/Sample-Snagger-$VERSION-Linux.tar.gz" .
+          # one folder inside the archive (unpacking doesn't scatter files), and an installer that can be run
+          FOLDER="Sample-Snagger-$VERSION-Linux"
+          mkdir -p dist "stage/$FOLDER"
+          cp -R "$ART/VST3/Sample Snagger.vst3" "$ART/LV2/Sample Snagger.lv2" "$ART/Standalone/Sample Snagger" "stage/$FOLDER/"
+          install -m 755 packaging/linux/install.sh "stage/$FOLDER/install.sh"
+          tar -C stage -czf "dist/Sample-Snagger-$VERSION-Linux.tar.gz" "$FOLDER"
 
       - uses: actions/upload-artifact@v4
         with:

@@ -7,12 +7,38 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <thread>
+
+#ifdef _WIN32
+ #include <filesystem>
+ #undef fopen   // (see Utf8Fopen.h: in this file the real one is called by name)
+
+ namespace snagai
+ {
+     std::FILE* fopenUtf8 (const char* utf8Path, const char* mode)
+     {
+         if (utf8Path == nullptr || mode == nullptr)
+             return nullptr;
+         try
+         {
+             const std::wstring wide = std::filesystem::u8path (utf8Path).wstring();
+             std::wstring wideMode;
+             for (const char* m = mode; *m != 0; ++m)
+                 wideMode.push_back ((wchar_t) *m);
+             return _wfopen (wide.c_str(), wideMode.c_str());
+         }
+         catch (...) {}
+         return nullptr;
+     }
+ }
+#endif
 
 namespace snagai
 {
@@ -58,7 +84,11 @@ namespace
 
 bool looksLikeModelFile (const std::string& path)
 {
-    FILE* f = std::fopen (path.c_str(), "rb");
+   #ifdef _WIN32
+    std::FILE* f = fopenUtf8 (path.c_str(), "rb");
+   #else
+    std::FILE* f = std::fopen (path.c_str(), "rb");
+   #endif
     if (f == nullptr)
         return false;
     uint32_t magic = 0;
@@ -81,7 +111,7 @@ std::shared_ptr<Model> loadModel (const std::string& path, std::string& error)
         auto model = std::make_shared<Model>();
         if (! demucscpp::load_demucs_model (path, &model->m))
         {
-            error = "The AI model file could not be loaded (it may be damaged - delete it and try again)";
+            error = "The AI model file could not be loaded (it may be damaged).";
             return nullptr;
         }
         return model;
@@ -145,6 +175,13 @@ bool separate (const Model& model, const float* left, const float* right, int nu
         options.progress (sum / (float) chunks.size());
     };
 
+    auto fail = [&] (const std::string& message)
+    {
+        const std::lock_guard<std::mutex> lock (errorLock);
+        if (firstError.empty()) firstError = message;
+        failed = true;
+    };
+
     auto worker = [&]
     {
         for (;;)
@@ -162,41 +199,64 @@ bool separate (const Model& model, const float* left, const float* right, int nu
             const auto chunk = chunks[(size_t) index];
             const int len = chunk.end - chunk.start;
 
-            Eigen::MatrixXf audio = Eigen::MatrixXf::Zero (2, len);
-            for (int i = 0; i < len; ++i)
-            {
-                const int src = chunk.start + i;
-                if (src >= 0 && src < numSamples)
-                {
-                    audio (0, i) = left[src];
-                    audio (1, i) = right[src];
-                }
-            }
-
-            demucscpp::ProgressCallback cb = [&, index] (float p, const std::string&)
-            {
-                if ((options.shouldCancel && options.shouldCancel()) || cancelled || failed)
-                    throw Cancelled();
-                chunkProgress[(size_t) index] = std::clamp (p, 0.0f, 1.0f);
-                report();
-            };
-
+            // (everything in the try: an exception that escapes a worker thread would end the whole DAW)
             try
             {
-                Eigen::Tensor3dXf result = demucscpp::demucs_inference (model.m, audio, cb);
-
-                const int outLen = std::min (len, (int) result.dimension (2));
-                const std::lock_guard<std::mutex> lock (accumulate);
-                for (int i = 0; i < outLen; ++i)
+                Eigen::MatrixXf audio = Eigen::MatrixXf::Zero (2, len);
+                float lowest = std::numeric_limits<float>::max(), highest = std::numeric_limits<float>::lowest();
+                for (int i = 0; i < len; ++i)
                 {
-                    const int dst = chunk.start + i;
-                    if (dst < 0 || dst >= numSamples)
-                        continue;
-                    const float w = (float) std::min (i + 1, len - i);   // triangular cross-fade
-                    weightSum[(size_t) dst] += w;
-                    for (int s = 0; s < sources; ++s)
-                        for (int ch = 0; ch < 2; ++ch)
-                            out[(size_t) (s * 2 + ch)][(size_t) dst] += w * result (s, ch, i);
+                    const int src = chunk.start + i;
+                    if (src >= 0 && src < numSamples)
+                    {
+                        const float l = std::isfinite (left[src]) ? left[src] : 0.0f;
+                        const float r = std::isfinite (right[src]) ? right[src] : 0.0f;
+                        audio (0, i) = l;
+                        audio (1, i) = r;
+                        lowest = std::min (lowest, l + r);
+                        highest = std::max (highest, l + r);
+                    }
+                }
+
+                // Demucs scales its input by how much it varies. A stretch of digital silence (a
+                // track's tail, the gap before a grab starts) doesn't vary at all: that was a
+                // division by zero, and the stems came back as "not a number" for the whole chunk.
+                // There is nothing to separate in silence, so it stays silence.
+                const bool flat = ! (highest - lowest > 1.0e-7f);
+
+                Eigen::Tensor3dXf result;
+                if (! flat)
+                {
+                    demucscpp::ProgressCallback cb = [&, index] (float p, const std::string&)
+                    {
+                        if ((options.shouldCancel && options.shouldCancel()) || cancelled || failed)
+                            throw Cancelled();
+                        chunkProgress[(size_t) index] = std::clamp (p, 0.0f, 1.0f);
+                        report();
+                    };
+                    result = demucscpp::demucs_inference (model.m, audio, cb);
+                }
+
+                const int outLen = flat ? len : std::min (len, (int) result.dimension (2));
+                {
+                    const std::lock_guard<std::mutex> lock (accumulate);
+                    for (int i = 0; i < outLen; ++i)
+                    {
+                        const int dst = chunk.start + i;
+                        if (dst < 0 || dst >= numSamples)
+                            continue;
+                        const float w = (float) std::min (i + 1, len - i);   // triangular cross-fade
+                        weightSum[(size_t) dst] += w;
+                        if (flat)
+                            continue;
+                        for (int s = 0; s < sources; ++s)
+                            for (int ch = 0; ch < 2; ++ch)
+                            {
+                                const float v = result (s, ch, i);
+                                if (std::isfinite (v))
+                                    out[(size_t) (s * 2 + ch)][(size_t) dst] += w * v;
+                            }
+                    }
                 }
                 chunkProgress[(size_t) index] = 1.0f;
                 report();
@@ -208,16 +268,12 @@ bool separate (const Model& model, const float* left, const float* right, int nu
             }
             catch (const std::exception& e)
             {
-                const std::lock_guard<std::mutex> lock (errorLock);
-                if (firstError.empty()) firstError = std::string ("AI separation failed: ") + e.what();
-                failed = true;
+                fail (std::string ("AI separation failed: ") + e.what());
                 return;
             }
             catch (...)
             {
-                const std::lock_guard<std::mutex> lock (errorLock);
-                if (firstError.empty()) firstError = "AI separation failed";
-                failed = true;
+                fail ("AI separation failed");
                 return;
             }
         }
@@ -227,8 +283,12 @@ bool separate (const Model& model, const float* left, const float* right, int nu
         QuietCout quiet;
         const int threads = std::max (1, std::min (options.numThreads, (int) chunks.size()));
         std::vector<std::thread> pool;
-        for (int t = 1; t < threads; ++t)
-            pool.emplace_back (worker);
+        try
+        {
+            for (int t = 1; t < threads; ++t)
+                pool.emplace_back (worker);
+        }
+        catch (...) {}   // the system won't give us more threads: carry on with the ones we have
         worker();   // the calling thread works too
         for (auto& t : pool)
             t.join();

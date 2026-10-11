@@ -523,7 +523,10 @@ static OnsetEnvelope computeOnsetEnvelope (const AudioData& a)
             if (diff > 0) flux += diff;
             prev[(size_t) k] = mag;
         }
-        o.env[(size_t) f] = flux;
+        // The first frame has nothing before it to compare with. Counting everything in it as "new"
+        // made it the biggest value by far whenever a sample starts on sound (a trimmed loop), and
+        // normalising to it pushed every real hit down - AUTO CHOP then missed half of them.
+        o.env[(size_t) f] = f == 0 ? 0.0f : flux;
     }
 
     // normalise

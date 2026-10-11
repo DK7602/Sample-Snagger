@@ -19,6 +19,11 @@
 #include "../Source/core/PadFx.h"
 #include "../Source/core/FxRack.h"
 #include "../Source/core/AudioToMidi.h"
+#include "../Source/core/Session.h"
+#include "../Source/core/Settings.h"
+#if SNAGGER_BUILTIN_AI
+ #include "../Source/ai/DemucsBridge.h"
+#endif
 #include <iostream>
 #include <thread>
 #include <set>
@@ -996,6 +1001,552 @@ static void testStemParts()
     p.onNotify = nullptr;
 }
 
+//==============================================================================
+// The section-by-section audit: one check per bug that was fixed. Each failed before its fix.
+
+static void testAuditCapture()
+{
+    std::cout << "\n[audit: browse / capture]\n";
+    {
+        // the page is not trusted: a frame count that is far too big must not be believed
+        WebCapture cap (nullptr);
+        auto* o = new juce::DynamicObject();
+        o->setProperty ("sr", 48000);
+        o->setProperty ("n", 268435456);   // x 8 bytes wrapped a 32-bit size check, then 2 GB were read from a 3-byte buffer
+        o->setProperty ("b64", "AAAA");
+        o->setProperty ("lvl", std::numeric_limits<double>::quiet_NaN());
+        cap.ingest (juce::var (o));
+        CHECK (cap.getAvailableHindsight() < 0.001 && cap.getLevel() < 0.001f, "a page that claims far more audio than it sends is ignored");
+
+        auto* q = new juce::DynamicObject();
+        q->setProperty ("sr", 1.0e12);
+        q->setProperty ("n", 16);
+        q->setProperty ("b64", juce::Base64::toBase64 (std::vector<float> (32, 0.5f).data(), 32 * sizeof (float)));
+        cap.ingest (juce::var (q));
+        CHECK (cap.getAvailableHindsight() < 0.001, "  ...and so is an impossible sample rate");
+    }
+    {
+        // the rate changes mid-take (another page, or the switch to the browser's own output)
+        WebCapture cap (nullptr);
+        std::vector<float> a (44100 * 2), b (48000 * 2);
+        for (size_t i = 0; i < a.size(); ++i) a[i] = 0.3f * std::sin ((float) (i / 2) * 0.05f);
+        for (size_t i = 0; i < b.size(); ++i) b[i] = 0.3f * std::sin ((float) (i / 2) * 0.05f);
+        cap.pushFrames (a.data(), 44100, 44100.0);
+        cap.startRecording();
+        cap.pushFrames (a.data(), 44100, 44100.0);
+        cap.pushFrames (b.data(), 48000, 48000.0);
+        auto rec = cap.stopRecording();
+        CHECK (rec != nullptr && std::abs (rec->lengthSeconds() - 2.0) < 0.01 && std::abs (rec->sampleRate - 48000.0) < 0.5,
+               "LIVE REC keeps what it has when the sample rate changes ("
+                   + juce::String (rec != nullptr ? rec->lengthSeconds() : 0.0, 2) + " s of 2.00 - it used to be wiped)");
+    }
+    {
+        // a long take: adding to it must stay cheap (it copied the whole recording on every poll)
+        WebCapture cap (nullptr);
+        std::vector<float> block (6000 * 2, 0.1f);   // one poll: 125 ms at 48 kHz
+        cap.startRecording();
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        for (int i = 0; i < 8 * 60 * 5; ++i)
+            cap.pushFrames (block.data(), 6000, 48000.0);
+        const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+        CHECK (std::abs (cap.getRecordedSeconds() - 300.0) < 0.5 && ms < 3000.0, "5 minutes of LIVE REC take " + juce::String (ms, 0) + " ms to store");
+        cap.stopRecording();
+    }
+    {
+        // a helper program that prints nothing and never ends is still stopped on time
+       #if JUCE_WINDOWS
+        const juce::StringArray quiet { "powershell", "-NoProfile", "-Command", "Start-Sleep -Seconds 30" };
+       #else
+        const juce::StringArray quiet { "sleep", "30" };
+       #endif
+        juce::String out;
+        const auto t0 = juce::Time::getMillisecondCounter();
+        const int code = ProcessRunner::runAndCapture (quiet, out, 700);
+        const int took = (int) (juce::Time::getMillisecondCounter() - t0);
+        CHECK (code == -2 && took < 8000, "a silent helper program is stopped by its time limit (after " + juce::String (took) + " ms, code " + juce::String (code) + ")");
+    }
+}
+
+static void testAuditFiles (const juce::File& tmp)
+{
+    std::cout << "\n[audit: files]\n";
+    const auto u = [] (const char* text) { return juce::String::fromUTF8 (text); };
+
+    CHECK (paths::safeFileName (u ("Beyonc\xc3\xa9 - \xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e / \xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82?"))
+               == u ("Beyonc\xc3\xa9 - \xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e _ \xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82_"),
+           "file names keep accents, Japanese and Cyrillic (only / ? and the like are replaced)");
+    CHECK (paths::safeFileName (u ("\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e")).isNotEmpty() && paths::safeFileName (u ("\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e")) != "Sample",
+           "a title with no Latin letters is not saved as \"Sample\"");
+    CHECK (paths::safeFileName ("  ...hidden. ") == "hidden" && paths::safeFileName ("   ") == "Sample", "no leading dots, no trailing dots or spaces, never empty");
+    CHECK (paths::safeFileName ("con") == "_con" && paths::safeFileName ("COM1.old") == "_COM1.old" && paths::safeFileName ("console") == "console",
+           "names Windows keeps for devices are avoided");
+    {
+        const auto longName = juce::String::repeatedString ("a very long title ", 12) + " - Vocals";
+        const auto safe = paths::safeFileName (longName);
+        CHECK (safe.length() <= 80 && safe.endsWith (" - Vocals") && safe.startsWith ("a very long"), "a long name keeps its ending (" + safe.substring (safe.length() - 16) + ")");
+    }
+
+    // drag exports: DAW projects keep pointing at them
+    {
+        auto tone = makeSine (440.0, 0.5), other = makeSine (330.0, 0.5);
+        const auto name = "Audit drag " + juce::String::toHexString (juce::Random::getSystemRandom().nextInt());
+        auto f1 = audioio::writeDragFile (*tone, name, 24);
+        auto f2 = audioio::writeDragFile (*tone, name, 24);
+        CHECK (f1.existsAsFile() && f1 == f2, "dragging the same sound again reuses the file (no \"(2)\", \"(3)\" copies)");
+        auto f3 = audioio::writeDragFile (*other, name, 24);
+        CHECK (f3.existsAsFile() && f3 != f1, "a different sound under the same name gets a file of its own");
+        CHECK (! f1.isAChildOf (paths::tempDir()), "drag files are not kept in a temp folder (" + f1.getParentDirectory().getFileName() + ")");
+        f1.setLastModificationTime (juce::Time::getCurrentTime() - juce::RelativeTime::days (40));
+        auto f4 = audioio::writeDragFile (*other, name + " b", 24);
+        CHECK (f1.existsAsFile(), "a file dragged weeks ago is still there (it used to be deleted after 7 days)");
+        CHECK (f1.getParentDirectory().findChildFiles (juce::File::findFiles, false, "*.tmp").isEmpty(), "no half-written files are left behind");
+        for (auto& f : { f1, f3, f4 }) f.deleteFile();
+    }
+
+    // the library list
+    {
+        auto lib = tmp.getChildFile ("library");
+        auto tone = makeSine (440.0, 0.25);
+        audioio::writeWav (*tone, lib.getChildFile ("kick.wav"), 16);
+        audioio::writeWav (*tone, lib.getChildFile ("SNARE.WAV"), 16);
+        audioio::writeWav (*tone, lib.getChildFile ("Stems").getChildFile ("vocals.wav"), 16);
+        lib.getChildFile ("._kick.wav").replaceWithText ("resource fork");
+        lib.getChildFile ("notes.mid").replaceWithText ("MThd");
+        lib.getChildFile ("readme.txt").replaceWithText ("hello");
+        bool hitLimit = true;
+        auto found = LibraryPage::scanFolder (lib, {}, hitLimit);
+        juce::StringArray names;
+        int midis = 0, timed = 0;
+        for (auto& e : found) { names.add (e.file.getFileName()); midis += e.isMidi ? 1 : 0; timed += e.seconds > 0.2 ? 1 : 0; }
+        names.sort (true);
+        CHECK (names.joinIntoString (",") == "kick.wav,notes.mid,SNARE.WAV,vocals.wav" && ! hitLimit,
+               "the library lists .WAV as well as .wav, sub-folders and saved .mid files, and skips \"._\" files (" + names.joinIntoString (",") + ")");
+        CHECK (midis == 1 && timed == 3, "  ...with lengths for the audio, and MIDI files marked as such");
+        std::atomic<int> looked { 0 };
+        auto none = LibraryPage::scanFolder (lib, [&looked] { return ++looked < 2; }, hitLimit);
+        CHECK (none.empty(), "a scan can be stopped (closing the window doesn't wait for a big folder)");
+    }
+}
+
+static void testAuditSession()
+{
+    std::cout << "\n[audit: session / project cache]\n";
+    auto restoreInto = [] (SnaggerProcessor& p, const juce::MemoryBlock& state) { p.setStateInformation (state.getData(), (int) state.getSize()); };
+    {
+        SnaggerProcessor a;
+        Clip::Ptr c (new Clip());
+        c->name = "Saved";
+        c->audio = makeSine (440.0, 1.0);
+        a.session.add (c, true);
+        juce::MemoryBlock state;
+        a.getStateInformation (state);          // the DAW saves the project
+        a.session.flushWrites();
+        const auto savedFile = c->cacheFile;
+        const auto savedSize = savedFile.getSize();
+        CHECK (savedFile.existsAsFile() && savedSize > 44100, "a clip is cached for the project");
+
+        SnaggerProcessor b;                     // a duplicated track, or a "Save As" copy of the project
+        restoreInto (b, state);
+        CHECK (b.session.getClips().size() == 1, "a copy of the project opens with the clip");
+        if (b.session.getClips().size() == 1)
+        {
+            Clip::Ptr bc = b.session.getClips()[0];
+            bc->audio = edit::crop (*bc->audio, 0, bc->audio->getNumSamples() / 2);
+            b.session.clipChanged (bc.get());
+            b.session.flushWrites();
+            CHECK (savedFile.getSize() == savedSize && bc->cacheFile != savedFile && bc->cacheFile.existsAsFile(),
+                   "editing the clip in the copy leaves the original project's audio alone");
+            b.session.remove (bc.get());
+            b.session.flushWrites();
+            CHECK (savedFile.existsAsFile(), "removing it in the copy doesn't delete the original project's audio");
+        }
+
+        // the same project again: an edit after saving, then closed without saving
+        c->audio = edit::crop (*c->audio, 0, 1000);
+        a.session.clipChanged (c.get());
+        a.session.flushWrites();
+        const auto unsavedFile = c->cacheFile;
+        {
+            SnaggerProcessor again;
+            restoreInto (again, state);
+            CHECK (again.session.getClips().size() == 1 && again.session.getClips()[0]->audio->getNumSamples() == 44100,
+                   "closed without saving, the project reopens with the audio it was saved with");
+        }
+        c->audio = edit::crop (*c->audio, 0, 500);
+        a.session.clipChanged (c.get());
+        a.session.flushWrites();
+        CHECK (unsavedFile != savedFile && ! unsavedFile.existsAsFile() && c->cacheFile.existsAsFile(),
+               "versions no saved project knows about don't pile up on disk");
+
+        // the audio is gone (another computer, a cleaned cache): the tray says so
+        savedFile.deleteFile();
+        SnaggerProcessor lost;
+        restoreInto (lost, state);
+        CHECK (lost.session.getClips().isEmpty() && lost.session.takeMissingClipCount() == 1 && lost.session.takeMissingClipCount() == 0,
+               "a clip whose audio is gone is reported, not dropped silently");
+    }
+    {
+        // PITCH & TIME: the knobs and the original come back
+        SnaggerProcessor a;
+        Clip::Ptr c (new Clip());
+        c->name = "Stretched";
+        c->audio = makeSine (220.0, 2.0);
+        c->bpm = 100.0;
+        const auto original = c->audio;
+        a.session.add (c, true);
+        c->adjustBase = original;               // as STUDIO leaves it once LENGTH 50% and PITCH +3 have been rendered
+        c->adjust.length = 0.5;
+        c->adjust.semitones = 3.0f;
+        c->audioAdjust = c->adjust;
+        c->audio = edit::renderAdjust (*original, c->adjust);
+        a.session.clipChanged (c.get());
+        juce::MemoryBlock state;
+        a.getStateInformation (state);
+        a.session.flushWrites();
+
+        SnaggerProcessor b;
+        restoreInto (b, state);
+        Clip::Ptr r = b.session.getClips().isEmpty() ? nullptr : b.session.getClips()[0];
+        CHECK (r != nullptr && r->adjust == c->adjust && r->adjustBase != nullptr && r->renderIsCurrent()
+                   && r->adjustBase->getNumSamples() == original->getNumSamples() && r->audio->getNumSamples() == c->audio->getNumSamples(),
+               "the PITCH / LENGTH knobs and the original sound are saved with the project");
+        CHECK (r != nullptr && std::abs (r->heardBpm() - 200.0) < 0.01 && std::abs (r->bpm - 100.0) < 0.01,
+               "  ...so a 100 BPM loop at LENGTH 50% still reads 200 BPM after reopening (it read 100)");
+    }
+    {
+        // the standalone app keeps one folder tidy: one file per clip, gone when the clip is removed
+        Session s;
+        s.setAdoptsRestoredFolder (true);
+        Clip::Ptr c (new Clip());
+        c->audio = makeSine (440.0, 0.5);
+        s.add (c, true);
+        s.flushWrites();
+        const auto first = c->cacheFile;
+        const auto state = s.toValueTree();
+        c->audio = edit::crop (*c->audio, 0, 4000);
+        s.clipChanged (c.get());
+        s.flushWrites();
+        CHECK (c->cacheFile == first && first.getSize() < 4000 * 8 + 4096, "standalone app: a changed clip replaces its file");
+
+        Session next;
+        next.setAdoptsRestoredFolder (true);
+        next.restore (state);
+        CHECK (next.getClips().size() == 1 && next.getSessionDir() == s.getSessionDir(), "standalone app: the next start carries on in the same folder");
+        if (next.getClips().size() == 1)
+        {
+            next.remove (next.getClips()[0].get());
+            next.flushWrites();
+            CHECK (! first.existsAsFile(), "standalone app: a removed clip's file is deleted");
+        }
+        s.getSessionDir().deleteRecursively();
+    }
+}
+
+static void testAuditEngine()
+{
+    std::cout << "\n[audit: engine]\n";
+    SnaggerProcessor p;
+    p.prepareToPlay (48000.0, 512);
+    Clip::Ptr c (new Clip());
+    c->name = "tone";
+    c->audio = makeSine (440.0, 1.0, 48000.0);
+    p.session.add (c, true);
+    p.setSamplerClip (c);
+
+    juce::AudioBuffer<float> buf (2, 512);
+    juce::MidiBuffer midi;
+    auto render = [&] (int blocks)
+    {
+        float pk = 0;
+        for (int b = 0; b < blocks; ++b)
+        {
+            buf.clear();
+            p.processBlock (buf, midi);
+            midi.clear();
+            pk = juce::jmax (pk, buf.getMagnitude (0, 0, 512));
+        }
+        return pk;
+    };
+
+    // STEMS: a mix with the first stem muted, then anything else
+    const std::vector<float> gains { 0.0f, 1.0f };
+    p.preview ({ c->audio, c->audio }, 0, -1, false, false, &gains);
+    CHECK (render (8) > 0.2f, "PLAY MIX with the first stem muted plays the others");
+    p.stopPreview();
+    render (4);
+    p.previewClip (*c);
+    CHECK (render (8) > 0.2f, "  ...and what is played next is heard (STUDIO was silent after that)");
+    p.stopPreview();
+    render (4);
+
+    // a loop that is joined in the middle still goes round the whole range
+    p.previewClip (*c, 0, 4800, true, false, 2400);
+    render (1);
+    const double startedAt = p.getPreviewPosition();
+    double lowest = startedAt;
+    for (int i = 0; i < 12; ++i) { render (1); lowest = juce::jmin (lowest, p.getPreviewPosition()); }
+    CHECK (startedAt >= 2400.0 && startedAt < 4800.0 && lowest < 1200.0,
+           "playback can carry on from a position inside a loop (" + juce::String ((int) startedAt) + ", then round to " + juce::String ((int) lowest) + ")");
+    p.stopPreview();
+    render (4);
+
+    // SysEx in the MIDI stream is skipped, notes around it still play
+    {
+        const juce::uint8 sysex[] = { 0x7e, 0x7f, 0x06, 0x01, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07 };
+        midi.addEvent (juce::MidiMessage::createSysExMessage (sysex, (int) sizeof (sysex)), 0);
+        midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 110), 4);
+        CHECK (render (6) > 0.1f, "a note next to a SysEx message plays");
+        render (200);
+    }
+
+    // Remove / CLEAR: the sampler lets go of the sample too
+    p.session.remove (c.get());
+    pump (100);
+    midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 110), 0);
+    CHECK (p.getSamplerClip() == nullptr && render (20) < 1.0e-6f, "after Remove, MIDI no longer plays the sample that is gone");
+
+    // a mono output next to a stereo input bus: both sides arrive
+    {
+        SnaggerProcessor m;
+        auto layout = m.getBusesLayout();
+        layout.outputBuses.getReference (0) = juce::AudioChannelSet::mono();
+        if (layout.inputBuses.size() > 0)
+            layout.inputBuses.getReference (0) = juce::AudioChannelSet::stereo();
+        if (layout.inputBuses.size() > 0 && m.setBusesLayout (layout))
+        {
+            m.prepareToPlay (48000.0, 512);
+            juce::AudioBuffer<float> right (2, 48000);
+            right.clear();
+            for (int i = 0; i < 48000; ++i) right.setSample (1, i, 0.5f * std::sin ((float) i * 0.06f));   // right side only
+            Clip::Ptr rc (new Clip());
+            rc->audio = AudioData::make (std::move (right), 48000.0);
+            m.previewClip (*rc);
+            float pk = 0;
+            for (int b = 0; b < 10; ++b) { buf.clear(); m.processBlock (buf, midi); pk = juce::jmax (pk, buf.getMagnitude (0, 0, 512)); }
+            CHECK (pk > 0.15f, "mono output with a stereo input: the right-hand side is in the output (peak " + juce::String (pk, 2) + ")");
+        }
+    }
+
+    // a state with wild values can't hurt the audio thread
+    {
+        juce::ValueTree root ("SAMPLESNAGGER");
+        root.setProperty ("midiMode", 99, nullptr);
+        root.setProperty ("rootNote", -500, nullptr);
+        root.setProperty ("gain", 1.0e9, nullptr);
+        juce::MemoryBlock mb;
+        if (auto xml = root.createXml()) juce::AudioProcessor::copyXmlToBinary (*xml, mb);
+        SnaggerProcessor q;
+        q.setStateInformation (mb.getData(), (int) mb.getSize());
+        CHECK (q.midiMode.load() <= 1 && q.rootNote.load() >= 0 && q.masterGain.load() <= 4.0f, "a damaged project state is kept within sane limits");
+    }
+
+    std::cout << "\n[audit: FX]\n";
+    {
+        auto tone = makeSine (220.0, 1.0);
+        FxSettings fx;
+        fx.reverbOn = true;
+        fx.reverbMix = 0.0f;
+        auto wet = renderFx (*tone, fx, 120.0);
+        const double db = 20.0 * std::log10 (rmsOf (*wet, 22050, 11025) / rmsOf (*tone, 22050, 11025));
+        CHECK (std::abs (db) < 0.2, "REVERB switched on with MIX at 0 leaves the level alone (" + juce::String (db, 2) + " dB - it was +6)");
+
+        fx.reverbMix = 0.25f;
+        fx.size = 1.0f;
+        CHECK (fx.tailSeconds (120.0) > 9.0 && fx.tailSeconds (120.0) <= 12.0, "a full-size reverb gets its whole tail (" + juce::String (fx.tailSeconds (120.0), 1) + " s)");
+    }
+    {
+        // DELAY switched off and on again (another effect keeps the rack running) must not replay old echoes
+        FxChain chain;
+        chain.prepare (44100.0);
+        FxSettings on;
+        on.delayOn = true; on.delayMix = 1.0f; on.feedback = 0.5f; on.division = 8;   // 1/4 note = 0.5 s at 120
+        std::vector<float> l (44100, 0.0f), r (44100, 0.0f);
+        l[0] = r[0] = 1.0f;
+        chain.process (l.data(), r.data(), 4410, on, 120.0);
+        auto off = on;
+        off.delayOn = false; off.driveOn = true;
+        std::fill (l.begin(), l.end(), 0.0f); std::fill (r.begin(), r.end(), 0.0f);
+        chain.process (l.data(), r.data(), 44100, off, 120.0);
+        std::fill (l.begin(), l.end(), 0.0f); std::fill (r.begin(), r.end(), 0.0f);
+        chain.process (l.data(), r.data(), 44100, on, 120.0);
+        float pk = 0;
+        for (size_t i = 0; i < l.size(); ++i) pk = juce::jmax (pk, std::abs (l[i]), std::abs (r[i]));
+        CHECK (pk < 1.0e-4f, "DELAY switched back on starts clean (stale echo peak " + juce::String (pk, 4) + ")");
+
+        // "1 bar" at a tempo too slow for the delay line stays on the grid (half a bar), not just "as long as it goes"
+        FxChain slow;
+        slow.prepare (44100.0);
+        FxSettings bar;
+        bar.delayOn = true; bar.delayMix = 1.0f; bar.feedback = 0.0f; bar.division = 11;   // 1 bar at 40 bpm = 6 s
+        std::vector<float> ll (44100 * 4, 0.0f), rr (44100 * 4, 0.0f);
+        ll[0] = rr[0] = 1.0f;
+        slow.process (ll.data(), rr.data(), (int) ll.size(), bar, 40.0);
+        size_t echoAt = 0;
+        for (size_t i = 1000; i < ll.size(); ++i) if (std::abs (ll[i]) > std::abs (ll[echoAt]) || echoAt == 0) echoAt = i;
+        CHECK (std::abs ((double) echoAt / 44100.0 - 3.0) < 0.01, "a delay time too long for the echo line is halved onto the grid (echo at " + juce::String ((double) echoAt / 44100.0, 2) + " s)");
+    }
+
+    std::cout << "\n[audit: chopping]\n";
+    {
+        // A loop that starts on sound, like any trimmed loop of real music: the whole band is busy
+        // from the very first sample (a noise bed and a chord here), with the hits on top of it.
+        const double sr = 44100.0;
+        juce::AudioBuffer<float> b (2, (int) (sr * 6.25));
+        juce::Random rnd (11);
+        for (int i = 0; i < b.getNumSamples(); ++i)
+        {
+            const float t = (float) i / (float) sr;
+            const float bed = 0.05f * (rnd.nextFloat() * 2.0f - 1.0f)
+                            + 0.1f * (std::sin (6.2832f * 220.0f * t) + std::sin (6.2832f * 277.2f * t) + std::sin (6.2832f * 329.6f * t));
+            b.setSample (0, i, bed);
+            b.setSample (1, i, bed);
+        }
+        std::vector<double> hitTimes;
+        for (double t = 0.5; t < 6.1; t += 0.5)
+        {
+            hitTimes.push_back (t);
+            const int s0 = (int) (t * sr);
+            for (int i = 0; i < (int) (0.06 * sr); ++i)
+            {
+                const float v = 0.3f * std::exp (-(float) i / (float) (0.0075 * sr)) * (rnd.nextFloat() * 2.0f - 1.0f);
+                b.addSample (0, s0 + i, v);
+                b.addSample (1, s0 + i, v);
+            }
+        }
+        auto loop = AudioData::make (std::move (b), sr);
+        const auto found = edit::detectTransients (*loop, 0.3f);
+        int caught = 0;
+        for (auto t : hitTimes)
+            for (auto f : found)
+                if (std::abs ((double) f / sr - t) < 0.025) { ++caught; break; }
+        CHECK (caught == (int) hitTimes.size() && found.size() <= hitTimes.size() + 2, "AUTO CHOP finds every hit of a loop that starts on sound ("
+                   + juce::String (caught) + " of " + juce::String ((int) hitTimes.size()) + " at SENSITIVITY 30%, " + juce::String ((int) found.size()) + " chops)");
+    }
+    {
+        // pad sounds stay with their chops
+        Clip k;
+        k.audio = makeSine (220.0, 4.0);
+        const int n = k.audio->getNumSamples();
+        k.slices = edit::equalSlices (n, 4);
+        PadParams rev; rev.reverse = true; rev.gainDb = -6.0f;
+        k.setPad (2, rev);
+        auto before = k.slices;
+        k.slices.insert (k.slices.begin(), n / 8);                 // a new marker inside chop 1
+        k.remapPads (before, [] (int pos) { return pos; });
+        CHECK (k.padAt (3).reverse && ! k.padAt (2).reverse && ! k.padAt (1).reverse, "a new marker before a shaped chop: the pad sound moves along with it");
+        before = k.slices;
+        k.slices.erase (k.slices.begin());                         // ...and take it out again
+        k.remapPads (before, [] (int pos) { return pos; });
+        CHECK (k.padAt (2).reverse && ! k.padAt (3).reverse, "  ...and back when the marker is deleted");
+    }
+}
+
+static void testAuditKnobs()
+{
+    std::cout << "\n[audit: knobs]\n";
+    auto approx = [] (double a, double b) { return std::abs (a - b) < 1.0e-6; };
+
+    Knob time ("Time", 0.0, 11.0, 6.0, 1.0);
+    time.formatter = [] (double v) { return juce::String (delayDivisions()[(size_t) juce::jlimit (0, 11, juce::roundToInt (v))].name); };
+    CHECK (approx (time.parseTyped ("1/8"), 5.0) && approx (time.parseTyped ("1/4d"), 9.0) && approx (time.parseTyped ("1 bar"), 11.0),
+           "typing \"1/8\" on the DELAY time picks 1/8 (it was read as 18: a whole bar)");
+
+    Knob rate ("Rate", 2.0, 44.0, 18.0, 0.1, " kHz");
+    CHECK (approx (rate.parseTyped ("22k"), 22.0) && approx (rate.parseTyped ("22 kHz"), 22.0), "\"22k\" on a knob that counts in kHz is 22, not 22000");
+
+    Knob attack ("Attack", 0.0, 2000.0, 1.0, 1.0, " ms");
+    CHECK (approx (attack.parseTyped ("1.5 s"), 1500.0) && approx (attack.parseTyped ("250 ms"), 250.0) && approx (attack.parseTyped ("40"), 40.0),
+           "\"1.5 s\" on a millisecond knob is 1500 ms");
+
+    Knob cut ("High cut", 1000.0, 20000.0, 20000.0, 10.0, " Hz");
+    CHECK (approx (cut.parseTyped ("8k"), 8000.0) && approx (cut.parseTyped (juce::String::fromUTF8 ("\xe2\x88\x92" "3")), -3.0), "\"8k\" is still 8000 Hz, and a typographic minus is a minus");
+
+    // the mouse wheel: JUCE reports every step as a drag of its own
+    Knob k ("Pitch", -24.0, 24.0, 0.0, 0.1, " st");
+    int grabs = 0;
+    k.onGestureStart = [&grabs] { ++grabs; };
+    for (int i = 0; i < 40; ++i)
+        k.slider.onDragStart();
+    CHECK (grabs == 1, "a run of mouse-wheel steps is one grab - one undo step, not one each (" + juce::String (grabs) + ")");
+
+    // a value typed in the box is handed over before the knob's steps round it
+    Knob len ("Length", 50.0, 200.0, 100.0, 1.0, "%");
+    len.setSize (86, 118);
+    double typed = 0.0;
+    len.onTyped = [&typed] (double v) { typed = v; return true; };
+    len.startTyping();
+    for (auto* child : len.getChildren())
+        if (auto* t = dynamic_cast<juce::TextEditor*> (child))
+        {
+            t->setText ("77.5", false);
+            t->onReturnKey();
+        }
+    CHECK (approx (typed, 77.5), "a typed 77.5 arrives as 77.5 (the knob alone would make it 78)");
+    pump (30);
+}
+
+static void testAuditStems (const juce::File& tmp)
+{
+    std::cout << "\n[audit: stems]\n";
+    juce::ignoreUnused (tmp);
+    SnaggerProcessor p;
+    juce::StringArray messages;
+    p.onNotify = [&messages] (const juce::String& m, bool err) { messages.add ((err ? "ERR: " : "") + m); };
+    auto waitJobs = [&p]
+    {
+        pump (200);
+        for (int i = 0; i < 600 && p.jobs.isBusy(); ++i) pump (100);
+        pump (200);
+    };
+
+    // a sample with the same sound left and right ("mono", as far as Quick Split can tell)
+    auto demo = makeDemoMix (44100.0, 4.0);
+    Clip::Ptr c (new Clip());
+    c->name = "Mono mix";
+    c->audio = edit::toMono (*demo.mix);
+    p.session.add (c, true);
+
+    actions::separate (p, c, actions::Engine::quick, { "drums", "bass", "other" });
+    actions::separate (p, c, actions::Engine::quick, { "drums", "bass", "other" });   // an impatient second click
+    CHECK (p.jobs.getActiveJobs().size() == 1, "a second SEPARATE on the same sample doesn't start a second split");
+
+    Clip::Ptr elsewhere (new Clip());   // meanwhile, on to another sample
+    elsewhere->name = "Another";
+    elsewhere->audio = makeSine (330.0, 1.0);
+    p.session.add (elsewhere, true);
+    waitJobs();
+
+    juce::StringArray names;
+    for (auto& st : p.session.getStemsOf (*c)) names.add (st->stemName);
+    CHECK (names.joinIntoString (",") == "drums,bass,other", "Quick Split on a mono sample keeps the Other part (" + names.joinIntoString (",") + " - it came back as drums,bass)");
+    CHECK (p.session.getSelected() == elsewhere, "a split that finishes doesn't pull you back out of the sample you moved on to");
+
+    // the sample is edited while it is being separated: those stems wouldn't fit it
+    juce::StringArray before;
+    for (auto& st : p.session.getStemsOf (*c)) before.add (st->id);
+    actions::separate (p, c, actions::Engine::quick, { "drums", "bass" });
+    c->audio = edit::crop (*c->audio, 0, c->audio->getNumSamples() / 2);
+    p.session.clipChanged (c.get());
+    waitJobs();
+    juce::StringArray after;
+    for (auto& st : p.session.getStemsOf (*c)) after.add (st->id);
+    CHECK (after == before && messages.joinIntoString (" ").contains ("changed while"), "stems made from the sound as it was aren't attached to the edited sample");
+
+   #if SNAGGER_BUILTIN_AI
+    {
+        // C:\Users\<a name with accents>\AppData\... : the model file must still be found
+        auto dir = tmp.getChildFile (juce::String::fromUTF8 ("J\xc3\xb6rg \xc3\x9cn\xc3\xaf" "c\xc3\xb6" "d\xc3\xa9 \xe6\x97\xa5\xe6\x9c\xac"));
+        dir.createDirectory();
+        auto f = dir.getChildFile ("model.bin");
+        const char magic[] = { 0x34, 0x63, 0x6d, 0x64, 0, 0, 0, 0 };   // "dmc4", as the file stores it
+        f.replaceWithData (magic, sizeof (magic));
+        CHECK (f.existsAsFile() && snagai::looksLikeModelFile (f.getFullPathName().toStdString()),
+               "an AI model is found when its folder has accents or non-Latin letters in the name");
+    }
+   #endif
+    p.onNotify = nullptr;
+}
+
 namespace snag
 {
 /** Drives the STUDIO knobs the way a person would. */
@@ -1105,6 +1656,185 @@ struct StudioPageTester
         }
 
         ed.reset();
+    }
+
+    /** The audit's STUDIO fixes, through the page itself. */
+    static void runAudit()
+    {
+        std::cout << "\n[audit: studio]\n";
+        auto p = std::make_unique<SnaggerProcessor>();
+        p->prepareToPlay (44100.0, 512);
+        auto ed = std::unique_ptr<SnaggerEditor> (dynamic_cast<SnaggerEditor*> (p->createEditor()));
+        ed->setSize (1280, 820);
+        ed->showTab (Tab::studio);
+        auto& page = ed->getStudioPage();
+        auto settle = [&p]
+        {
+            pump (400);
+            for (int i = 0; i < 300 && p->jobs.isBusy(); ++i) pump (100);
+            pump (300);
+        };
+        auto addClip = [&] (const juce::String& name, AudioData::Ptr audio)
+        {
+            Clip::Ptr c (new Clip());
+            c->name = name;
+            c->audio = audio;
+            c->keyTonic = 0;   // (no key detection job in the way)
+            p->session.add (c, true);
+            page.setClip (c);
+            page.wave.setSelection (0, 0);
+            return c;
+        };
+
+        // ---- MATCH BPM
+        {
+            auto c = addClip ("Loop", makeSine (220.0, 2.0));
+            c->bpm = 87.0;
+            page.bpmKnob.slider.setValue (120.0, juce::sendNotificationSync);
+            page.matchBpm();
+            settle();
+            CHECK (std::abs (c->adjust.length - 0.725) < 1.0e-6 && std::abs (c->audio->getNumSamples() - 0.725 * 88200.0) < 60.0,
+                   "MATCH BPM 87 -> 120 makes the length exactly 72.5% (" + juce::String (c->adjust.length * 100.0, 2) + "% - it was the nearest whole percent)");
+            CHECK (std::abs (c->heardBpm() - 120.0) < 0.01, "  ...so the sample really plays at 120 BPM (" + juce::String (c->heardBpm(), 2) + ")");
+            page.undo();
+            settle();
+            page.redo();
+            settle();
+            CHECK (std::abs (c->adjust.length - 0.725) < 1.0e-6 && c->renderIsCurrent(), "  ...and undo / redo bring back that exact length");
+
+            page.pitchDefaultBtn.onClick();
+            settle();
+            c->bpm = 80.0;
+            page.bpmKnob.slider.setValue (170.0, juce::sendNotificationSync);
+            page.matchBpm();
+            settle();
+            CHECK (std::abs (c->heardBpm() - 85.0) < 0.01, "MATCH BPM 80 -> 170 is out of the LENGTH knob's reach: it goes for half time, 85 ("
+                       + juce::String (c->heardBpm(), 1) + ")");
+
+            page.stretchKnob.onTyped (77.5);
+            settle();
+            CHECK (std::abs (c->adjust.length - 0.775) < 1.0e-6, "typing 77.5 under LENGTH gives 77.5%");
+            page.stretchKnob.slider.setValue (90.0, juce::sendNotificationSync);
+            settle();
+            CHECK (std::abs (c->adjust.length - 0.9) < 1.0e-6, "  ...and turning the knob afterwards is whole percents again");
+
+            // TARGET BPM
+            p->hostBpm = 140.0;
+            page.timerCallback();
+            CHECK (std::abs (page.targetBpm() - 140.0) < 1.0e-9, "TARGET BPM follows the DAW's tempo");
+            page.bpmKnob.slider.setValue (70.0, juce::sendNotificationSync);
+            page.timerCallback();
+            page.timerCallback();
+            CHECK (std::abs (page.targetBpm() - 70.0) < 1.0e-9, "  ...a value set by hand stays (it snapped back within a quarter of a second)");
+            p->hostBpm = 92.3;
+            page.timerCallback();
+            CHECK (std::abs (page.targetBpm() - 92.3) < 1.0e-9, "  ...until the DAW's tempo changes - and then it is 92.3, not the knob's 92.5");
+            p->hostBpm = 0.0;
+        }
+
+        // ---- DETECT with TAPE on
+        {
+            auto c = addClip ("Clicks", makeClicks (44100.0, 8.0, 0.5));   // 120 BPM
+            page.tapeToggle.setToggleState (true, juce::dontSendNotification);
+            page.pitchKnob.slider.setValue (-5.0, juce::sendNotificationSync);   // tape: 5 semitones down = 0.75x the speed
+            settle();
+            page.detectBpm();
+            CHECK (std::abs (c->bpm - 120.0) < 2.0 && std::abs (c->bpmWith (c->adjust) - 90.0) < 2.0,
+                   "DETECT with TAPE on: the original is 120 BPM, heard at 90 (stored " + juce::String (c->bpm, 1) + ", shown " + juce::String (c->bpmWith (c->adjust), 1) + ")");
+            page.tapeToggle.setToggleState (false, juce::dontSendNotification);
+            page.pitchDefaultBtn.onClick();
+            settle();
+        }
+
+        // ---- pad sounds stay with their chops
+        {
+            auto c = addClip ("Pads", makeSine (220.0, 4.0));
+            const int n = c->audio->getNumSamples();
+            c->slices = edit::equalSlices (n, 4);
+            PadParams rev;
+            rev.reverse = true;
+            c->setPad (2, rev);
+            page.setClip (c);
+
+            page.wave.setSelection (n / 4, n);                      // chops 2 - 4
+            page.editButtons[0]->onClick();                         // TRIM
+            CHECK (c->sliceBoundaries().size() == 4 && c->padAt (1).reverse && ! c->padAt (2).reverse && ! c->padAt (0).reverse,
+                   "TRIM: the reversed pad is still the same chop (now pad 2)");
+            page.undo();
+            CHECK (c->padAt (2).reverse && ! c->padAt (1).reverse, "  ...and UNDO puts it back on pad 3");
+
+            page.wave.setSelection (0, n / 4);                      // chop 1
+            page.editButtons[1]->onClick();                         // CUT
+            CHECK (c->padAt (1).reverse && ! c->padAt (2).reverse, "CUT: same again");
+            page.undo();
+
+            page.wave.setSelection (3 * (n / 4), n);                // chop 4 only
+            page.chopCount.setSelectedId (2, juce::sendNotificationSync);
+            page.autoChop();
+            CHECK (c->sliceBoundaries().size() == 6 && c->padAt (2).reverse,
+                   "AUTO CHOP on a selection leaves the other chops' pad sounds alone (they were all reset)");
+            page.wave.setSelection (0, 0);
+
+            page.setDeck (1);
+            page.getPads().onSliceSelected (4);                     // the last pad
+            page.wave.setSelection (0, 0);
+            page.clearChopsBtn.onClick();
+            CHECK (page.selectedPad == 0 && page.getPadDeck().getPad() == 0, "after CLEAR the PADS tab isn't left editing a pad that no longer exists");
+            page.setDeck (0);
+        }
+
+        // ---- "Every hit" on a long sample: the pads hold 32
+        {
+            auto c = addClip ("Long", makeClicks (44100.0, 30.0, 0.25));
+            page.chopCount.setSelectedId (StudioPage::everyHit, juce::sendNotificationSync);
+            const int hits = (int) edit::detectTransients (*c->audio, (float) page.sensKnob.slider.getValue() / 100.0f).size() + 1;
+            page.autoChop();
+            CHECK (hits > 60 && (int) c->sliceBoundaries().size() - 1 == StudioPage::maxPads,
+                   "\"Every hit\" on a sample with " + juce::String (hits) + " hits keeps the 32 strongest - one per pad");
+        }
+
+        // ---- undo to a moment when a knob change was still rendering
+        {
+            auto c = addClip ("Tone", makeSine (440.0, 2.0));
+            page.pitchKnob.slider.setValue (12.0, juce::sendNotificationSync);   // (the render starts a moment later)
+            page.lastAdjustUndoMs = 0;                                           // ...and another knob is grabbed before it lands
+            page.gainKnob.slider.setValue (6.0, juce::sendNotificationSync);
+            settle();
+            page.undo();
+            settle();
+            CHECK (std::abs (page.pitchKnob.slider.getValue() - 12.0) < 0.01 && std::abs (zeroCrossHz (*c->audio) - 880.0) < 25.0 && c->renderIsCurrent(),
+                   "undo to a moment when PITCH was still rendering: the sound matches the knob (" + juce::String (zeroCrossHz (*c->audio), 0) + " Hz at +12)");
+        }
+
+        // ---- a render that is cancelled: the knobs go back to what you hear
+        {
+            auto c = addClip ("Long tone", makeSine (440.0, 60.0));
+            page.pitchKnob.slider.setValue (7.0, juce::sendNotificationSync);
+            pump (250);                 // the render has started
+            p->jobs.cancelAll();        // the x in the title bar
+            settle();
+            const bool landed = std::abs (c->adjust.semitones - 7.0f) < 0.01f && c->renderIsCurrent();   // (a very fast machine may have finished first)
+            CHECK (landed || (std::abs (page.pitchKnob.slider.getValue()) < 0.01 && c->adjust.isNeutral() && c->renderIsCurrent()),
+                   "a cancelled PITCH render puts the knob back where the sound is");
+        }
+
+        // ---- keys while Settings is open
+        {
+            auto c = addClip ("Keys", makeSine (440.0, 2.0));
+            const int n = c->audio->getNumSamples();
+            page.wave.setSelection (1000, 30000);
+            ed->openSettings();
+            ed->keyPressed (juce::KeyPress (juce::KeyPress::deleteKey));
+            pump (100);
+            CHECK (c->audio->getNumSamples() == n, "Delete doesn't cut the selection while Settings covers the page");
+            ed->getSettingsPanel().close();
+            ed->keyPressed (juce::KeyPress (juce::KeyPress::deleteKey));
+            pump (100);
+            CHECK (c->audio->getNumSamples() == n - 29000, "  ...and does once Settings is closed");
+        }
+
+        ed.reset();
+        pump (50);
     }
 };
 }
@@ -1277,6 +2007,54 @@ static void testBuiltinAi()
             }
         }
     }
+
+    // Digital silence in the sample (a track's tail, the gap before a grab starts): the engine scales
+    // every 6-second chunk by how much it varies, and a chunk that doesn't vary at all was a division
+    // by zero - the stems came back as "not a number" there, and that went on to the host and to disk.
+    {
+        const int sr = 44100, n = sr * 14;
+        juce::AudioBuffer<float> b (2, n);
+        b.clear();
+        auto music = makeDemoMix ((double) sr, 6.5, 92.0);
+        for (int ch = 0; ch < 2; ++ch)
+            b.copyFrom (ch, 0, music.mix->buffer, ch, 0, music.mix->getNumSamples());   // 6.5 s of music, then 7.5 s of nothing
+        auto withSilence = AudioData::make (std::move (b), (double) sr);
+        Job job ("ai", nullptr, nullptr);
+        std::vector<ai::Stem> stems;
+        const bool ok = ai::separate (*withSilence, ai::Mode::fourStems, job, {}, stems);
+        bool finite = ok && ! stems.empty();
+        float tailPeak = 0.0f, headPeak = 0.0f;
+        for (auto& st : stems)
+            for (int ch = 0; ch < st.audio->getNumChannels(); ++ch)
+            {
+                const float* d = st.audio->buffer.getReadPointer (ch);
+                for (int i = 0; i < st.audio->getNumSamples(); ++i)
+                    finite = finite && std::isfinite (d[i]);
+                tailPeak = juce::jmax (tailPeak, st.audio->buffer.getMagnitude (ch, sr * 12, sr * 2));
+                headPeak = juce::jmax (headPeak, st.audio->buffer.getMagnitude (ch, 0, sr * 6));
+            }
+        CHECK (finite, "a sample that ends in digital silence gives clean stems (no \"not a number\" samples) " + job.getError());
+        CHECK (ok && tailPeak < 1.0e-2f && headPeak > 0.05f, "  ...silent where the sample is silent, music where it isn't (tail peak " + juce::String (tailPeak, 5) + ")");
+    }
+
+   #if SNAGGER_BUILTIN_AI
+    // A Windows user name with an accent or non-Latin letters puts the models in a folder the engine's
+    // own file opening couldn't read: the model was "not found", downloaded again, and "damaged" every time.
+    {
+        auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                       .getChildFile (juce::String::fromUTF8 ("snagger-tests-J\xc3\xb6rg \xe6\x97\xa5\xe6\x9c\xac"));
+        dir.createDirectory();
+        const auto original = ai::modelFile (ai::ModelId::htdemucs4);
+        const auto copy = dir.getChildFile (original.getFileName());
+        std::string err;
+        const bool copied = original.copyFileTo (copy);
+        auto model = copied ? snagai::loadModel (copy.getFullPathName().toStdString(), err) : nullptr;
+        CHECK (copied && model != nullptr && snagai::numSources (*model) == 4,
+               "the AI model loads from a folder with accents / non-Latin letters in its path " + juce::String (err));
+        model = nullptr;
+        dir.deleteRecursively();
+    }
+   #endif
 
     // cancellation stops quickly
     {
@@ -2047,6 +2825,13 @@ int main (int argc, char** argv)
     testQuickSplit();
     testFileIO (tmp);
     testWebCapture();
+    testAuditCapture();
+    testAuditFiles (tmp);
+    testAuditSession();
+    testAuditEngine();
+    testAuditKnobs();
+    testAuditStems (tmp);
+    snag::StudioPageTester::runAudit();
     testProcessor();
     testLinks();
     testVocalRemoval();

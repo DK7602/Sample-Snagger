@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Page.h"
+#include <atomic>
+#include <memory>
 
 namespace snag
 {
@@ -23,10 +25,18 @@ public:
     struct Entry
     {
         juce::File file;
+        juce::Time modified;
         double seconds = 0;
         double sampleRate = 0;
         int channels = 0;
+        bool isMidi = false;    // a saved .mid: listed so it can be found and dragged, not auditioned
     };
+
+    /** Lists a library folder (newest first). Runs on a background thread; `keepGoing` stops it early. */
+    static std::vector<Entry> scanFolder (const juce::File& dir, const std::function<bool()>& keepGoing, bool& hitLimit);
+    static constexpr int maxEntries = 3000;
+    bool isScanning() const noexcept { return scanning; }
+
 
 private:
     int getNumRows() override;
@@ -55,6 +65,11 @@ private:
     std::unique_ptr<juce::FileChooser> chooser;
     AudioData::Ptr previewAudio;
     juce::File previewFile;
+
+    // the folder is read on its own thread: a big sample drive must not freeze the window
+    std::shared_ptr<std::atomic<int>> scanGeneration = std::make_shared<std::atomic<int>> (0);
+    bool scanning = false, tooMany = false;
+    juce::ThreadPool scanner { juce::ThreadPoolOptions{}.withThreadName ("Snagger library").withNumberOfThreads (1) };
 };
 
 } // namespace snag
