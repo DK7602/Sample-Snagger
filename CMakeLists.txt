@@ -169,6 +169,7 @@ set(SNAGGER_SOURCES
     Source/core/AudioToMidi.cpp
     Source/ui/Theme.cpp
     Source/ui/Widgets.cpp
+    Source/ui/DragOut.cpp
     Source/ui/WaveformView.cpp
     Source/ui/BrowsePage.cpp
     Source/ui/StudioPage.cpp
@@ -177,8 +178,7 @@ set(SNAGGER_SOURCES
     Source/ui/SeparationAnimation.cpp
     Source/ui/LibraryPage.cpp
     Source/ui/SettingsPanel.cpp
-    Source/ui/ClipTray.cpp
-    Source/ui/DragOut.cpp)
+    Source/ui/ClipTray.cpp)
 
 # Everything that the plug-in and the test runner share
 add_library(SnaggerShared INTERFACE)
