@@ -98,7 +98,7 @@ juce::File Session::freshCacheFile (const Clip& clip, const juce::String& tag) c
     // written over, so closing a project without saving can't leave it with newer audio than its chops.
     for (;;)
     {
-        auto f = dir.getChildFile (clip.id + "." + tag + juce::String::toHexString (juce::Random::getSystemRandom().nextInt()) + ".wav");
+        auto f = dir.getChildFile (clip.id + "." + tag + paths::uniqueTag() + ".wav");
         if (! f.exists())
             return f;
     }

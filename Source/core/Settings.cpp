@@ -29,6 +29,11 @@ namespace paths
     juce::File tempDir()        { return sub ("Temp"); }
     juce::File webDataDir()     { return sub ("WebView"); }
 
+    juce::String uniqueTag()
+    {
+        return juce::Uuid().toString().substring (0, 12);
+    }
+
     juce::File dragExportDir()
     {
         // A DAW usually keeps pointing at a dropped file where it lies. So these live with the

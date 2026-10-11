@@ -43,6 +43,7 @@ public:
         addAndMakeVisible (saveBtn);
 
         drag.makeFile = [this] { return actions::makeDragFile (owner.getProcessor(), *clip); };
+        dragOut.attachTo (drag, owner.getProcessor(), [this] { return actions::dragJobFor (owner.getProcessor(), *clip); });
         addAndMakeVisible (drag);
     }
 
@@ -187,6 +188,7 @@ private:
     juce::TextButton editBtn { "EDIT" };
     IconButton saveBtn { "save", icons::save(), {}, "gold" };
     DragHandle drag { "DRAG" };
+    DragOut dragOut;
     WaveThumb thumb;
     juce::Rectangle<float> waveArea;
     bool showingStop = false, scrubbing = false;
@@ -366,6 +368,22 @@ StemsPage::StemsPage (EditorContext& c) : ctx (c), proc (c.getProcessor())
         tmp.audio = edit::mix (layers, gains);
         return actions::makeDragFile (proc, tmp);
     };
+    // (the drag itself goes through this: a whole song's mix is made by a background job first)
+    mixDrag.attachTo (dragMix, proc, [this]
+    {
+        std::vector<AudioData::Ptr> layers;
+        std::vector<float> gains;
+        bool anyAudible = false;
+        for (auto* l : lanes) { layers.push_back (l->clip->audio); gains.push_back (l->isAudible() ? 1.0f : 0.0f); anyAudible = anyAudible || l->isAudible(); }
+        if (layers.empty() || shownParent == nullptr)
+            return actions::DragJob();
+        if (! anyAudible)
+        {
+            ctx.toast ("Every stem is muted, so the mix would be silent. Un-mute the ones you want in it.", true);
+            return actions::DragJob();
+        }
+        return actions::dragJobForMix (proc, shownParent->name + " - custom mix", layers, gains);
+    });
     for (auto* comp : std::initializer_list<juce::Component*> { &playMixBtn, &stopBtn, &saveAllBtn, &dragMix })
         addAndMakeVisible (comp);
 

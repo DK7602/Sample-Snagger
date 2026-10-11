@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Page.h"
+#include "DragOut.h"
 #include "SeparationAnimation.h"
 
 namespace snag
@@ -81,6 +82,7 @@ private:
     IconButton stopBtn    { "stop", theme::icons::stop(), {}, "gold" };
     IconButton saveAllBtn { "saveall", theme::icons::save(), "SAVE ALL STEMS", "gold" };
     DragHandle dragMix { "DRAG MIX OF UNMUTED STEMS" };
+    DragOut mixDrag;
 
     Clip::Ptr shownParent;
     juce::StringArray shownStemIds;

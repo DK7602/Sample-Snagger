@@ -30,6 +30,14 @@ public:
     /** Starts capturing `processId` and its children. Returns false (see getLastError()) if the
         system can't do it; blocks for at most a few seconds. */
     bool start (juce::uint32 processId, Callback callback);
+
+    /** The same without the wait, for the message thread: opening the audio can take the system a
+        few seconds, and that used to freeze the window. Returns false if it can't even be tried;
+        after that getState() says how it is going. */
+    bool begin (juce::uint32 processId, Callback callback);
+    enum class State { stopped, starting, running, failed };
+    State getState() const;
+
     void stop();
 
     bool isRunning() const;

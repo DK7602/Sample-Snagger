@@ -5,6 +5,7 @@
 #include <set>
 
 #include "Page.h"
+#include "DragOut.h"
 #include "WaveformView.h"
 #include "StudioDecks.h"
 #include "../core/KeyDetect.h"
@@ -40,6 +41,8 @@ private:
     bool showSelected = false;
     juce::uint32 litUntil = 0, lastCounter = 0;
     bool dragStarted = false;
+    int dragPad = -1;
+    DragOut dragOut;
 };
 
 //==============================================================================
@@ -116,7 +119,19 @@ private:
     void stop();
     void undo();
     void redo();
-    void detectBpm();
+    /** `then` runs once the tempo is known (or isn't): at once for a short sample, after the
+        background job for a long one. */
+    void detectBpm (std::function<void()> then = {});
+
+    // AUTO CHOP and tempo detection look at the whole sample. A short one is done on the spot; a
+    // long one (a full song, a 15-minute take) is looked at by a background job, so the window
+    // doesn't stand still for it.
+    static bool quickToAnalyse (const AudioData& a) noexcept   { return a.lengthSeconds() <= 45.0; }
+    struct ChopFind { std::vector<int> found; int hitsFound = 0; };
+    struct ChopAsk  { bool every = false, sel = false; float sensitivity = 0.5f; int count = 0, a = 0, b = 0; };
+    static ChopFind findChops (const AudioData&, const ChopAsk&, const std::vector<int>& slicesNow);
+    void applyChops (Clip::Ptr, const ChopFind&, const ChopAsk&);
+    std::set<juce::String> analysing;   // samples with an AUTO CHOP or tempo job under way
     void detectKey (bool quiet);
     void showKeyMenu();
     void refreshKey();
@@ -152,6 +167,7 @@ private:
     juce::TextButton fitBtn { "FIT" };
     IconButton saveBtn { "save", theme::icons::save(), "SAVE", "gold" };
     DragHandle dragHandle;
+    DragOut sampleDrag;
 
     SlicePads pads;
 

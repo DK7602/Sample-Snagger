@@ -123,6 +123,10 @@ public:
     explicit DragHandle (const juce::String& caption = "DRAG TO DAW");
 
     std::function<juce::File()> makeFile;
+    /** Instead of makeFile, for sounds that can take a while to render (see DragOut): called for
+        every movement of a drag, and when the mouse button goes down / comes up. */
+    std::function<void()> onDragging;
+    std::function<void (bool isDown)> onPressChange;
     void setCaption (const juce::String& c) { caption = c; repaint(); }
 
     void paint (juce::Graphics&) override;

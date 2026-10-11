@@ -403,7 +403,7 @@ bool ToolManager::download (const juce::String& url, const juce::File& dest, Job
 
     // (its own name every time: another Sample Snagger - the app next to the plug-in - may be
     //  fetching the same file, and two writers in one ".part" left a broken tool or AI model behind)
-    auto tmp = dest.getSiblingFile (dest.getFileName() + "." + juce::String::toHexString (juce::Random::getSystemRandom().nextInt()) + ".part");
+    auto tmp = dest.getSiblingFile (dest.getFileName() + "." + paths::uniqueTag() + ".part");
     dest.getParentDirectory().createDirectory();
     for (auto& stale : dest.getParentDirectory().findChildFiles (juce::File::findFiles, false, dest.getFileName() + ".*part"))
         if (stale.getLastModificationTime() < juce::Time::getCurrentTime() - juce::RelativeTime::hours (6))

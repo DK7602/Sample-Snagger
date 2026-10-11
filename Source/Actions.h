@@ -61,6 +61,23 @@ namespace snag::actions
     juce::File makeDragFile (SnaggerProcessor&, const Clip& clip, int start = 0, int end = -1,
                              const juce::String& suffix = {});
 
+    /** What a drag file is made from, put together on the message thread - so that the making
+        itself (rendering the FX, writing the WAV) can be done on any thread, away from the window. */
+    struct DragJob
+    {
+        std::function<AudioData::Ptr()> render;   // works only on what it holds: safe on any thread
+        juce::String name;
+        int bitDepth = 24;
+        juce::int64 samples = 0;                  // how much there is to render and write
+        juce::String key;                         // the same key gives the same file
+        bool isValid() const   { return render != nullptr; }
+    };
+    DragJob dragJobFor (SnaggerProcessor&, const Clip& clip, int start = 0, int end = -1, const juce::String& suffix = {});
+    DragJob dragJobForPad (SnaggerProcessor&, const Clip& clip, int padIndex);
+    DragJob dragJobForMix (SnaggerProcessor&, const juce::String& name, const std::vector<AudioData::Ptr>& layers,
+                           const std::vector<float>& gains);
+    juce::File makeDragFile (const DragJob&);
+
     /** The audio you'd hear for (a range of) a clip: with its FX rack, echoes / reverb ringing out. */
     AudioData::Ptr renderForExport (SnaggerProcessor&, const Clip& clip, int start, int end);
 

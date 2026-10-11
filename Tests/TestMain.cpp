@@ -565,6 +565,10 @@ static void testProcessAudio()
     if (! ProcessAudioCapture::isSupported())
     {
         std::cout << "  (not on this system - the page script capture is used)\n";
+        ProcessAudioCapture none;
+        CHECK (! none.begin (ProcessAudioCapture::currentProcessId(), [] (const float*, int) {})
+                   && none.getState() == ProcessAudioCapture::State::failed && none.getLastError().isNotEmpty(),
+               "where the system can't do it, asking says so at once");
         return;
     }
     // Build machines have no sound card, so this only proves it opens / closes cleanly.
@@ -582,6 +586,23 @@ static void testProcessAudio()
         CHECK (frames.load() > 48000 / 4, "browser process audio keeps real time (silence is filled in)");
     }
     CHECK (openMs < 9000.0 && ! cap.isRunning(), "browser process audio opens and closes cleanly");
+
+    // the way the window asks for it: without waiting
+    {
+        ProcessAudioCapture later;
+        const auto t1 = juce::Time::getMillisecondCounterHiRes();
+        const bool begun = later.begin (ProcessAudioCapture::currentProcessId(), [] (const float*, int) {});
+        const double askMs = juce::Time::getMillisecondCounterHiRes() - t1;
+        for (int i = 0; i < 900 && later.getState() == ProcessAudioCapture::State::starting; ++i)
+            juce::Thread::sleep (10);
+        const auto state = later.getState();
+        std::cout << "  begin: " << (int) askMs << " ms, then " << (state == ProcessAudioCapture::State::running ? "running" : "not available") << "\n";
+        CHECK (begun && askMs < 500.0 && (state == ProcessAudioCapture::State::running) == ok
+                   && (state == ProcessAudioCapture::State::running || state == ProcessAudioCapture::State::failed),
+               "asking for the browser's audio doesn't hold up the window (" + juce::String (askMs, 0) + " ms)");
+        later.stop();
+        CHECK (later.getState() == ProcessAudioCapture::State::stopped, "  ...and it stops cleanly");
+    }
 }
 
 /** Dominant frequency of channel 0 by zero crossings (fine for a sine). */
@@ -2079,6 +2100,40 @@ struct StudioPageTester
             page.wave.setSelection (0, 0);
         }
 
+        // ---- a long sample: AUTO CHOP and the tempo are worked out by a background job
+        {
+            auto c = addClip ("Long take", makeClicks (44100.0, 70.0, 0.5));   // 70 s at 120 BPM
+            c->bpm = 0.0;
+            page.chopCount.setSelectedId (StudioPage::everyHit, juce::sendNotificationSync);
+            const auto t0 = juce::Time::getMillisecondCounterHiRes();
+            page.autoChop();
+            const double clickMs = juce::Time::getMillisecondCounterHiRes() - t0;
+            const bool waiting = c->slices.empty() && page.analysing.count (c->id) == 1;
+            page.autoChop();   // (a second click while it works doesn't start it again)
+            settle();
+            CHECK (waiting && (int) c->sliceBoundaries().size() - 1 == StudioPage::maxPads && page.analysing.empty(),
+                   "AUTO CHOP on a 70-second sample runs in the background (the click took " + juce::String (clickMs, 0) + " ms) and its chops arrive when it is done");
+            CHECK (c->undoStack.size() == 1, "  ...as one undo step, however often the button was clicked meanwhile");
+
+            page.detectBpm();
+            const bool notYet = c->bpm <= 0.0;
+            settle();
+            CHECK (notYet && std::abs (c->bpm - 120.0) < 1.5, "  ...and so does DETECT (" + juce::String (c->bpm, 1) + " BPM)");
+
+            c->bpm = 0.0;
+            page.pitchDefaultBtn.onClick();
+            page.bpmKnob.slider.setValue (100.0, juce::sendNotificationSync);
+            page.matchBpm();   // finds the tempo first, then sets LENGTH
+            for (int i = 0; i < 600 && (page.analysing.count (c->id) != 0 || c->bpm <= 0.0); ++i)
+                pump (50);
+            pump (100);
+            const double aimedAt = c->bpmWith (c->adjust);
+            CHECK (std::abs (aimedAt - 100.0) < 1.5,
+                   "  ...MATCH BPM on a long sample whose tempo isn't known yet finds it, then matches (" + juce::String (aimedAt, 1) + " BPM)");
+            p->jobs.cancelAll();   // (no need to sit through the 70-second stretch here)
+            settle();
+        }
+
         // ---- a name being typed when another sample takes over
         {
             auto first = addClip ("First", makeSine (440.0, 0.5));
@@ -2217,6 +2272,76 @@ static void testNetwork()
 }
 
 //==============================================================================
+/** Dragging a sound out: what the file is made from, and a long one made in the background. */
+static void testDragOut()
+{
+    std::cout << "\n[dragging a sound out]\n";
+    juce::StringArray said;
+    SnaggerProcessor p;
+    p.onNotify = [&said] (const juce::String& m, bool) { said.add (m); };
+    auto settle = [&p] { pump (200); for (int i = 0; i < 400 && p.jobs.isBusy(); ++i) pump (50); pump (200); };
+
+    Clip::Ptr shortClip (new Clip());
+    shortClip->name = "Drag test " + paths::uniqueTag();
+    shortClip->audio = makeSine (440.0, 2.0);
+    shortClip->fx.reverbOn = true;
+    p.session.add (shortClip, true);
+
+    // the same sound, described on the message thread and made on another one
+    const auto job = actions::dragJobFor (p, *shortClip, 1000, 40000, " (cut)");
+    auto direct = actions::renderForExport (p, *shortClip, 1000, 40000);
+    juce::File made;
+    std::thread worker ([&made, job] { made = actions::makeDragFile (job); });
+    worker.join();
+    auto loaded = made.existsAsFile() ? audioio::loadFile (made, {}).audio : nullptr;
+    CHECK (job.isValid() && DragOut::isQuick (job) && loaded != nullptr && direct != nullptr && loaded->getNumSamples() == direct->getNumSamples()
+               && made.getFileNameWithoutExtension() == shortClip->name + " (cut)",
+           "a drag file can be made away from the window's thread, FX and all");
+    auto other = actions::dragJobFor (p, *shortClip, 1000, 30000, " (cut)");
+    CHECK (actions::dragJobFor (p, *shortClip, 1000, 40000, " (cut)").key == job.key && other.key != job.key,
+           "  ...and the same pick of the same sound is recognised as the same file");
+
+    // a long sample: the drag doesn't wait for the file
+    Clip::Ptr longClip (new Clip());
+    longClip->name = "Long drag test " + paths::uniqueTag();
+    longClip->audio = makeSine (220.0, 150.0);
+    p.session.add (longClip, true);
+    juce::Component source;
+    DragOut drag;
+    auto describe = [&p, longClip] { return actions::dragJobFor (p, *longClip); };
+
+    drag.pressed();
+    const auto t0 = juce::Time::getMillisecondCounterHiRes();
+    drag.drag (p, source, describe);
+    const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+    CHECK (drag.isPreparing() && ! DragOut::isQuick (describe()), "a 150-second sample is made ready by a background job (the mouse move took " + juce::String (ms, 0) + " ms)");
+    drag.drag (p, source, describe);   // the mouse keeps moving
+    CHECK (drag.isPreparing(), "  ...which is started once, however much the mouse moves");
+    settle();
+    const auto file = paths::dragExportDir().getChildFile (longClip->name + ".wav");
+    drag.drag (p, source, describe);   // the next movement finds the file there
+    CHECK (file.existsAsFile() && ! drag.isPreparing(), "  ...and the drag goes ahead when the file is there");
+    drag.released();
+
+    // let go before it was ready, then dragged again
+    const auto stamp = file.getLastModificationTime();
+    drag.pressed();
+    drag.drag (p, source, describe);
+    CHECK (! drag.isPreparing() && ! p.jobs.isBusy() && file.getLastModificationTime() == stamp, "  ...the same sample dragged again starts at once, from the file that was made");
+    drag.released();
+
+    longClip->fx.driveOn = true;   // (another sound now: it has to be made again)
+    drag.pressed();
+    drag.drag (p, source, describe);
+    const bool again = drag.isPreparing();
+    drag.released();               // let go while it is still being made
+    settle();
+    CHECK (again && said.joinIntoString ("|").contains ("drag again"), "  ...a changed sample is made again; letting go early says the file will be ready for the next drag");
+
+    for (auto& f : paths::dragExportDir().findChildFiles (juce::File::findFiles, false, "*drag test*"))
+        f.deleteFile();
+}
+
 /** Helper tools and AI models are checked against a checksum before they are used. */
 static void testDownloadChecks (const juce::File& tmp)
 {
@@ -3388,6 +3513,7 @@ int main (int argc, char** argv)
     testAuditSecondPass();
     testSessionCleanUp (tmp);
     testDownloadChecks (tmp);
+    testDragOut();
    #if SNAGGER_BUILTIN_AI
     testAiWindows();
    #endif

@@ -176,7 +176,8 @@ set(SNAGGER_SOURCES
     Source/ui/SeparationAnimation.cpp
     Source/ui/LibraryPage.cpp
     Source/ui/SettingsPanel.cpp
-    Source/ui/ClipTray.cpp)
+    Source/ui/ClipTray.cpp
+    Source/ui/DragOut.cpp)
 
 # Everything that the plug-in and the test runner share
 add_library(SnaggerShared INTERFACE)
