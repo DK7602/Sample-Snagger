@@ -186,6 +186,7 @@ target_link_libraries(SnaggerShared INTERFACE
     signalsmith-stretch
     juce::juce_audio_utils
     juce::juce_audio_formats
+    juce::juce_cryptography
     juce::juce_dsp
     juce::juce_gui_extra
     juce::juce_recommended_config_flags

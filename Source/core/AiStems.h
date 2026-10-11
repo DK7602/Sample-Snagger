@@ -17,6 +17,7 @@ namespace snag::ai
         const char* fileName;
         const char* label;
         int megabytes;
+        const char* sha256;     // of the file as published: a download has to match it
     };
 
     const ModelInfo& info (ModelId);

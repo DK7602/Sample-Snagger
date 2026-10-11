@@ -2217,6 +2217,60 @@ static void testNetwork()
 }
 
 //==============================================================================
+/** Helper tools and AI models are checked against a checksum before they are used. */
+static void testDownloadChecks (const juce::File& tmp)
+{
+    std::cout << "\n[downloads are checked]\n";
+    auto src = tmp.getChildFile ("download-source.bin");
+    src.replaceWithText ("abc");
+    const juce::String abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    CHECK (ToolManager::sha256Of (src) == abc && ToolManager::sha256Of (tmp.getChildFile ("not-there")).isEmpty(), "the SHA-256 of a file is worked out");
+
+    // the three ways the projects publish theirs
+    const juce::String list = "1fa6733c37ea6fb51c99ad8fe785e7b7e5f3246c9b980230329d4fb72ed8d4d6  yt-dlp\n"
+                              "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a  yt-dlp.exe\n"
+                              "58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a  yt-dlp_linux\n"
+                              "32e72032766bef9199d99d15beb69fd52e46df8f8b06f0d8745db59e04d339e9  yt-dlp_linux.zip\n";
+    CHECK (ToolManager::checksumFrom (list, "yt-dlp_linux") == "58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a"
+               && ToolManager::checksumFrom (list, "yt-dlp") == "1fa6733c37ea6fb51c99ad8fe785e7b7e5f3246c9b980230329d4fb72ed8d4d6"
+               && ToolManager::checksumFrom (list, "yt-dlp_macos").isEmpty(),
+           "a checksum is found by file name in a release's list (and not for a file that isn't in it)");
+    CHECK (ToolManager::checksumFrom ("5cd46d6268f6f78f5d88bdc7159d20bd44cdaa4b3303474839f87ec6fe7ae25c  deno-aarch64-apple-darwin.zip\n", "deno-aarch64-apple-darwin.zip")
+               == "5cd46d6268f6f78f5d88bdc7159d20bd44cdaa4b3303474839f87ec6fe7ae25c"
+               && ToolManager::checksumFrom ("5cd46d6268f6f78f5d88bdc7159d20bd44cdaa4b3303474839f87ec6fe7ae25c  some-other-file.zip\n", "deno-aarch64-apple-darwin.zip").isEmpty(),
+           "  ...in a file of its own, for that file only");
+    CHECK (ToolManager::checksumFrom ("\r\nAlgorithm : SHA256\r\nHash      : A0C3101B4158D1DFB7D6A78A7BF0F3DE80C96BB423C152BEEC8BEB22786F2238\r\n"
+                                      "Path      : C:\\a\\deno\\deno\\target\\release\\deno-x86_64-pc-windows-msvc.zip\r\n\r\n", "deno-x86_64-pc-windows-msvc.zip")
+               == "a0c3101b4158d1dfb7d6a78a7bf0f3de80c96bb423c152beec8beb22786f2238",
+           "  ...and the way Windows writes it");
+    CHECK (ToolManager::pinnedChecksum ("ffmpeg-linux-x64.gz").length() == 64 && ToolManager::pinnedChecksum ("ffmpeg-win32-x64.gz").length() == 64
+               && ToolManager::pinnedChecksum ("ffmpeg-darwin-arm64.gz").length() == 64 && ToolManager::pinnedChecksum ("something-else.gz").isEmpty(),
+           "FFmpeg's checksums are built in");
+    bool modelSums = true;
+    for (auto id : { ai::ModelId::htdemucs4, ai::ModelId::htdemucs6, ai::ModelId::ftVocals, ai::ModelId::ftDrums, ai::ModelId::ftBass, ai::ModelId::ftOther })
+        modelSums = modelSums && juce::String (ai::info (id).sha256).length() == 64;
+    CHECK (modelSums && ai::defaultModelBaseUrl().contains ("/resolve/") && ! ai::defaultModelBaseUrl().contains ("/main/"),
+           "  ...and so are the AI models', for one fixed revision of the files");
+
+    // a download that matches is put in place; one that doesn't is thrown away
+    const auto url = juce::URL (src).toString (true);
+    {
+        Job job ("download", nullptr, nullptr);
+        auto dest = tmp.getChildFile ("downloaded-good.bin");
+        const bool ok = ToolManager::download (url, dest, job, 0.0f, 1.0f, abc.toUpperCase());
+        CHECK (ok && dest.loadFileAsString() == "abc" && ! job.hasFailed(), "a download that matches its checksum is installed " + job.getError());
+    }
+    {
+        Job job ("download", nullptr, nullptr);
+        auto dest = tmp.getChildFile ("downloaded-bad.bin");
+        dest.replaceWithText ("the copy that works");
+        const bool ok = ToolManager::download (url, dest, job, 0.0f, 1.0f, juce::String::repeatedString ("0", 64));
+        CHECK (! ok && job.hasFailed() && dest.loadFileAsString() == "the copy that works"
+                   && tmp.getNumberOfChildFiles (juce::File::findFiles, "*.part") == 0,
+               "one that doesn't match is thrown away, and what was installed before stays");
+    }
+}
+
 /** The Sessions folder: what is left behind, what is kept, and the clean-up in Settings. */
 static void testSessionCleanUp (const juce::File& tmp)
 {
@@ -2473,6 +2527,11 @@ static void testBuiltinAi()
             }
         }
     }
+
+    // The models that were just downloaded are the files Sample Snagger expects, byte for byte.
+    for (auto id : { ai::ModelId::htdemucs4, ai::ModelId::ftVocals })
+        CHECK (ToolManager::sha256Of (ai::modelFile (id)) == juce::String (ai::info (id).sha256),
+               "the AI " + juce::String (ai::info (id).label) + " on disk matches its built-in checksum");
 
     // How fast it is (the models are on disk by now), noted on the CI run so it can be compared.
     {
@@ -3328,6 +3387,7 @@ int main (int argc, char** argv)
     testAuditKnobs();
     testAuditSecondPass();
     testSessionCleanUp (tmp);
+    testDownloadChecks (tmp);
    #if SNAGGER_BUILTIN_AI
     testAiWindows();
    #endif

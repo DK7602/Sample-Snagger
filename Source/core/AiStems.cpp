@@ -13,12 +13,12 @@ namespace snag::ai
 {
 
 static const ModelInfo models[] = {
-    { ModelId::htdemucs4, "ggml-model-htdemucs-4s-f16.bin",           "4-stem model",           81 },
-    { ModelId::htdemucs6, "ggml-model-htdemucs-6s-f16.bin",           "6-stem model",           53 },
-    { ModelId::ftVocals,  "ggml-model-htdemucs_ft_vocals-4s-f16.bin", "fine-tuned vocal model", 81 },
-    { ModelId::ftDrums,   "ggml-model-htdemucs_ft_drums-4s-f16.bin",  "fine-tuned drum model",  81 },
-    { ModelId::ftBass,    "ggml-model-htdemucs_ft_bass-4s-f16.bin",   "fine-tuned bass model",  81 },
-    { ModelId::ftOther,   "ggml-model-htdemucs_ft_other-4s-f16.bin",  "fine-tuned other model", 81 },
+    { ModelId::htdemucs4, "ggml-model-htdemucs-4s-f16.bin",           "4-stem model",           81, "72b17c42d308982ddb5069bc3bf48b81a5aac4cb6516e4366c0fa7cef6df0064" },
+    { ModelId::htdemucs6, "ggml-model-htdemucs-6s-f16.bin",           "6-stem model",           53, "09704f4ceae204e56e77d5eefd6ac71d7275be81fd507e6913371d59abcee856" },
+    { ModelId::ftVocals,  "ggml-model-htdemucs_ft_vocals-4s-f16.bin", "fine-tuned vocal model", 81, "19186500a45a551a034d96e9500415ebe73c8bd570bf55337ddc8cc8f53a9120" },
+    { ModelId::ftDrums,   "ggml-model-htdemucs_ft_drums-4s-f16.bin",  "fine-tuned drum model",  81, "cda268755cc80deb5f4616a99f9d09f26bc5ce3882aa35e0bc504708a12604bb" },
+    { ModelId::ftBass,    "ggml-model-htdemucs_ft_bass-4s-f16.bin",   "fine-tuned bass model",  81, "e6ded215aa15fb4eff7a37f3a51fd596ee17c94ae0ddb7ef3f2f6ecf8b86cdb5" },
+    { ModelId::ftOther,   "ggml-model-htdemucs_ft_other-4s-f16.bin",  "fine-tuned other model", 81, "cbc315571584d512e7853c9d40a499182393a7f4155cb8723a9040a685c2435b" },
 };
 
 const ModelInfo& info (ModelId id)
@@ -103,7 +103,8 @@ int downloadMegabytesFor (Mode mode, const juce::StringArray& parts)
 
 juce::String defaultModelBaseUrl()
 {
-    return "https://huggingface.co/datasets/Retrobear/demucs.cpp/resolve/main/";
+    // (a fixed revision of the files, not "whatever is there today": the checksums above belong to it)
+    return "https://huggingface.co/datasets/Retrobear/demucs.cpp/resolve/8f58ac0491bbea657275bcd3e38af1ab3a27bfc9/";
 }
 
 bool ensureModels (Mode mode, Job& job, const juce::String& baseUrlIn, float p0, float p1, const juce::StringArray& parts)
@@ -125,7 +126,7 @@ bool ensureModels (Mode mode, Job& job, const juce::String& baseUrlIn, float p0,
         auto dest = modelFile (m.id);
 
         job.setStatus ("Downloading the AI " + juce::String (m.label) + " (" + juce::String (m.megabytes) + " MB, one time only)");
-        if (! ToolManager::download (baseUrl + m.fileName, dest, job, a, b))
+        if (! ToolManager::download (baseUrl + m.fileName, dest, job, a, b, m.sha256))
         {
             if (! job.isCancelled() && ! job.hasFailed())
                 job.fail ("Couldn't download the AI model. Check your internet connection and try again.");

@@ -137,6 +137,10 @@ releases, FFmpeg from the [ffmpeg-static](https://github.com/eugeneware/ffmpeg-s
 from Hugging Face. Everything goes into Sample Snagger's own folder - nothing else on your system is touched. LIVE REC, hindsight grabs,
 Quick Split and everything in STUDIO work with no tools at all.
 
+Every download is checked before it is used: FFmpeg and the AI models against checksums built into Sample Snagger
+(one fixed version of each), yt-dlp and Deno - always the newest release - against the checksums their projects
+publish with it. A download that doesn't match is thrown away and whatever was installed before stays.
+
 ---
 
 ## Tips

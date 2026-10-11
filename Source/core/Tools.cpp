@@ -1,6 +1,7 @@
 #include "Tools.h"
 #include "AiStems.h"
 #include "SnaggerBinaryData.h"
+#include <juce_cryptography/juce_cryptography.h>
 
 namespace snag
 {
@@ -287,7 +288,80 @@ struct DownloadsInFlight
     };
 };
 
-bool ToolManager::download (const juce::String& url, const juce::File& dest, Job& job, float p0, float p1)
+//==============================================================================
+// Checking what was downloaded. These are programs that get run and models that get loaded: a
+// file that was cut off, damaged on the way or swapped for something else must not be used.
+
+juce::String ToolManager::sha256Of (const juce::File& file)
+{
+    if (! file.existsAsFile())
+        return {};
+    juce::FileInputStream in (file);
+    if (! in.openedOk())
+        return {};
+    return juce::SHA256 (in).toHexString().toLowerCase();
+}
+
+static bool isChecksum (const juce::String& word)
+{
+    return word.length() == 64 && word.containsOnly ("0123456789abcdefABCDEF");
+}
+
+juce::String ToolManager::checksumFrom (const juce::String& published, const juce::String& fileName)
+{
+    juce::StringArray all;
+    for (auto& line : juce::StringArray::fromLines (published))
+    {
+        auto words = juce::StringArray::fromTokens (line.trim(), " \t", {});
+        words.removeEmptyStrings();
+        if (! words.isEmpty() && isChecksum (words[words.size() - 1]))   // (on its own, or as "Hash : <checksum>")
+            all.addIfNotAlreadyThere (words[words.size() - 1].toLowerCase());
+
+        // "<checksum>  <name>" (or "<checksum> *<name>"), as sha256sum writes it
+        if (words.size() >= 2 && isChecksum (words[0]))
+        {
+            const auto name = line.trim().substring (64).trim().trimCharactersAtStart ("*");
+            if (name == fileName)
+                return words[0].toLowerCase();
+        }
+    }
+    // a file of its own for this download, with nothing but its checksum in it
+    return all.size() == 1 ? all[0] : juce::String();
+}
+
+juce::String ToolManager::pinnedChecksum (const juce::String& fileName)
+{
+    // FFmpeg 6.1.1, eugeneware/ffmpeg-static release "b6.1.1" (the files as published there)
+    static const std::pair<const char*, const char*> known[] = {
+        { "ffmpeg-win32-x64.gz",    "8883a3dffbd0a16cf4ef95206ea05283f78908dbfb118f73c83f4951dcc06d77" },
+        { "ffmpeg-darwin-arm64.gz", "8923876afa8db5585022d7860ec7e589af192f441c56793971276d450ed3bbfa" },
+        { "ffmpeg-darwin-x64.gz",   "929b375c1182d956c51f7ac25e0b2b0411fb01f6f407aa15c9758efeb4242106" },
+        { "ffmpeg-linux-arm64.gz",  "754a678672298bc68156adff58aa7385a592c2b30b1d0ae8750c45c915c4bac0" },
+        { "ffmpeg-linux-x64.gz",    "bfe8a8fc511530457b528c48d77b5737527b504a3797a9bc4866aeca69c2dffa" },
+    };
+    for (auto& [name, sum] : known)
+        if (fileName == name)
+            return sum;
+    return {};
+}
+
+/** A small text file from the web (a release's list of checksums). Empty if it can't be had. */
+static juce::String fetchText (const juce::String& url)
+{
+    int status = 0;
+    auto stream = juce::URL (url).createInputStream (juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
+                                                        .withConnectionTimeoutMs (15000)
+                                                        .withNumRedirectsToFollow (10)
+                                                        .withStatusCode (&status)
+                                                        .withExtraHeaders ("User-Agent: SampleSnagger/1.0"));
+    if (stream == nullptr || (status != 0 && status >= 400))
+        return {};
+    juce::MemoryBlock data;
+    stream->readIntoMemoryBlock (data, 512 * 1024);
+    return data.toString();
+}
+
+bool ToolManager::download (const juce::String& url, const juce::File& dest, Job& job, float p0, float p1, const juce::String& sha256)
 {
     auto& inFlight = DownloadsInFlight::get();
     const auto key = dest.getFullPathName();
@@ -390,6 +464,17 @@ bool ToolManager::download (const juce::String& url, const juce::File& dest, Job
         }
     }
 
+    if (sha256.trim().isNotEmpty())
+    {
+        job.setStatus ("Checking the download");
+        if (! sha256Of (tmp).equalsIgnoreCase (sha256.trim()))
+        {
+            job.fail ("The download of " + dest.getFileName() + " isn't the file it should be (its checksum doesn't match): it was damaged on "
+                      "the way, or replaced. Nothing was installed. Try again - if it keeps happening, look for a newer Sample Snagger.");
+            return false;
+        }
+    }
+
     if (! tmp.replaceFileIn (dest))
     {
         tmp.deleteFile();
@@ -432,7 +517,7 @@ bool ToolManager::installFfmpeg (Job& job)
     const auto url = "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/" + asset;
     auto gz = paths::tempDir().getChildFile (asset);
     job.setStatus ("Downloading FFmpeg");
-    if (! download (url, gz, job, 0.0f, 0.85f))
+    if (! download (url, gz, job, 0.0f, 0.85f, pinnedChecksum (asset)))   // (a fixed version: its checksum is built in)
         return false;
 
     job.setStatus ("Unpacking FFmpeg");
@@ -478,9 +563,13 @@ bool ToolManager::installYtDlp (Job& job)
     #endif
    #endif
 
+    // The newest release, whatever that is today: checked against the list of checksums yt-dlp
+    // publishes with it.
+    const juce::String release = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/";
     job.setStatus ("Downloading yt-dlp");
+    const auto expected = checksumFrom (fetchText (release + "SHA2-256SUMS"), asset);
     auto dest = paths::toolsDir().getChildFile (exeName ("yt-dlp"));
-    if (! download ("https://github.com/yt-dlp/yt-dlp/releases/latest/download/" + asset, dest, job, 0.0f, 1.0f))
+    if (! download (release + asset, dest, job, 0.0f, 1.0f, expected))
         return false;
     makeRunnable (dest);
     return true;
@@ -505,9 +594,12 @@ bool ToolManager::installDeno (Job& job)
     #endif
    #endif
 
+    // (the newest release, checked against the checksum Deno publishes next to each file)
+    const juce::String release = "https://github.com/denoland/deno/releases/latest/download/";
     job.setStatus ("Downloading Deno");
+    const auto expected = checksumFrom (fetchText (release + asset + ".sha256sum"), asset);
     auto zipFile = paths::tempDir().getChildFile (asset);
-    if (! download ("https://github.com/denoland/deno/releases/latest/download/" + asset, zipFile, job, 0.0f, 0.9f))
+    if (! download (release + asset, zipFile, job, 0.0f, 0.9f, expected))
         return false;
 
     job.setStatus ("Unpacking Deno");
