@@ -22,6 +22,14 @@ jobs:
   macos:
     name: macOS (universal)
     runs-on: macos-15
+    # Signing and notarisation happen when these repository secrets exist (packaging/mac/SIGNING.md
+    # says how to make them). Without them the build is signed "ad hoc", as it always was.
+    env:
+      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -60,12 +68,30 @@ jobs:
       - name: Test built-in AI stems (real models)
         run: ./build/SnaggerTests_artefacts/${{ env.BUILD_TYPE }}/SnaggerTests --ai
 
-      - name: Ad-hoc sign bundles
+      - name: Import signing certificates
+        if: env.MACOS_CERTIFICATE_P12 != ''
         run: |
-          ART="build/SampleSnagger_artefacts/${{ env.BUILD_TYPE }}"
-          codesign --force --deep -s - "$ART/AU/Sample Snagger.component"
-          codesign --force --deep -s - "$ART/VST3/Sample Snagger.vst3"
-          codesign --force --deep -s - "$ART/Standalone/Sample Snagger.app"
+          # a keychain of its own, that goes away with the build machine
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificates.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/certificates.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/certificates.p12"
+          # which certificates came with it (their names are what codesign / productbuild are told)
+          APP_ID="$(security find-identity -v -p codesigning "$KEYCHAIN" | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"' || true)"
+          PKG_ID="$(security find-identity -v "$KEYCHAIN" | grep -o '"Developer ID Installer: [^"]*"' | head -1 | tr -d '"' || true)"
+          if [ -z "$APP_ID" ]; then echo "::error title=macOS signing::No \"Developer ID Application\" certificate in MACOS_CERTIFICATE_P12"; exit 1; fi
+          if [ -z "$PKG_ID" ]; then echo "::warning title=macOS signing::No \"Developer ID Installer\" certificate in MACOS_CERTIFICATE_P12: the .pkg stays unsigned"; fi
+          echo "MACOS_SIGN_IDENTITY=$APP_ID" >> "$GITHUB_ENV"
+          echo "MACOS_INSTALLER_IDENTITY=$PKG_ID" >> "$GITHUB_ENV"
+
+      - name: Sign bundles
+        run: bash packaging/mac/sign.sh "build/SampleSnagger_artefacts/${{ env.BUILD_TYPE }}"
 
       - name: Validate Audio Unit (auval)
         continue-on-error: true

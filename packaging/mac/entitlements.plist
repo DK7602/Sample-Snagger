@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- What the signed (hardened runtime) build is allowed to do. Only used when the build is signed
+     with a Developer ID - see SIGNING.md. -->
+<plist version="1.0">
+<dict>
+    <!-- REC INPUT: recording from the audio input (the standalone app; inside a DAW the DAW's own
+         permission counts) -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>

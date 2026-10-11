@@ -5,6 +5,12 @@
 #   Standalone -> /Applications
 #
 # usage: packaging/mac/build_pkg.sh <artefacts dir> <output dir>
+#
+# Signing and notarisation (optional - see SIGNING.md). Without these the installer is built as
+# it always was, and macOS asks the user to allow it:
+#   MACOS_INSTALLER_IDENTITY   "Developer ID Installer: ..." certificate to sign the .pkg with
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD
+#                              the Apple account that sends it to Apple's notary service
 set -Eeuo pipefail
 # (on GitHub Actions a failure shows up on the run's summary page, with the command that failed)
 trap 'echo "::error title=macOS installer::build_pkg.sh line $LINENO: $BASH_COMMAND"' ERR
@@ -80,13 +86,49 @@ Sample Snagger once to install the free helper tools for HQ downloads and AI ste
 </body></html>
 EOF
 
-productbuild --distribution "$WORK/distribution.xml" --resources "$WORK/resources" --package-path "$WORK" \
-             "$OUT/Sample-Snagger-${VERSION}-macOS.pkg"
+PKG="$OUT/Sample-Snagger-${VERSION}-macOS.pkg"
+INSTALLER_IDENTITY="${MACOS_INSTALLER_IDENTITY:-}"
+if [ -n "$INSTALLER_IDENTITY" ]; then
+    productbuild --distribution "$WORK/distribution.xml" --resources "$WORK/resources" --package-path "$WORK" \
+                 --sign "$INSTALLER_IDENTITY" --timestamp "$PKG"
+else
+    productbuild --distribution "$WORK/distribution.xml" --resources "$WORK/resources" --package-path "$WORK" "$PKG"
+fi
 
 # A zip of the raw bundles too, for people who prefer to copy them by hand
+# (ditto keeps everything a signature covers)
 mkdir -p "$WORK/bundles"
 cp -R "$WORK/au/"* "$WORK/vst3/"* "$WORK/app/"* "$WORK/bundles/"
-( cd "$WORK/bundles" && zip -qry "$WORK/bundles.zip" . )
-mv "$WORK/bundles.zip" "$OUT/Sample-Snagger-${VERSION}-macOS-bundles.zip"
+ZIP="$OUT/Sample-Snagger-${VERSION}-macOS-bundles.zip"
+rm -f "$ZIP"
+ditto -c -k "$WORK/bundles" "$ZIP"
 
-echo "Built $OUT/Sample-Snagger-${VERSION}-macOS.pkg"
+# Notarisation: Apple checks the signed files and from then on macOS opens them without the
+# "can't be opened" warning. Needs files signed with a Developer ID (sign.sh, and the .pkg above).
+notarise() {   # <file>
+    local log="$WORK/notary.log"
+    xcrun notarytool submit "$1" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait 2>&1 | tee "$log"
+    if ! grep -q "status: Accepted" "$log"; then
+        echo "::error title=macOS notarisation::Apple did not accept $(basename "$1") - see the log of this step (notarytool log <id> shows why)"
+        return 1
+    fi
+}
+
+if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_PASSWORD:-}" ]; then
+    if [ -n "$INSTALLER_IDENTITY" ]; then
+        notarise "$PKG"
+        xcrun stapler staple "$PKG"   # (the proof travels with the file: it opens without asking Apple)
+    else
+        echo "::warning title=macOS notarisation::The installer isn't signed (no Developer ID Installer certificate), so it wasn't notarised"
+    fi
+    if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
+        notarise "$ZIP"               # (a zip can't carry the proof; macOS looks it up when the bundles are first used)
+    else
+        echo "::warning title=macOS notarisation::The bundles aren't signed with a Developer ID, so they weren't notarised"
+    fi
+    echo "::notice title=macOS installer::Signed and notarised"
+else
+    echo "Not notarised (no Apple account was given)"
+fi
+
+echo "Built $PKG"

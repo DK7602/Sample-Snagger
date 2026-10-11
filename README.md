@@ -119,6 +119,8 @@ Grab the installer for your system from the **Releases** page (built automatical
   *System Settings -> Privacy & Security* and click **Open Anyway**.)
   If a DAW refuses to load the plug-in, run once in Terminal:
   `sudo xattr -dr com.apple.quarantine "/Library/Audio/Plug-Ins/Components/Sample Snagger.component" "/Library/Audio/Plug-Ins/VST3/Sample Snagger.vst3" "/Applications/Sample Snagger.app"`
+  (The build can sign and notarise itself once an Apple developer certificate is set up -
+  [packaging/mac/SIGNING.md](packaging/mac/SIGNING.md) - and then none of this is needed.)
 - **Windows:** `Sample-Snagger-x.y.z-Windows-Setup.exe` - installs the VST3 into `C:\Program Files\Common Files\VST3`
   and the standalone app. (SmartScreen may warn about an unknown publisher -> *More info* -> *Run anyway*.)
 - **Linux:** unpack the `.tar.gz`, and in the folder it makes run `./install.sh`.
