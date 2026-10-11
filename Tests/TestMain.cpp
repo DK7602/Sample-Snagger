@@ -2272,6 +2272,89 @@ static void testNetwork()
 }
 
 //==============================================================================
+/** The undo history is kept within a memory budget. */
+static void testUndoMemory()
+{
+    std::cout << "\n[undo history and memory]\n";
+    const juce::int64 second = 44100 * 2 * (juce::int64) sizeof (float);   // one second of stereo audio, in bytes
+
+    Session s;
+    s.setUndoBudget (3 * second + 1000, 6 * second);
+    auto newClip = [&s] (double hz)
+    {
+        Clip::Ptr c (new Clip());
+        juce::AudioBuffer<float> b (2, 44100);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < 44100; ++i)
+                b.setSample (ch, i, 0.3f * std::sin ((float) i * (float) hz * 0.0001f));
+        c->audio = AudioData::make (std::move (b), 44100.0);
+        s.add (c, true);
+        return c;
+    };
+    auto editAudio = [&s] (Clip::Ptr c)   // an edit that makes new audio of the same size
+    {
+        c->pushUndo ("Reverse");
+        c->audio = edit::reverse (*c->audio, 0, c->audio->getNumSamples());
+        s.clipChanged (c.get());
+    };
+
+    auto a = newClip (440.0);
+    CHECK (a->undoBytes() == 0, "a fresh sample's history holds no audio");
+
+    // steps that leave the audio alone cost nothing, and all of them are kept
+    for (int i = 0; i < 20; ++i)
+    {
+        a->pushUndo ("Add marker");
+        a->slices.push_back (1000 + i * 100);
+        s.clipChanged (a.get(), false);
+    }
+    CHECK (a->undoStack.size() == 20 && a->undoBytes() == 0, "20 marker steps share the audio: no extra memory, none let go");
+
+    for (int i = 0; i < 8; ++i)
+        editAudio (a);
+    CHECK (a->undoBytes() <= 3 * second + 1000 && a->undoBytes() >= 2 * second,
+           "8 edits of the audio: the history keeps to its budget (" + juce::String ((double) a->undoBytes() / (double) second, 1) + " s of audio, where it held 8)");
+    CHECK (a->canUndo() && a->undoStack.size() >= 3 && s.takeUndoStepsDropped() > 0 && s.takeUndoStepsDropped() == 0,
+           "  ...the newest steps stay, the oldest went, and that is reported");
+    const auto before = a->audio;
+    a->undo();
+    CHECK (a->audio != before && a->audio != nullptr && a->audio->getNumSamples() == 44100, "  ...and UNDO still brings back the last version");
+    a->redo();
+
+    // the whole tray: the sample edited longest ago gives up its history first
+    juce::Thread::sleep (5);
+    auto b = newClip (330.0);
+    for (int i = 0; i < 3; ++i) editAudio (b);
+    juce::Thread::sleep (5);
+    auto c = newClip (220.0);
+    for (int i = 0; i < 3; ++i) editAudio (c);
+    const auto total = a->undoBytes() + b->undoBytes() + c->undoBytes();
+    CHECK (total <= 6 * second && a->undoBytes() < b->undoBytes() + 1 && c->undoBytes() >= 2 * second,
+           "across the tray the history keeps to its budget too, taking from the sample that was edited longest ago ("
+               + juce::String ((double) a->undoBytes() / (double) second, 1) + " / " + juce::String ((double) b->undoBytes() / (double) second, 1)
+               + " / " + juce::String ((double) c->undoBytes() / (double) second, 1) + " s)");
+
+    // one huge step is still kept: the last two steps always stay
+    Session tight;
+    tight.setUndoBudget (1000, 1000);
+    Clip::Ptr d (new Clip());
+    d->audio = makeSine (440.0, 1.0);
+    tight.add (d, true);
+    for (int i = 0; i < 4; ++i)
+    {
+        d->pushUndo ("Reverse");
+        d->audio = edit::reverse (*d->audio, 0, d->audio->getNumSamples());
+        tight.clipChanged (d.get());
+    }
+    CHECK (d->undoStack.size() == 2, "however tight the memory, the last two steps of the sample being worked on can be undone");
+
+    for (auto* session : { &s, &tight })
+    {
+        session->flushWrites();
+        session->getSessionDir().deleteRecursively();
+    }
+}
+
 /** Cancel ends the program that was started and everything that program started in turn. */
 static void testCancelStopsEverything (const juce::File& tmp)
 {
@@ -3562,6 +3645,7 @@ int main (int argc, char** argv)
     testDownloadChecks (tmp);
     testDragOut();
     testCancelStopsEverything (tmp);
+    testUndoMemory();
    #if SNAGGER_BUILTIN_AI
     testAiWindows();
    #endif

@@ -228,6 +228,13 @@ void SnaggerEditor::timerCallback()
         toast (juce::String (missing) + (missing == 1 ? " clip of this project has" : " clips of this project have")
                + " lost the audio and couldn't be brought back. (The tray's samples are kept on this computer, in Sample Snagger's Sessions folder.)", true);
 
+    // (said once: after that the UNDO button going grey a little sooner needs no explaining)
+    if (processor.session.takeUndoStepsDropped() > 0 && ! toldAboutUndoMemory)
+    {
+        toldAboutUndoMemory = true;
+        toast ("To keep memory in check, the oldest undo steps of long samples are let go. The latest ones always stay.");
+    }
+
     if (processor.session.takeFailedWriteCount() > 0)
         toast ("Couldn't write a sample to Sample Snagger's Sessions folder - is the disk full? Until that works, a saved project won't bring this sample back: SAVE it to your library to be safe.", true);
 }

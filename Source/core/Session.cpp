@@ -1,6 +1,7 @@
 #include "Session.h"
 #include "AudioFileIO.h"
 #include "Settings.h"
+#include <algorithm>
 #include <cmath>
 
 namespace snag
@@ -219,7 +220,39 @@ void Session::clipChanged (Clip* clip, bool audioChanged)
 {
     if (clip != nullptr && audioChanged)
         persist (clip);
+    trimUndoHistory (clip);
     sendChangeMessage();
+}
+
+void Session::trimUndoHistory (Clip* edited)
+{
+    int dropped = 0;
+    if (edited != nullptr)
+        dropped += edited->trimUndo (undoBudgetPerClip);
+
+    juce::int64 total = 0;
+    for (auto* c : clips)
+        total += c->undoBytes();
+
+    if (total > undoBudgetTotal)
+    {
+        // the samples that were edited longest ago give up their history first
+        std::vector<Clip*> others;
+        for (auto* c : clips)
+            if (c != edited && ! c->undoStack.empty())
+                others.push_back (c);
+        std::sort (others.begin(), others.end(), [] (const Clip* a, const Clip* b) { return a->undoTouched < b->undoTouched; });
+
+        for (auto* c : others)
+        {
+            if (total <= undoBudgetTotal)
+                break;
+            const auto before = c->undoBytes();
+            dropped += c->trimUndo (juce::jmax ((juce::int64) 0, before - (total - undoBudgetTotal)), 0);
+            total -= before - c->undoBytes();
+        }
+    }
+    undoStepsDropped += dropped;
 }
 
 /** Writes to a temporary file first, so an interrupted write never leaves half a clip behind. */

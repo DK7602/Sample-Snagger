@@ -78,6 +78,7 @@ private:
 
     snag::Tab currentTab = snag::Tab::browse;
     bool fileDragOver = false;
+    bool toldAboutUndoMemory = false;
     std::unique_ptr<juce::FileChooser> chooser;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SnaggerEditor)

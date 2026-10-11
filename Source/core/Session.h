@@ -64,6 +64,12 @@ public:
     /** How many clips couldn't be written to the cache since the last call (a full disk, mostly). */
     int takeFailedWriteCount() noexcept  { return failedWrites.exchange (0); }
 
+    /** The undo history is kept within a memory budget: per sample, and for the whole tray (where
+        the samples edited longest ago give theirs up first). Called from clipChanged(). */
+    void setUndoBudget (juce::int64 bytesPerClip, juce::int64 bytesInAll) noexcept   { undoBudgetPerClip = bytesPerClip; undoBudgetTotal = bytesInAll; }
+    /** How many undo steps were let go for that since the last call. */
+    int takeUndoStepsDropped() noexcept  { return std::exchange (undoStepsDropped, 0); }
+
     /** The session folders this instance works in or was restored from (for the clean-up). */
     juce::StringArray getFoldersInUse() const;
 
@@ -74,6 +80,7 @@ private:
     juce::File freshCacheFile (const Clip&, const juce::String& tag) const;
     bool mayDelete (const juce::File&, const juce::File& ownFolder) const;
     void retire (const juce::File&);
+    void trimUndoHistory (Clip* edited);
     void queueWrite (AudioData::Ptr, const juce::File& file, const juce::File& replaces);
 
     juce::ReferenceCountedArray<Clip> clips;
@@ -82,6 +89,8 @@ private:
     juce::File dir;
     bool adoptRestoredFolder = false;
     int missingClips = 0;
+    juce::int64 undoBudgetPerClip = (juce::int64) 512 * 1024 * 1024, undoBudgetTotal = (juce::int64) 1536 * 1024 * 1024;
+    int undoStepsDropped = 0;
     std::atomic<int> failedWrites { 0 };
 
     // Plug-in instances: files that a saved state (DAW project) may point at. They are never

@@ -3,6 +3,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
 #include <juce_graphics/juce_graphics.h>
+#include <algorithm>
 #include <cmath>
 #include <vector>
 #include "SoundSettings.h"
@@ -183,7 +184,48 @@ struct Clip final : juce::ReferenceCountedObject
         if (undoStack.size() > 30)
             undoStack.erase (undoStack.begin());
         redoStack.clear();
+        undoTouched = juce::Time::currentTimeMillis();
     }
+
+    /** The memory that only the undo / redo history holds on to: audio you would get back by
+        undoing. (Steps that left the audio alone - markers, pad sounds, FX - share it and cost nothing.) */
+    juce::int64 undoBytes() const
+    {
+        std::vector<const AudioData*> seen { audio.get(), adjustBase.get() };
+        juce::int64 bytes = 0;
+        auto count = [&seen, &bytes] (const AudioData::Ptr& a)
+        {
+            if (a == nullptr || std::find (seen.begin(), seen.end(), a.get()) != seen.end())
+                return;
+            seen.push_back (a.get());
+            bytes += (juce::int64) a->getNumSamples() * (juce::int64) a->getNumChannels() * (juce::int64) sizeof (float);
+        };
+        for (auto* stack : { &undoStack, &redoStack })
+            for (auto& s : *stack)
+            {
+                count (s.audio);
+                count (s.adjustBase);
+            }
+        return bytes;
+    }
+
+    /** Lets go of the oldest steps until the history holds no more than `maxBytes` of audio. The
+        newest `keep` undo steps stay whatever they weigh. Returns how many steps went.
+        (Thirty edits of a five-minute sample used to mean thirty copies of it: over 3 GB.) */
+    int trimUndo (juce::int64 maxBytes, size_t keep = 2)
+    {
+        int dropped = 0;
+        while (undoBytes() > maxBytes)
+        {
+            if (undoStack.size() > keep)        undoStack.erase (undoStack.begin());
+            else if (! redoStack.empty())       redoStack.erase (redoStack.begin());   // (the redo furthest away)
+            else                                break;
+            ++dropped;
+        }
+        return dropped;
+    }
+
+    juce::int64 undoTouched = 0;   // when the history last grew
 
     bool canUndo() const noexcept { return ! undoStack.empty(); }
     bool canRedo() const noexcept { return ! redoStack.empty(); }
