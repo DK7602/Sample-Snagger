@@ -160,6 +160,7 @@ set(SNAGGER_SOURCES
     Source/core/Jobs.cpp
     Source/core/WebCapture.cpp
     Source/core/ProcessAudioCapture.cpp
+    Source/core/ProcessTree.cpp
     Source/core/AiStems.cpp
     Source/core/KeyDetect.cpp
     Source/core/PadFx.cpp

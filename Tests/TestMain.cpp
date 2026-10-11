@@ -2272,6 +2272,53 @@ static void testNetwork()
 }
 
 //==============================================================================
+/** Cancel ends the program that was started and everything that program started in turn. */
+static void testCancelStopsEverything (const juce::File& tmp)
+{
+    std::cout << "\n[cancel stops the whole program tree]\n";
+    auto dir = tmp.getChildFile ("tree");
+    dir.createDirectory();
+    const auto marker = dir.getChildFile ("still-running.txt");
+
+    // A program that starts another one, which carries on for three seconds and then leaves a
+    // mark - the way yt-dlp runs ffmpeg (and, on Windows, the way yt-dlp.exe runs the real yt-dlp).
+   #if JUCE_WINDOWS
+    const auto inner = dir.getChildFile ("inner.cmd"), outer = dir.getChildFile ("outer.cmd");
+    inner.replaceWithText ("@echo off\r\nping -n 4 127.0.0.1 >nul\r\necho done > \"" + marker.getFullPathName() + "\"\r\n");
+    outer.replaceWithText ("@echo off\r\necho started\r\ncmd /c \"" + inner.getFullPathName() + "\"\r\n");
+    const juce::StringArray command { "cmd", "/c", outer.getFullPathName() };
+   #else
+    const auto inner = dir.getChildFile ("inner.sh"), outer = dir.getChildFile ("outer.sh");
+    inner.replaceWithText ("#!/bin/sh\nsleep 3\necho done > '" + marker.getFullPathName() + "'\n", false, false, "\n");
+    outer.replaceWithText ("#!/bin/sh\necho started\n/bin/sh '" + inner.getFullPathName() + "' &\nwait\n", false, false, "\n");
+    const juce::StringArray command { "/bin/sh", outer.getFullPathName() };
+   #endif
+
+    // first, what the mark looks like when nothing is cancelled (so the test below means something)
+    {
+        juce::String out;
+        const int code = ProcessRunner::runAndCapture (command, out, 20000);
+        CHECK (code == 0 && marker.existsAsFile(), "the test program runs its second program to the end when left alone");
+        marker.deleteFile();
+    }
+
+    ProcessRunner runner;
+    std::thread canceller ([&runner]
+    {
+        juce::Thread::sleep (900);   // (both programs are running by now)
+        runner.cancel();
+    });
+    const auto t0 = juce::Time::getMillisecondCounterHiRes();
+    const int code = runner.run (command);
+    const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+    canceller.join();
+    juce::Thread::sleep (4500);   // long enough for the second program to have left its mark
+    CHECK (code == -2 && ms < 2500.0, "a cancelled program stops at once (" + juce::String (ms, 0) + " ms)");
+    CHECK (! marker.existsAsFile(), "  ...and so does the program it had started (it used to run on in the background)");
+
+    dir.deleteRecursively();
+}
+
 /** Dragging a sound out: what the file is made from, and a long one made in the background. */
 static void testDragOut()
 {
@@ -3514,6 +3561,7 @@ int main (int argc, char** argv)
     testSessionCleanUp (tmp);
     testDownloadChecks (tmp);
     testDragOut();
+    testCancelStopsEverything (tmp);
    #if SNAGGER_BUILTIN_AI
     testAiWindows();
    #endif
