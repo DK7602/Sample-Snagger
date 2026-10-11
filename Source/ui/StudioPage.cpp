@@ -411,6 +411,10 @@ StudioPage::StudioPage (EditorContext& c)
         };
         k->onGestureStart = [this] { lastAdjustUndoMs = 0; };   // each new grab is its own undo step
     }
+    // what the readouts stand for when it is finer than the dial's steps (the type-in box starts from it)
+    stretchKnob.shownValue = [this] { return exactLength > 0.0 ? exactLength : stretchKnob.slider.getValue(); };
+    pitchKnob.shownValue   = [this] { return std::isnan (exactSemitones) ? pitchKnob.slider.getValue() : exactSemitones; };
+    bpmKnob.shownValue     = [this] { return targetBpm(); };
     // a typed value is taken as typed ("77.5"), not rounded to the knob's steps
     stretchKnob.onTyped = [this] (double v) { lastAdjustUndoMs = 0; setLengthKnob (v); knobsChanged(); return true; };
     pitchKnob.onTyped   = [this] (double v) { lastAdjustUndoMs = 0; setPitchKnob (v);  knobsChanged(); return true; };
@@ -692,6 +696,10 @@ void StudioPage::timerCallback()
 void StudioPage::setClip (Clip::Ptr c)
 {
     const bool changed = c != clip;
+    // A name that is being typed belongs to the sample it was typed for: keep it there before the
+    // box moves on (a download or a capture can finish, and select its sample, at any moment).
+    if (changed && nameLabel.isBeingEdited())
+        nameLabel.hideEditor (false);
     clip = c;
     setKnobsFrom (clip != nullptr ? clip->adjust : Clip::Adjust());
     lastAdjustUndoMs = 0;
@@ -714,7 +722,9 @@ void StudioPage::setClip (Clip::Ptr c)
 
     // The knobs say one thing and the sound another (a render that never landed: cancelled, or the
     // sample was switched away mid-render)? Render it now.
-    if (clip != nullptr && ! clip->renderIsCurrent())
+    // (unless exactly that render is on its way already: STUDIO was just opened again)
+    if (clip != nullptr && ! clip->renderIsCurrent()
+        && ! (adjustJobRunning && renderingClip == clip.get() && renderingAdjust == clip->adjust))
         startAdjustRender();
 
     const bool has = clip != nullptr;
@@ -1009,6 +1019,8 @@ void StudioPage::startAdjustRender()
     }
 
     adjustJobRunning = true;
+    renderingClip = c.get();
+    renderingAdjust = adj;
     proc.jobs.start (adj.pitchNeutral() ? "Tone" : (adj.tape ? "Varispeed" : "Pitch & Time"), [base, adj] (Job& job)
     {
         job.setStatus ("Rendering");
@@ -1090,7 +1102,8 @@ void StudioPage::undo()
     syncSampler();
     chopsChanged();
     refreshKey();
-    resumePlayback (before.get(), 1.0, before != nullptr && before->getNumSamples() == clip->audio->getNumSamples());
+    if (before != clip->audio)   // (a marker, pad or FX step leaves what is playing alone)
+        resumePlayback (before.get(), 1.0, before != nullptr && before->getNumSamples() == clip->audio->getNumSamples());
     if (! clip->renderIsCurrent())
         startAdjustRender();   // this step was taken while a knob change was still rendering: finish it
     ctx.toast ("Undid " + what);
@@ -1110,7 +1123,8 @@ void StudioPage::redo()
     syncSampler();
     chopsChanged();
     refreshKey();
-    resumePlayback (before.get(), 1.0, before != nullptr && before->getNumSamples() == clip->audio->getNumSamples());
+    if (before != clip->audio)   // (a marker, pad or FX step leaves what is playing alone)
+        resumePlayback (before.get(), 1.0, before != nullptr && before->getNumSamples() == clip->audio->getNumSamples());
     if (! clip->renderIsCurrent())
         startAdjustRender();   // this step was taken while a knob change was still rendering: finish it
     ctx.toast ("Redid " + what);
@@ -1245,6 +1259,19 @@ void StudioPage::autoChop()
         hitsFound = (int) found.size() + 1;
         found = edit::chopAtStrongestHits (*clip->audio, maxPads, 0, len);
     }
+    else if (every && sel)
+    {
+        // (the same inside a selection: the markers that stay elsewhere use up pads too)
+        int others = (a > 0 ? 1 : 0) + (b < len ? 1 : 0), inside = 0;
+        for (auto s : clip->slices) if ((s < a || s > b) && s > 0 && s < len) ++others;
+        for (auto s : found)        if (s > a && s < b) ++inside;
+        const int room = juce::jmax (0, maxPads - 1 - others);
+        if (inside > room)
+        {
+            hitsFound = inside + 1;
+            found = edit::chopAtStrongestHits (*clip->audio, room + 1, a, b);
+        }
+    }
     const auto slicesBefore = clip->slices;
     if (sel)
     {
@@ -1275,7 +1302,10 @@ void StudioPage::autoChop()
 
     const int total = (int) clip->sliceBoundaries().size() - 1;
     const auto where = "play them from pads " + noteName (proc.rootNote.load()) + " and up";
-    if (hitsFound > 0)
+    if (hitsFound > 0 && sel)
+        ctx.toast ("Found " + juce::String (hitsFound) + " hits in the selection - kept the strongest, so every chop has a pad ("
+                   + juce::String (total) + " in all) - " + where);
+    else if (hitsFound > 0)
         ctx.toast ("Found " + juce::String (hitsFound) + " hits - kept the " + juce::String (total) + " strongest (one per pad) - " + where);
     else if (every)
         ctx.toast (juce::String (total) + " chops, one per hit - " + where);

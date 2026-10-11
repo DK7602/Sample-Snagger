@@ -3,6 +3,7 @@
 #include "AudioData.h"
 #include <juce_data_structures/juce_data_structures.h>
 #include <juce_events/juce_events.h>
+#include <atomic>
 #include <utility>
 
 namespace snag
@@ -57,11 +58,15 @@ public:
     /** How many clips of the last restore() had lost their cached audio. Reading it resets it. */
     int takeMissingClipCount() noexcept  { return std::exchange (missingClips, 0); }
 
+    /** How many clips couldn't be written to the cache since the last call (a full disk, mostly). */
+    int takeFailedWriteCount() noexcept  { return failedWrites.exchange (0); }
+
 private:
     void persist (Clip::Ptr clip);
     juce::File freshCacheFile (const Clip&, const juce::String& tag) const;
-    bool mayDelete (const juce::File&) const;
+    bool mayDelete (const juce::File&, const juce::File& ownFolder) const;
     void retire (const juce::File&);
+    void queueWrite (AudioData::Ptr, const juce::File& file, const juce::File& replaces);
 
     juce::ReferenceCountedArray<Clip> clips;
     Clip::Ptr selected;
@@ -69,6 +74,7 @@ private:
     juce::File dir;
     bool adoptRestoredFolder = false;
     int missingClips = 0;
+    std::atomic<int> failedWrites { 0 };
 
     // Plug-in instances: files that a saved state (DAW project) may point at. They are never
     // deleted or overwritten - the project may be closed without saving again.

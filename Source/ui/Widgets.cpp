@@ -85,6 +85,7 @@ Knob::Knob (const juce::String& captionIn, double min, double max, double def, d
     slider.setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
     defaultValue = def;
     slider.onValueChange = [this] { repaint(); if (onChange) onChange(); };
+    slider.onResetWithoutChange = [this] { repaint(); if (onChange) onChange(); };
     slider.onDragStart = [this]
     {
         // The mouse wheel (or a trackpad swipe) reports every little step as a drag of its own.
@@ -120,8 +121,12 @@ juce::Rectangle<int> Knob::valueArea() const
     return getLocalBounds().removeFromBottom (28).removeFromTop (15).withSizeKeepingCentre (juce::jmin (getWidth(), 90), 17);
 }
 
+// (While the type-in box is open this knob also hears the mouse everywhere else - see startTyping.
+//  Those events carry positions in other components, so only the knob's own are looked at here.)
 void Knob::mouseMove (const juce::MouseEvent& e)
 {
+    if (e.eventComponent != this)
+        return;
     const bool overValue = valueArea().contains (e.getPosition());
     setMouseCursor (overValue ? juce::MouseCursor::IBeamCursor : juce::MouseCursor::NormalCursor);
     setTooltip (overValue ? "Double-click to type a value" : juce::String());
@@ -129,13 +134,13 @@ void Knob::mouseMove (const juce::MouseEvent& e)
 
 void Knob::mouseDoubleClick (const juce::MouseEvent& e)
 {
-    if (valueArea().expanded (0, 4).contains (e.getPosition()))
+    if (e.eventComponent == this && valueArea().expanded (0, 4).contains (e.getPosition()))
         startTyping();
 }
 
 void Knob::startTyping()
 {
-    if (! isEnabled())
+    if (! isEnabled() || (typing != nullptr && typing->isVisible()))
         return;
     typing = std::make_unique<juce::TextEditor>();
     auto& t = *typing;
@@ -146,10 +151,22 @@ void Knob::startTyping()
     t.setColour (juce::TextEditor::textColourId, theme::col::goldLight);
     t.setColour (juce::TextEditor::outlineColourId, theme::col::gold);
     t.setColour (juce::TextEditor::focusedOutlineColourId, theme::col::red);
-    const double v = slider.getValue();
-    // (as many decimals as the knob has steps for: a value that is only looked at must not come back rounded)
+
+    // The box starts with what the readout stands for, with as many decimals as that takes: a
+    // value that is only looked at must not come back rounded (and isn't applied again at all).
     const double step = slider.getInterval();
-    t.setText (plainNumber (v, step >= 1.0 ? 0 : (step >= 0.1 ? 1 : 2)), false);
+    const double v = shownValue ? shownValue() : slider.getValue();
+    const double onStep = step > 0.0 ? slider.getMinimum() + step * std::round ((v - slider.getMinimum()) / step) : v;
+    const bool offTheSteps = std::abs (v - onStep) > 1.0e-6;
+    auto start = plainNumber (v, offTheSteps ? 2 : (step >= 1.0 ? 0 : (step >= 0.1 ? 1 : 2)));
+    if (start.containsChar ('.'))
+    {
+        while (start.endsWithChar ('0')) start = start.dropLastCharacters (1);
+        if (start.endsWithChar ('.'))    start = start.dropLastCharacters (1);
+    }
+    typingStartedWith = start;
+    t.setText (start, false);
+
     t.onReturnKey = [this] { finishTyping (true); };
     t.onEscapeKey = [this] { finishTyping (false); };
     t.onFocusLost = [this] { finishTyping (true); };
@@ -165,24 +182,29 @@ void Knob::startTyping()
 
 void Knob::mouseDown (const juce::MouseEvent& e)
 {
-    if (typing != nullptr && typing->isVisible() && e.eventComponent != typing.get() && ! typing->isParentOf (e.eventComponent))
-        finishTyping (true);
+    if (typing == nullptr || ! typing->isVisible() || e.eventComponent == nullptr)
+        return;
+    if (e.eventComponent == typing.get() || typing->isParentOf (e.eventComponent))
+        return;
+    if (e.eventComponent->getTopLevelComponent() != getTopLevelComponent())
+        return;   // the box's own right-click menu (Paste...) lives in a window of its own
+    finishTyping (true);
 }
 
 void Knob::finishTyping (bool apply)
 {
-    if (typing == nullptr)
+    if (typing == nullptr || ! typing->isVisible())
         return;
     juce::Desktop::getInstance().removeGlobalMouseListener (this);
-    const auto text = typing->getText();
+    const auto text = typing->getText().trim();
     // remove it after this callback has returned
-    juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<Knob> (this)]
+    juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<Knob> (this), box = typing.get()]
     {
-        if (safe != nullptr) { safe->typing.reset(); safe->repaint(); }
+        if (safe != nullptr && safe->typing.get() == box) { safe->typing.reset(); safe->repaint(); }
     });
     typing->onFocusLost = nullptr;
     typing->setVisible (false);
-    if (apply && text.trim().isNotEmpty())
+    if (apply && text.isNotEmpty() && text != typingStartedWith)
     {
         const double v = parseTyped (text);
         if (std::isfinite (v))
@@ -200,21 +222,47 @@ double Knob::parseTyped (const juce::String& textIn) const
     if (text.contains ("off"))
         return defaultValue;
 
-    // Typed the way this knob writes it - "1/8", "1/4d", "12 bit" - picks that position. (Read as a
-    // plain number, "1/8" was 18: the DELAY time jumped to a whole bar.)
+    const auto nan = std::numeric_limits<double>::quiet_NaN();
+    const bool hasNumber = text.containsAnyOf ("0123456789");
+    const double number = hasNumber ? text.retainCharacters ("0123456789.-+,").replaceCharacter (',', '.').getDoubleValue() : nan;
+
+    // just a number: that's the value
+    if (hasNumber && text.removeCharacters ("0123456789.-+, ").isEmpty())
+        return number;
+
+    // Typed the way this knob writes it - "1/8", "1/4d", "12 bit", "5.0 kHz" - picks that position.
+    // (Read as a plain number, "1/8" was 18: the DELAY time jumped to a whole bar.)
     const double step = slider.getInterval();
     if (formatter && step > 0.0 && (slider.getMaximum() - slider.getMinimum()) / step <= 4000.0)
     {
         auto squash = [] (const juce::String& t) { return t.toLowerCase().removeCharacters (" "); };
         const auto wanted = squash (text);
-        for (double v = slider.getMinimum(); v <= slider.getMaximum() + step * 0.5; v += step)
+        double first = nan, last = nan;
+        const int steps = juce::roundToInt ((slider.getMaximum() - slider.getMinimum()) / step);
+        for (int i = 0; i <= steps; ++i)
+        {
+            const double v = juce::jmin (slider.getMaximum(), slider.getMinimum() + i * step);
             if (squash (formatter (v)) == wanted)
-                return juce::jmin (v, slider.getMaximum());
+            {
+                if (std::isnan (first)) first = v;
+                last = v;
+            }
+        }
+        if (! std::isnan (first))
+        {
+            // Several positions can read the same ("5.0 kHz" covers 4.95 to 5.04): the number that
+            // was typed says which one, in the knob's own unit or a thousand of them.
+            if (hasNumber && last > first)
+                for (double scale : { 1.0, 1000.0, 0.001 })
+                    if (number * scale >= first - step * 0.5 && number * scale <= last + step * 0.5)
+                        return number * scale;
+            return first;
+        }
     }
 
-    if (! text.containsAnyOf ("0123456789"))
-        return std::numeric_limits<double>::quiet_NaN();
-    double v = text.retainCharacters ("0123456789.-+,").replaceCharacter (',', '.').getDoubleValue();
+    if (! hasNumber)
+        return nan;
+    double v = number;
 
     // "5k", "2.5 kHz" - but not on a knob that counts in kHz already ("22k" on RATE is 22, not 22000)
     if (text.containsChar ('k') && ! suffix.containsIgnoreCase ("k"))

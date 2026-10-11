@@ -100,6 +100,8 @@ void WebCapture::startRecording()
 {
     recL.clear();
     recR.clear();
+    recEarlier.clear();
+    recEarlierSeconds = 0.0;
     recording = true;
     if (! armed)
         setArmed (true);
@@ -118,20 +120,60 @@ AudioData::Ptr WebCapture::stopRecording()
 
     if (onStateChanged) onStateChanged();
 
-    if (recL.empty() || sampleRate <= 0)
-        return nullptr;
+    auto takeBuffer = [] (std::vector<float>& l, std::vector<float>& r)
+    {
+        juce::AudioBuffer<float> b (2, (int) l.size());
+        if (! l.empty())
+        {
+            b.copyFrom (0, 0, l.data(), (int) l.size());
+            b.copyFrom (1, 0, r.data(), (int) r.size());
+        }
+        l.clear(); l.shrink_to_fit();
+        r.clear(); r.shrink_to_fit();
+        return b;
+    };
 
-    juce::AudioBuffer<float> b (2, (int) recL.size());
-    b.copyFrom (0, 0, recL.data(), (int) recL.size());
-    b.copyFrom (1, 0, recR.data(), (int) recR.size());
-    recL.clear(); recL.shrink_to_fit();
-    recR.clear(); recR.shrink_to_fit();
-    return AudioData::make (std::move (b), sampleRate);
+    auto earlier = std::move (recEarlier);
+    recEarlier.clear();
+    recEarlierSeconds = 0.0;
+    auto last = takeBuffer (recL, recR);
+    if (sampleRate <= 0 || (earlier.empty() && last.getNumSamples() == 0))
+        return nullptr;
+    if (earlier.empty())
+        return AudioData::make (std::move (last), sampleRate);
+
+    // The rate changed along the way (another page, or the switch between the page's own audio and
+    // the browser's output): every part is brought to the rate the take ended with, once, here.
+    std::vector<AudioData::Ptr> parts;
+    juce::int64 total = last.getNumSamples();
+    for (auto& part : earlier)
+    {
+        const double rate = part.rate;
+        auto audio = AudioData::make (takeBuffer (part.l, part.r), rate);
+        parts.push_back (std::abs (rate - sampleRate) > 0.5 ? edit::resample (*audio, sampleRate) : audio);
+        total += parts.back()->getNumSamples();
+    }
+    total = juce::jmin (total, (juce::int64) ((maxRecordSeconds + 1.0) * sampleRate));
+
+    juce::AudioBuffer<float> all (2, (int) total);
+    int at = 0;
+    auto append = [&all, &at] (const juce::AudioBuffer<float>& b)
+    {
+        const int n = juce::jmin (b.getNumSamples(), all.getNumSamples() - at);
+        for (int ch = 0; ch < 2 && n > 0; ++ch)
+            all.copyFrom (ch, at, b, juce::jmin (ch, b.getNumChannels() - 1), 0, n);
+        at += juce::jmax (0, n);
+    };
+    for (auto& part : parts)
+        append (part->buffer);
+    append (last);
+    all.setSize (2, at, true);
+    return at > 0 ? AudioData::make (std::move (all), sampleRate) : nullptr;
 }
 
 double WebCapture::getRecordedSeconds() const
 {
-    return sampleRate > 0 ? (double) recL.size() / sampleRate : 0.0;
+    return recEarlierSeconds + (sampleRate > 0 ? (double) recL.size() / sampleRate : 0.0);
 }
 
 double WebCapture::getAvailableHindsight() const
@@ -170,22 +212,15 @@ void WebCapture::pushFrames (const float* interleaved, int numFrames, double sr)
     {
         // Another page, or the switch between the page's own audio and the browser's output, can
         // run at another rate. Hindsight starts over, but a LIVE REC that is running keeps what it
-        // has: it is converted to the new rate (it used to be thrown away while the button kept counting).
+        // has (it used to be thrown away while the button kept counting): that part is set aside
+        // at its own rate and stopRecording() joins the parts.
         if (recording && ! recL.empty() && sampleRate > 0)
         {
-            juce::AudioBuffer<float> soFar (2, (int) recL.size());
-            soFar.copyFrom (0, 0, recL.data(), (int) recL.size());
-            soFar.copyFrom (1, 0, recR.data(), (int) recR.size());
-            const auto converted = edit::resample (*AudioData::make (std::move (soFar), sampleRate), sr);
-            const int n = converted->getNumSamples();
-            recL.assign (converted->buffer.getReadPointer (0), converted->buffer.getReadPointer (0) + n);
-            recR.assign (converted->buffer.getReadPointer (1), converted->buffer.getReadPointer (1) + n);
+            recEarlierSeconds += (double) recL.size() / sampleRate;
+            recEarlier.push_back ({ std::move (recL), std::move (recR), sampleRate });
         }
-        else
-        {
-            recL.clear();
-            recR.clear();
-        }
+        recL.clear();
+        recR.clear();
 
         sampleRate = sr;
         ring.setSize (2, (int) (hindsightSeconds * sr));
@@ -204,7 +239,7 @@ void WebCapture::pushFrames (const float* interleaved, int numFrames, double sr)
     }
     ringFilled = juce::jmin (size, ringFilled + numFrames);
 
-    if (recording && (double) recL.size() < maxRecordSeconds * sr)
+    if (recording && recEarlierSeconds + (double) recL.size() / sr < maxRecordSeconds)
     {
         // (resize grows the storage in big steps; reserving the exact size on every poll made a
         //  copy of the whole recording each time, which stalled the window on long takes)

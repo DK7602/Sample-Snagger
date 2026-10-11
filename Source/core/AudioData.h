@@ -80,13 +80,19 @@ struct Clip final : juce::ReferenceCountedObject
             const auto t = juce::StringArray::fromTokens (s, " ", {});
             if (t.size() < 7)
                 return a;
-            a.semitones = juce::jlimit (-24.0f, 24.0f, t[0].getFloatValue());
-            a.length    = juce::jlimit (0.5, 2.0, t[1].getDoubleValue());
+            // (a damaged "nan" would never compare equal to itself, and the clip would render for ever)
+            const auto num = [&t] (int i, double lo, double hi, double fallback)
+            {
+                const double v = t[i].getDoubleValue();
+                return std::isfinite (v) ? juce::jlimit (lo, hi, v) : fallback;
+            };
+            a.semitones = (float) num (0, -24.0, 24.0, 0.0);
+            a.length    = num (1, 0.5, 2.0, 1.0);
             a.formants  = t[2] == "1";
             a.tape      = t[3] == "1";
-            a.gainDb    = juce::jlimit (-24.0f, 24.0f, t[4].getFloatValue());
-            a.lowCut    = juce::jlimit (0.0f, 20000.0f, t[5].getFloatValue());
-            a.highCut   = juce::jlimit (0.0f, 20000.0f, t[6].getFloatValue());
+            a.gainDb    = (float) num (4, -24.0, 24.0, 0.0);
+            a.lowCut    = (float) num (5, 0.0, 20000.0, 0.0);
+            a.highCut   = (float) num (6, 0.0, 20000.0, 0.0);
             return a;
         }
     };
@@ -122,6 +128,7 @@ struct Clip final : juce::ReferenceCountedObject
     }
 
     juce::File cacheFile;       // where the session keeps this clip on disk
+    AudioData::Ptr cachedAudio; // the audio that cacheFile holds
     juce::File baseCacheFile;   // ... and `adjustBase` (the original the knobs work from), while there is one
     AudioData::Ptr cachedBase;  // the audio that baseCacheFile holds
 

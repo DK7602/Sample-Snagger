@@ -91,6 +91,8 @@ private:
     void startAdjustRender();
     void adjustRendered (AudioData::Ptr oldAudio);   // UI follow-up once a render landed
     bool adjustJobRunning = false, adjustPending = false;
+    const Clip* renderingClip = nullptr;   // what the running render is for (only ever compared)
+    Clip::Adjust renderingAdjust;
     juce::uint32 adjustSerial = 0, lastAdjustUndoMs = 0;
 
     /** If `oldAudio` is what's playing, carries on with the clip's audio as it is now: from the

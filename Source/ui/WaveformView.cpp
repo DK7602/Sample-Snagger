@@ -379,6 +379,8 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
         markerMoved = false;
         markerStartPos = clip->slices[(size_t) m];
         slicesBeforeDrag = clip->slices;
+        dragClip = clip;
+        dragAudio = clip->audio.get();
         return;
     }
 
@@ -418,8 +420,26 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
     repaint();
 }
 
+/** The sample changed under a marker that was being dragged: the marker stays where it got to (in
+    order), but its pad sound isn't re-homed with positions that no longer mean anything. */
+void WaveformView::dropMarkerDrag()
+{
+    drag = Drag::none;
+    if (dragClip != nullptr && markerMoved)
+    {
+        auto& sl = dragClip->slices;
+        std::sort (sl.begin(), sl.end());
+        sl.erase (std::unique (sl.begin(), sl.end()), sl.end());
+        if (dragClip == clip && onSlicesChanged)
+            onSlicesChanged();
+    }
+    dragClip = nullptr;
+}
+
 void WaveformView::mouseDrag (const juce::MouseEvent& e)
 {
+    if (drag == Drag::marker && ! markerDragStillValid())
+        dropMarkerDrag();
     if (clip == nullptr) return;
     const int n = numSamples();
     const int s = juce::jlimit (0, n, (int) xToSample ((float) e.x));
@@ -469,6 +489,9 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
 
 void WaveformView::mouseUp (const juce::MouseEvent& e)
 {
+    if (drag == Drag::marker && ! markerDragStillValid())
+        dropMarkerDrag();
+    dragClip = nullptr;
     if (clip == nullptr) { drag = Drag::none; return; }
 
     if (drag == Drag::marker)

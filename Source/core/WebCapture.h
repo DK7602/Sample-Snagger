@@ -80,7 +80,10 @@ private:
     juce::AudioBuffer<float> ring;
     int ringWrite = 0, ringFilled = 0;
 
-    std::vector<float> recL, recR;
+    std::vector<float> recL, recR;                    // the take, at `sampleRate`
+    struct RecPart { std::vector<float> l, r; double rate; };
+    std::vector<RecPart> recEarlier;                  // ... and what came before a change of rate
+    double recEarlierSeconds = 0.0;
 
     float level = 0.0f;
     bool mediaPlaying = false;

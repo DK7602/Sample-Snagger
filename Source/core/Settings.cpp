@@ -56,8 +56,8 @@ namespace paths
         for (auto t = name.getCharPointer(); ! t.isEmpty();)
         {
             const auto c = t.getAndAdvance();
-            if (c < 32 || c == 127)
-                continue;
+            if (c < 32 || c == 127 || (c >= 0xd800 && c <= 0xdfff) || c > 0x10ffff)
+                continue;   // control characters, and broken text that no file system takes
             s << (juce::String ("\\/:*?\"<>|").containsChar (c) ? (juce::juce_wchar) '_' : c);
         }
 

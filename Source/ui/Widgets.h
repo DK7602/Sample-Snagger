@@ -39,12 +39,31 @@ public:
           const juce::String& suffix = {});
     ~Knob() override;
 
-    juce::Slider slider;
+    /** A slider that also reports a double-click reset that found the dial on its default already. */
+    struct Dial : public juce::Slider
+    {
+        std::function<void()> onResetWithoutChange;
+        void mouseDoubleClick (const juce::MouseEvent& e) override
+        {
+            const double before = getValue();
+            juce::Slider::mouseDoubleClick (e);
+            if (isEnabled() && isDoubleClickReturnEnabled() && juce::approximatelyEqual (before, getValue()) && onResetWithoutChange)
+                onResetWithoutChange();
+        }
+    };
+
+    Dial slider;
     std::function<juce::String (double)> formatter;
-    std::function<void()> onChange;          // any value change (drag, wheel, double-click reset...)
+    /** Any value change (drag, wheel, double-click reset...). Also called for a double-click reset
+        of a dial that sits on its default: an owner that applies a finer value than the dial has
+        steps for (STUDIO's LENGTH after MATCH BPM) lets go of it then. */
+    std::function<void()> onChange;
     std::function<void()> onGestureStart;    // the user grabbed the knob (a run of wheel steps counts as one grab)
     /** Optional: gets a typed value before the knob's steps round it. Return true if it was dealt with. */
     std::function<bool (double)> onTyped;
+    /** Optional: the value the readout stands for, when that isn't exactly the dial's. The type-in
+        box starts from it. */
+    std::function<double()> shownValue;
 
     void setValueSilently (double v)        { slider.setValue (v, juce::dontSendNotification); repaint(); }
     double getDefault() const noexcept      { return defaultValue; }
@@ -66,6 +85,7 @@ private:
     juce::String caption, suffix;
     double defaultValue = 0.0;
     std::unique_ptr<juce::TextEditor> typing;
+    juce::String typingStartedWith;
     juce::uint32 lastWheelStepMs = 0;
 };
 

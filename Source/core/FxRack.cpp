@@ -81,6 +81,7 @@ void FxChain::reset()
     rng.setSeed (20260929);
     reverb.reset();
     lofiWasOn = driveWasOn = delayWasOn = reverbWasOn = false;
+    justReset = true;
 }
 
 void FxChain::process (float* L, float* R, int n, const FxSettings& fx, double bpm) noexcept
@@ -91,7 +92,8 @@ void FxChain::process (float* L, float* R, int n, const FxSettings& fx, double b
 
     // A section that was off kept whatever it last heard. Switched back on (while another section
     // kept the rack running) it must not play that back: old echoes, a frozen reverb, a stale tone.
-    if (fx.lofiOn && ! lofiWasOn)
+    const bool clean = std::exchange (justReset, false);   // everything was cleared a moment ago: not twice
+    if (fx.lofiOn && ! lofiWasOn && ! clean)
     {
         for (auto& b : wowBuf) std::fill (b.begin(), b.end(), 0.0f);
         wowWrite = 0;
@@ -100,14 +102,14 @@ void FxChain::process (float* L, float* R, int n, const FxSettings& fx, double b
     }
     if (fx.driveOn && ! driveWasOn)
         toneL = toneR = 0.0f;
-    if (fx.delayOn && ! delayWasOn)
+    if (fx.delayOn && ! delayWasOn && ! clean)
     {
         for (auto& b : dBuf) std::fill (b.begin(), b.end(), 0.0f);
         dWrite = 0;
         dTime = -1.0;
         dampL = dampR = 0.0f;
     }
-    if (fx.reverbOn && ! reverbWasOn)
+    if (fx.reverbOn && ! reverbWasOn && ! clean)
         reverb.reset();
     lofiWasOn = fx.lofiOn; driveWasOn = fx.driveOn; delayWasOn = fx.delayOn; reverbWasOn = fx.reverbOn;
 
@@ -205,7 +207,8 @@ void FxChain::process (float* L, float* R, int n, const FxSettings& fx, double b
         const int len = (int) dBuf[0].size();
         const double beats = delayDivisions()[(size_t) juce::jlimit (0, (int) delayDivisions().size() - 1, fx.division)].beats;
         // (a time too long for the buffer - a bar below 53 bpm - is halved, so the echo stays on the grid)
-        double wanted = beats * 60.0 / (bpm > 0 ? bpm : 120.0) * sr;
+        // (the limits also keep a damaged tempo from a project file out of the loop below)
+        double wanted = beats * 60.0 / juce::jlimit (20.0, 999.0, bpm > 0 ? bpm : 120.0) * sr;
         while (wanted > (double) len - 4.0)
             wanted *= 0.5;
         const double target = juce::jmax (1.0, wanted);

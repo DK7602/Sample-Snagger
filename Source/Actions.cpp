@@ -454,7 +454,7 @@ void separate (SnaggerProcessor& p, Clip::Ptr clip, Engine engine, const juce::S
     // One split per sample at a time: a second click on SEPARATE used to start the whole thing again
     // next to the first (twice the memory, and on first use two downloads writing the same model file).
     for (auto& running : p.jobs.getActiveJobs())
-        if (running->subject == clipId)
+        if (running->subject == clipId && ! running->isCancelled())   // (a cancelled one is just winding down)
         {
             notify (p, "This sample is already being separated. Wait for it, or cancel it first (the x next to the progress bar).");
             return;

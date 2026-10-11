@@ -199,7 +199,7 @@ void ToolManager::refresh()
             switch (t)
             {
                 case Tool::ffmpeg:
-                    code = ProcessRunner::runAndCapture ({ s.path.getFullPathName(), "-hide_banner", "-version" }, out, 15000, stop);
+                    code = ProcessRunner::runAndCapture ({ s.path.getFullPathName(), "-hide_banner", "-version" }, out, 60000, stop);
                     s.version = out.upToFirstOccurrenceOf ("\n", false, false).fromFirstOccurrenceOf ("version ", false, false).upToFirstOccurrenceOf (" ", false, false);
                     break;
                 case Tool::ytdlp:
@@ -207,7 +207,7 @@ void ToolManager::refresh()
                     s.version = out.trim().fromLastOccurrenceOf ("\n", false, false);
                     break;
                 case Tool::deno:
-                    code = ProcessRunner::runAndCapture ({ s.path.getFullPathName(), "--version" }, out, 15000, stop);
+                    code = ProcessRunner::runAndCapture ({ s.path.getFullPathName(), "--version" }, out, 60000, stop);
                     s.version = out.upToFirstOccurrenceOf ("\n", false, false).fromFirstOccurrenceOf ("deno ", false, false).upToFirstOccurrenceOf (" ", false, false);
                     break;
                 case Tool::aiModels:
@@ -231,7 +231,8 @@ void ToolManager::refresh()
             // A file picked with LOCATE that doesn't run (the wrong one, most likely) is let go, so
             // Sample Snagger's own copy - or the next INSTALL - can take over instead of being stuck behind it.
             const auto located = settings.getToolOverride (displayName (t));
-            if (! s.found && ! shuttingDown && t != Tool::ai && located.isNotEmpty() && juce::File (located) == s.path)
+            if (! s.found && code != -2 /* slow or stopped isn't "wrong" */ && ! shuttingDown && t != Tool::ai
+                && located.isNotEmpty() && juce::File (located) == s.path)
             {
                 settings.setToolOverride (displayName (t), {});
                 Status again;
@@ -334,6 +335,14 @@ bool ToolManager::download (const juce::String& url, const juce::File& dest, Job
         if (stale.getLastModificationTime() < juce::Time::getCurrentTime() - juce::RelativeTime::hours (6))
             stale.deleteFile();   // left behind by a download that was cut off
 
+    // Removes the unfinished file on every way out - after the stream below has let go of it
+    // (Windows won't delete a file that is still open).
+    struct Unfinished
+    {
+        juce::File file;
+        ~Unfinished() { file.deleteFile(); }
+    } unfinished { tmp };
+
     {
         juce::FileOutputStream out (tmp);
         if (! out.openedOk())
@@ -350,8 +359,6 @@ bool ToolManager::download (const juce::String& url, const juce::File& dest, Job
         {
             if (job.isCancelled())
             {
-                out.flush();
-                tmp.deleteFile();
                 return false;
             }
             const int n = stream->read (buf.get(), 1 << 16);
@@ -359,7 +366,6 @@ bool ToolManager::download (const juce::String& url, const juce::File& dest, Job
                 break;
             if (! out.write (buf.get(), (size_t) n))
             {
-                tmp.deleteFile();
                 job.fail ("Couldn't write the download - is the disk full? (" + dest.getParentDirectory().getFullPathName() + ")");
                 return false;
             }
@@ -379,7 +385,6 @@ bool ToolManager::download (const juce::String& url, const juce::File& dest, Job
         out.flush();
         if ((total > 0 && got < total) || got == 0 || out.getStatus().failed())
         {
-            tmp.deleteFile();
             job.fail (out.getStatus().failed() ? "Couldn't write the download - is the disk full?" : "Download was interrupted");
             return false;
         }

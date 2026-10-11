@@ -227,6 +227,9 @@ void SnaggerEditor::timerCallback()
     if (const int missing = processor.session.takeMissingClipCount(); missing > 0)
         toast (juce::String (missing) + (missing == 1 ? " clip of this project has" : " clips of this project have")
                + " lost the audio and couldn't be brought back. (The tray's samples are kept on this computer, in Sample Snagger's Sessions folder.)", true);
+
+    if (processor.session.takeFailedWriteCount() > 0)
+        toast ("Couldn't write a sample to Sample Snagger's Sessions folder - is the disk full? Until that works, a saved project won't bring this sample back: SAVE it to your library to be safe.", true);
 }
 
 void SnaggerEditor::changeListenerCallback (juce::ChangeBroadcaster*)

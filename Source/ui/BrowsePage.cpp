@@ -610,8 +610,10 @@ void BrowsePage::timerCallback()
     // button counting (LIVE REC) or the rest of the take going nowhere (REC INPUT).
     if (capture != nullptr && capture->isRecording() && capture->getRecordedSeconds() >= WebCapture::maxRecordSeconds - 0.5)
     {
+        const int clipsBefore = proc.session.getClips().size();
         toggleLiveRec();
-        ctx.toast ("LIVE REC stops at 15 minutes. What you recorded is in the tray.");
+        if (proc.session.getClips().size() > clipsBefore)   // (a silent take says so itself)
+            ctx.toast ("LIVE REC stops at 15 minutes. What you recorded is in the tray.");
     }
     if (proc.isRecordingInput() && proc.inputRecordingIsFull())
         toggleInputRec();

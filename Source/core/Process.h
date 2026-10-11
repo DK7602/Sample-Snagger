@@ -124,6 +124,7 @@ public:
             }
         }
 
+        finished = true;   // the program is done (or stopped): from here on nothing may cancel it any more
         flushLines (true);
 
         const juce::ScopedLock sl (lock);

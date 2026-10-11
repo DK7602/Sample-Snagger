@@ -1090,6 +1090,7 @@ static void testAuditFiles (const juce::File& tmp)
     {
         auto tone = makeSine (440.0, 0.5), other = makeSine (330.0, 0.5);
         const auto name = "Audit drag " + juce::String::toHexString (juce::Random::getSystemRandom().nextInt());
+        const int halfWrittenBefore = paths::dragExportDir().getNumberOfChildFiles (juce::File::findFiles, "*.tmp");
         auto f1 = audioio::writeDragFile (*tone, name, 24);
         auto f2 = audioio::writeDragFile (*tone, name, 24);
         CHECK (f1.existsAsFile() && f1 == f2, "dragging the same sound again reuses the file (no \"(2)\", \"(3)\" copies)");
@@ -1099,7 +1100,7 @@ static void testAuditFiles (const juce::File& tmp)
         f1.setLastModificationTime (juce::Time::getCurrentTime() - juce::RelativeTime::days (40));
         auto f4 = audioio::writeDragFile (*other, name + " b", 24);
         CHECK (f1.existsAsFile(), "a file dragged weeks ago is still there (it used to be deleted after 7 days)");
-        CHECK (f1.getParentDirectory().findChildFiles (juce::File::findFiles, false, "*.tmp").isEmpty(), "no half-written files are left behind");
+        CHECK (f1.getParentDirectory().getNumberOfChildFiles (juce::File::findFiles, "*.tmp") <= halfWrittenBefore, "no half-written files are left behind");
         for (auto& f : { f1, f3, f4 }) f.deleteFile();
     }
 
@@ -1485,6 +1486,177 @@ static void testAuditKnobs()
     pump (30);
 }
 
+/** What a review of the audit's own changes turned up. */
+static void testAuditSecondPass()
+{
+    std::cout << "\n[audit: second pass]\n";
+    auto approx = [] (double a, double b) { return std::abs (a - b) < 1.0e-6; };
+
+    // ---- the project cache
+    {
+        Session a;
+        Clip::Ptr c (new Clip());
+        c->name = "One";
+        c->audio = makeSine (440.0, 0.5);
+        c->slices = { 4000 };
+        a.add (c, true);
+        a.flushWrites();
+        const auto file = c->cacheFile;
+        c->slices = { 5000 };
+        a.clipChanged (c.get());   // (how the undo of a marker, pad or FX step arrives)
+        a.flushWrites();
+        CHECK (c->cacheFile == file && file.existsAsFile(), "a change that leaves the audio alone doesn't write the whole clip to disk again");
+
+        // a project whose clips lie in two session folders (opened, added to, saved again) ...
+        Session b;
+        b.restore (a.toValueTree());
+        Clip::Ptr second (new Clip());
+        second->name = "Two";
+        second->audio = makeSine (330.0, 0.25);
+        b.add (second, false);
+        b.flushWrites();
+        auto state = b.toValueTree();
+        const bool twoFolders = state.getNumChildren() == 2
+                                 && juce::File (state.getChild (0).getProperty ("file").toString()).getParentDirectory()
+                                        != juce::File (state.getChild (1).getProperty ("file").toString()).getParentDirectory();
+
+        // ... comes back after the data folder moved: another user name, a backup, another system
+        for (int i = 0; i < state.getNumChildren(); ++i)
+        {
+            const juce::File f (state.getChild (i).getProperty ("file").toString());
+            const auto folder = f.getParentDirectory().getFileName(), name = f.getFileName();
+            state.getChild (i).setProperty ("file", i == 0 ? "/Users/someone-else/Library/Application Support/Sample Snagger/Sessions/" + folder + "/" + name
+                                                             : "C:\\Users\\Someone Else\\AppData\\Roaming\\Sample Snagger\\Sessions\\" + folder + "\\" + name, nullptr);
+        }
+        Session moved;
+        moved.restore (state);
+        CHECK (twoFolders && moved.getClips().size() == 2 && moved.takeMissingClipCount() == 0,
+               "a project still finds its samples after the data folder moved - in every session folder, from a Mac or a Windows path ("
+                   + juce::String (moved.getClips().size()) + " of 2)");
+
+        // damaged numbers in a project file
+        auto damaged = a.toValueTree();
+        damaged.getChild (0).setProperty ("bpm", std::numeric_limits<double>::infinity(), nullptr);
+        Session d;
+        d.restore (damaged);
+        CHECK (d.getClips().size() == 1 && d.getClips()[0]->bpm == 0.0, "a damaged tempo in a project file is dropped");
+        const auto adj = Clip::Adjust::fromString ("nan nan 1 0 nan inf -inf");
+        CHECK (adj == adj && adj == Clip::Adjust(), "  ...and so are damaged knob values (they'd make the clip render for ever)");
+
+        for (auto* session : { &a, &b, &moved, &d })
+        {
+            session->flushWrites();
+            session->getSessionDir().deleteRecursively();
+        }
+    }
+
+    // ---- DELAY with a tempo that can't be
+    {
+        FxChain chain;
+        chain.prepare (44100.0);
+        FxSettings fx;
+        fx.delayOn = true;
+        bool fine = true;
+        for (double bpm : { 1.0e-305, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN(), -3.0, 5.0 })
+        {
+            std::vector<float> l (512, 0.25f), r (512, 0.25f);
+            chain.process (l.data(), r.data(), 512, fx, bpm);   // (the first of these never returned)
+            for (auto v : l) fine = fine && std::isfinite (v);
+        }
+        CHECK (fine, "the DELAY survives an impossible tempo");
+    }
+
+    // ---- LIVE REC while the page keeps changing its sample rate
+    {
+        WebCapture cap (nullptr);
+        std::vector<float> chunk (6000 * 2);
+        for (size_t i = 0; i < chunk.size(); ++i) chunk[i] = 0.3f * std::sin ((float) (i / 2) * 0.05f);
+        cap.pushFrames (chunk.data(), 5512, 44100.0);
+        cap.startRecording();
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        for (int i = 0; i < 240; ++i)   // 30 seconds, an eighth of a second at a time
+        {
+            const bool odd = (i % 2) != 0;
+            cap.pushFrames (chunk.data(), odd ? 6000 : 5512, odd ? 48000.0 : 44100.0);
+        }
+        const double pushing = juce::Time::getMillisecondCounterHiRes() - t0;
+        const double counted = cap.getRecordedSeconds();
+        auto rec = cap.stopRecording();
+        const double expected = 120.0 * 6000.0 / 48000.0 + 120.0 * 5512.0 / 44100.0;
+        CHECK (rec != nullptr && std::abs (rec->lengthSeconds() - expected) < 0.05 && std::abs (counted - expected) < 0.01 && std::abs (rec->sampleRate - 48000.0) < 0.5,
+               "LIVE REC keeps the whole take through 239 changes of sample rate (" + juce::String (rec != nullptr ? rec->lengthSeconds() : 0.0, 2)
+                   + " s of " + juce::String (expected, 2) + ")");
+        CHECK (pushing < 1500.0, "  ...without converting the whole take on every change (" + juce::String (pushing, 0) + " ms while recording)");
+        CHECK (cap.getRecordedSeconds() < 0.001 && cap.stopRecording() == nullptr, "  ...and the next take starts empty");
+    }
+
+    // ---- file names
+    {
+        const auto broken = juce::String ("a") + juce::String::charToString ((juce::juce_wchar) 0xd800) + "b";
+        CHECK (paths::safeFileName (broken) == "ab", "broken text (half a surrogate pair) is left out of a file name");
+    }
+
+    // ---- knobs: values typed the way the knob shows them
+    {
+        Knob cut ("High cut", 20.0, 20000.0, 20000.0, 10.0);
+        cut.formatter = [] (double v) { return v > 19900.0 ? juce::String ("Off") : (v >= 1000.0 ? juce::String (v / 1000.0, 1) + " kHz" : juce::String ((int) v) + " Hz"); };
+        CHECK (approx (cut.parseTyped ("5.0 kHz"), 5000.0) && approx (cut.parseTyped ("12 kHz"), 12000.0) && approx (cut.parseTyped ("800 Hz"), 800.0)
+                   && approx (cut.parseTyped ("off"), 20000.0) && approx (cut.parseTyped ("3500"), 3500.0),
+               "\"5.0 kHz\" under HIGH CUT is 5000 Hz (" + juce::String (cut.parseTyped ("5.0 kHz"), 0) + " - it was the first position that reads 5.0)");
+
+        Knob attack ("Attack", 0.0, 2000.0, 1.0, 1.0);
+        attack.formatter = [] (double v) { return v >= 1000.0 ? juce::String (v / 1000.0, 2) + " s" : juce::String (juce::roundToInt (v)) + " ms"; };
+        CHECK (approx (attack.parseTyped ("1.50 s"), 1500.0) && approx (attack.parseTyped ("250 ms"), 250.0) && approx (attack.parseTyped ("40"), 40.0),
+               "\"1.50 s\" under ATTACK is 1500 ms (" + juce::String (attack.parseTyped ("1.50 s"), 0) + ")");
+
+        Knob bits ("Bits", 4.0, 16.0, 12.0, 1.0);
+        bits.formatter = [] (double v) { return juce::String (juce::roundToInt (v)) + " bit"; };
+        CHECK (approx (bits.parseTyped ("8 bit"), 8.0) && approx (bits.parseTyped ("8"), 8.0), "\"8 bit\" is still 8");
+
+        // a readout that stands for a finer value than the dial has
+        Knob len ("Length", 50.0, 200.0, 100.0, 1.0);
+        double exact = 72.5;
+        len.formatter = [&exact] (double v) { return exact > 0.0 ? juce::String (exact, 1) + "%" : juce::String (juce::roundToInt (v)) + "%"; };
+        len.shownValue = [&exact, &len] { return exact > 0.0 ? exact : len.slider.getValue(); };
+        len.setValueSilently (73.0);
+        len.setSize (86, 118);
+        int typed = 0, changes = 0;
+        len.onTyped = [&typed] (double) { ++typed; return true; };
+        len.onChange = [&changes] { ++changes; };
+        auto box = [&len]() -> juce::TextEditor*
+        {
+            for (auto* child : len.getChildren())
+                if (auto* t = dynamic_cast<juce::TextEditor*> (child))
+                    if (t->isVisible())
+                        return t;
+            return nullptr;
+        };
+        len.startTyping();
+        auto* first = box();
+        len.startTyping();   // (a double-click reaches the knob twice while its box is open)
+        CHECK (first != nullptr && box() == first && first->getText() == "72.5", "the type-in box opens once, with the value the readout stands for");
+        if (first != nullptr) first->onReturnKey();
+        CHECK (typed == 0 && changes == 0, "a value that was only looked at isn't applied again");
+        pump (30);
+        len.startTyping();
+        if (auto* t = box()) { t->setText ("80", false); t->onReturnKey(); }
+        CHECK (typed == 1, "  ...a changed one is");
+        pump (30);
+
+        const juce::Point<float> at (10.0f, 10.0f);
+        const juce::MouseEvent twice (juce::Desktop::getInstance().getMainMouseSource(), at, {}, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                      &len.slider, &len.slider, juce::Time::getCurrentTime(), at, juce::Time::getCurrentTime(), 2, false);
+        len.setValueSilently (100.0);
+        changes = 0;
+        len.slider.mouseDoubleClick (twice);
+        CHECK (changes == 1, "a double-click reset is reported even when the dial already sits on its default");
+        len.setValueSilently (130.0);
+        changes = 0;
+        len.slider.mouseDoubleClick (twice);
+        CHECK (changes == 1 && approx (len.slider.getValue(), 100.0), "  ...and once, not twice, when it moves the dial");
+    }
+}
+
 static void testAuditStems (const juce::File& tmp)
 {
     std::cout << "\n[audit: stems]\n";
@@ -1831,6 +2003,83 @@ struct StudioPageTester
             ed->keyPressed (juce::KeyPress (juce::KeyPress::deleteKey));
             pump (100);
             CHECK (c->audio->getNumSamples() == n - 29000, "  ...and does once Settings is closed");
+        }
+
+        // ---- the exact MATCH BPM value and the box under the knob
+        {
+            auto boxOf = [] (Knob& k) -> juce::TextEditor*
+            {
+                for (auto* child : k.getChildren())
+                    if (auto* t = dynamic_cast<juce::TextEditor*> (child))
+                        if (t->isVisible())
+                            return t;
+                return nullptr;
+            };
+            auto doubleClickDial = [] (Knob& k)
+            {
+                const juce::Point<float> at (10.0f, 10.0f);
+                k.slider.mouseDoubleClick (juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), at, {}, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                                             &k.slider, &k.slider, juce::Time::getCurrentTime(), at, juce::Time::getCurrentTime(), 2, false));
+            };
+
+            auto c = addClip ("Exact", makeSine (220.0, 2.0));
+            c->bpm = 87.0;
+            page.pitchDefaultBtn.onClick();
+            page.bpmKnob.slider.setValue (120.0, juce::sendNotificationSync);
+            page.matchBpm();
+            settle();
+            page.stretchKnob.startTyping();
+            auto* box = boxOf (page.stretchKnob);
+            CHECK (box != nullptr && box->getText() == "72.5", "the box under LENGTH opens with the value that applies (" + (box != nullptr ? box->getText() : juce::String ("no box")) + ", not the dial's 73)");
+            if (box != nullptr) box->onReturnKey();
+            settle();
+            CHECK (std::abs (c->adjust.length - 0.725) < 1.0e-6, "  ...and closing it unchanged leaves the 72.5% alone (it became 73%)");
+            CHECK (std::abs (page.stretchKnob.parseTyped ("72.5%") - 72.5) < 1.0e-9, "  ...typing the value the way it is shown gives that value (it gave 50%)");
+
+            // a match that lands within half a percent of 100: the dial already sits on its default
+            page.pitchDefaultBtn.onClick();
+            settle();
+            c->bpm = 120.4;
+            page.bpmKnob.slider.setValue (120.0, juce::sendNotificationSync);
+            page.matchBpm();
+            settle();
+            const bool matched = std::abs (c->adjust.length - 120.4 / 120.0) < 1.0e-6;
+            doubleClickDial (page.stretchKnob);
+            settle();
+            CHECK (matched && std::abs (c->adjust.length - 1.0) < 1.0e-9 && c->renderIsCurrent(),
+                   "double-clicking LENGTH resets it also when the dial already reads 100 (the 100.33% stayed)");
+            p->hostBpm = 128.0;
+            page.timerCallback();
+            page.bpmKnob.setValueSilently (120.0);
+            doubleClickDial (page.bpmKnob);
+            CHECK (std::abs (page.targetBpm() - 120.0) < 1.0e-9, "  ...and so does TARGET BPM while it follows the DAW");
+            p->hostBpm = 0.0;
+            page.timerCallback();
+        }
+
+        // ---- "Every hit" inside a selection: still one chop per pad
+        {
+            auto c = addClip ("Long again", makeClicks (44100.0, 30.0, 0.25));
+            page.chopCount.setSelectedId (StudioPage::everyHit, juce::sendNotificationSync);
+            c->slices = { 22050 };
+            page.wave.setSelection (44100, 29 * 44100);
+            page.autoChop();
+            const int chops = (int) c->sliceBoundaries().size() - 1;
+            CHECK (chops == StudioPage::maxPads && std::find (c->slices.begin(), c->slices.end(), 22050) != c->slices.end(),
+                   "\"Every hit\" in a selection keeps to the 32 pads too, markers elsewhere included (" + juce::String (chops) + " chops)");
+            page.wave.setSelection (0, 0);
+        }
+
+        // ---- a name being typed when another sample takes over
+        {
+            auto first = addClip ("First", makeSine (440.0, 0.5));
+            page.nameLabel.showEditor();
+            if (auto* box = page.nameLabel.getCurrentTextEditor())
+                box->setText ("Renamed", false);
+            auto second = addClip ("Second", makeSine (330.0, 0.5));   // (a download or capture finished and selected its sample)
+            pump (50);
+            CHECK (first->name == "Renamed" && second->name == "Second" && ! page.nameLabel.isBeingEdited(),
+                   "a name being typed goes to the sample it was typed for (\"" + first->name + "\" / \"" + second->name + "\")");
         }
 
         ed.reset();
@@ -2819,6 +3068,22 @@ int main (int argc, char** argv)
     tmp.deleteRecursively();
     tmp.createDirectory();
 
+    // Every processor made here caches its clips in the real Sessions folder: what is new in there
+    // when the run ends is ours to take away again.
+    juce::StringArray sessionsBefore;
+    for (auto& d : paths::sessionsDir().findChildFiles (juce::File::findDirectories, false))
+        sessionsBefore.add (d.getFileName());
+    struct TidySessions
+    {
+        const juce::StringArray& before;
+        ~TidySessions()
+        {
+            for (auto& d : paths::sessionsDir().findChildFiles (juce::File::findDirectories, false))
+                if (! before.contains (d.getFileName()))
+                    d.deleteRecursively();
+        }
+    } tidySessions { sessionsBefore };
+
     testEditOps();
     testResample();
     testChopping();
@@ -2830,6 +3095,7 @@ int main (int argc, char** argv)
     testAuditSession();
     testAuditEngine();
     testAuditKnobs();
+    testAuditSecondPass();
     testAuditStems (tmp);
     snag::StudioPageTester::runAudit();
     testProcessor();
