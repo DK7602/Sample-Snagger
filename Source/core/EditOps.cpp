@@ -164,31 +164,7 @@ AudioData::Ptr filter (const AudioData& a, float lowCutHz, float highCutHz)
 }
 
 //==============================================================================
-static float hermite (const float* d, int n, double pos)
-{
-    const int i = (int) pos;
-    const float t = (float) (pos - i);
-    auto at = [&] (int k) { return d[juce::jlimit (0, n - 1, k)]; };
-    const float y0 = at (i - 1), y1 = at (i), y2 = at (i + 1), y3 = at (i + 2);
-    const float c0 = y1, c1 = 0.5f * (y2 - y0), c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3,
-                c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
-    return ((c3 * t + c2) * t + c1) * t + c0;
-}
-
-static AudioData::Ptr varispeed (const AudioData& a, double ratio)
-{
-    const int n = a.getNumSamples();
-    const int outLen = juce::jmax (1, (int) std::floor ((double) n / ratio));
-    juce::AudioBuffer<float> b (a.getNumChannels(), outLen);
-    for (int c = 0; c < a.getNumChannels(); ++c)
-    {
-        const auto* src = a.buffer.getReadPointer (c);
-        auto* d = b.getWritePointer (c);
-        for (int i = 0; i < outLen; ++i)
-            d[i] = hermite (src, n, i * ratio);
-    }
-    return AudioData::make (std::move (b), a.sampleRate);
-}
+static AudioData::Ptr varispeed (const AudioData& a, double ratio);
 
 namespace
 {
@@ -247,12 +223,10 @@ namespace
     };
 }
 
-AudioData::Ptr resample (const AudioData& a, double newRate)
+/** Reads `a` at `ratio` input samples per output sample, through a sinc filter that keeps out
+    whatever the new sample spacing can't hold. The result is labelled `labelRate`. */
+static AudioData::Ptr readAtSpeed (const AudioData& a, double ratio, double labelRate)
 {
-    if (newRate <= 0 || std::abs (newRate - a.sampleRate) < 0.5)
-        return AudioData::make (copyOf (a), a.sampleRate);
-
-    const double ratio = a.sampleRate / newRate;   // input samples per output sample
     const int n = a.getNumSamples();
     const int outLen = juce::jmax (1, juce::roundToInt ((double) n / ratio));
     const int chans = a.getNumChannels();
@@ -286,7 +260,25 @@ AudioData::Ptr resample (const AudioData& a, double newRate)
     for (auto& w : workers)
         w.join();
 
-    return AudioData::make (std::move (b), newRate);
+    return AudioData::make (std::move (b), labelRate);
+}
+
+AudioData::Ptr resample (const AudioData& a, double newRate)
+{
+    if (newRate <= 0 || std::abs (newRate - a.sampleRate) < 0.5)
+        return AudioData::make (copyOf (a), a.sampleRate);
+
+    return readAtSpeed (a, a.sampleRate / newRate, newRate);   // (input samples per output sample)
+}
+
+/** TAPE: faster and higher, or slower and lower, like a tape machine. Sped up, the top of the
+    sound would go past what the sample rate can hold and fold back down as harsh tones that were
+    never in the sample: the filter takes it out first, as the tape head's limits did. */
+static AudioData::Ptr varispeed (const AudioData& a, double ratio)
+{
+    if (! (ratio > 0.0) || std::abs (ratio - 1.0) < 1.0e-9 || a.getNumSamples() < 2)
+        return AudioData::make (copyOf (a), a.sampleRate);
+    return readAtSpeed (a, ratio, a.sampleRate);
 }
 
 AudioData::Ptr musicWithoutVocals (const AudioData& mix, const AudioData& vocals, const AudioData* others, float strength)

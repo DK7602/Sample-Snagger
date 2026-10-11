@@ -146,6 +146,13 @@ private:
         bool active = false;
         int note = -1;
         juce::uint32 age = 0;
+
+        // What this voice was playing when it was taken over (the same pad hit again, or the
+        // oldest voice given to a new note): faded out over a few milliseconds instead of being
+        // cut dead, which was a click.
+        SamplerState::Ptr tailState;
+        snag::PadVoice tail;
+        float tailLevel = 0.0f, tailStep = 0.0f;
     };
     std::array<Voice, 16> voices;
     juce::uint32 voiceAge = 0;

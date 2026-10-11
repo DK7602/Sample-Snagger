@@ -2438,6 +2438,90 @@ static void testChopWorkflow (const juce::File& tmp)
     }
 }
 
+/** No clicks when a voice is taken over, and no folded-back tones from TAPE pitch. */
+static void testSoundQuality()
+{
+    std::cout << "\n[sound quality]\n";
+
+    // ---- hitting a pad again while it sounds, and running out of voices
+    {
+        SnaggerProcessor p;
+        p.prepareToPlay (48000.0, 256);
+        Clip::Ptr c (new Clip());
+        c->name = "held note";
+        c->audio = makeSine (220.0, 4.0, 48000.0);   // one long chop
+        p.session.add (c, true);
+        p.setSamplerClip (c);
+
+        juce::AudioBuffer<float> buf (2, 256);
+        juce::MidiBuffer midi;
+        float last = 0.0f;
+        auto biggestStep = [&] (int blocks)   // the largest move from one sample to the next
+        {
+            float worst = 0.0f;
+            for (int b = 0; b < blocks; ++b)
+            {
+                buf.clear();
+                p.processBlock (buf, midi);
+                midi.clear();
+                for (int i = 0; i < 256; ++i)
+                {
+                    const float v = buf.getSample (0, i);
+                    worst = juce::jmax (worst, std::abs (v - last));
+                    last = v;
+                }
+            }
+            return worst;
+        };
+
+        midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 127), 0);
+        const float playing = biggestStep (40);   // what the note itself does, sample to sample
+        midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 127), 77);   // the same pad again, mid-note
+        const float retrigger = biggestStep (8);
+        CHECK (playing > 0.001f && retrigger < playing * 4.0f + 0.01f,
+               "hitting a pad again while it sounds doesn't click (largest step " + juce::String (retrigger, 4) + ", the note itself moves " + juce::String (playing, 4)
+                   + " - the cut was a jump of up to the note's full level)");
+
+        // sixteen notes held in KEYS mode, then one more: the oldest voice is handed over
+        midi.addEvent (juce::MidiMessage::allNotesOff (1), 0);
+        biggestStep (100);
+        p.midiMode = SnaggerProcessor::keys;
+        p.oneShot = false;
+        for (int n = 0; n < 16; ++n)
+            midi.addEvent (juce::MidiMessage::noteOn (1, 48 + n, (juce::uint8) 60), n * 8);
+        biggestStep (60);
+        float held = 0.0f;
+        for (int k = 0; k < 20; ++k) held = juce::jmax (held, biggestStep (1));
+        midi.addEvent (juce::MidiMessage::noteOn (1, 70, (juce::uint8) 60), 100);
+        const float stolen = biggestStep (8);
+        CHECK (held > 0.001f && stolen < held * 2.5f + 0.01f,
+               "a 17th note takes over the oldest voice without a click (largest step " + juce::String (stolen, 4) + ", " + juce::String (held, 4) + " before it)");
+    }
+
+    // ---- TAPE pitch: what can't fit under the sample rate is taken out, not folded back
+    {
+        auto rms = [] (const AudioData& a)
+        {
+            const int n = a.getNumSamples(), edge = n / 10;   // (away from the ends)
+            return a.buffer.getRMSLevel (0, edge, n - 2 * edge);
+        };
+        auto high = makeSine (15000.0, 1.0);      // an octave up it would be 30 kHz: over the top at 44.1 kHz
+        auto mid = makeSine (5000.0, 1.0);
+        const float in = rms (*mid);
+        auto highUp = edit::pitchTime (*high, 12.0f, 1.0, false, true);
+        auto midUp = edit::pitchTime (*mid, 12.0f, 1.0, false, true);
+        auto midDown = edit::pitchTime (*mid, -12.0f, 1.0, false, true);
+        CHECK (rms (*highUp) < in * 0.01f, "TAPE an octave up: a 15 kHz tone is gone, not folded back down to 14 kHz (level "
+                   + juce::String (juce::Decibels::gainToDecibels (rms (*highUp) / in), 0) + " dB - it came back at full level)");
+        CHECK (std::abs (rms (*midUp) / in - 1.0f) < 0.03f && std::abs (zeroCrossHz (*midUp) - 10000.0) < 60.0
+                   && std::abs (midUp->getNumSamples() - mid->getNumSamples() / 2) <= 1,
+               "  ...a 5 kHz tone comes out at 10 kHz, as loud as it went in, in half the time");
+        CHECK (std::abs (rms (*midDown) / in - 1.0f) < 0.03f && std::abs (zeroCrossHz (*midDown) - 2500.0) < 20.0
+                   && std::abs (midDown->getNumSamples() - mid->getNumSamples() * 2) <= 1,
+               "  ...and an octave down at 2.5 kHz, in twice the time");
+    }
+}
+
 /** The undo history is kept within a memory budget. */
 static void testUndoMemory()
 {
@@ -3834,6 +3918,7 @@ int main (int argc, char** argv)
     testCancelStopsEverything (tmp);
     testUndoMemory();
     testChopWorkflow (tmp);
+    testSoundQuality();
    #if SNAGGER_BUILTIN_AI
     testAiWindows();
    #endif
