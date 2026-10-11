@@ -21,6 +21,14 @@ void DragOut::released()
 
 bool DragOut::isPreparing() const   { return shared->state == State::preparing; }
 
+void DragOut::begin (juce::Component& source, const juce::StringArray& files) const
+{
+    if (startDrag)
+        startDrag (source, files);
+    else
+        DragHandle::startExternalDrag (source, files);
+}
+
 void DragOut::drag (SnaggerProcessor& p, juce::Component& source, const std::function<actions::DragJob()>& describe)
 {
     auto& s = *shared;
@@ -34,7 +42,7 @@ void DragOut::drag (SnaggerProcessor& p, juce::Component& source, const std::fun
             const auto files = s.waitingFor->files;
             s.waitingFor = nullptr;
             s.state = State::done;
-            DragHandle::startExternalDrag (source, files);
+            begin (source, files);
         }
         return;
     }
@@ -57,14 +65,14 @@ void DragOut::drag (SnaggerProcessor& p, juce::Component& source, const std::fun
     if (job.key == s.lastKey && allThere (s.lastFiles))
     {
         s.state = State::done;
-        DragHandle::startExternalDrag (source, s.lastFiles);
+        begin (source, s.lastFiles);
         return;
     }
 
     if (isQuick (job))
     {
         s.state = State::done;
-        DragHandle::startExternalDrag (source, actions::makeDragFiles (job));
+        begin (source, actions::makeDragFiles (job));
         return;
     }
 

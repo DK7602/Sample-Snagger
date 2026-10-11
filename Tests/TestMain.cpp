@@ -2688,6 +2688,9 @@ static void testDragOut()
     p.session.add (longClip, true);
     juce::Component source;
     DragOut drag;
+    juce::StringArray dragged;   // (what a real drag would have carried: here it is only noted)
+    int drags = 0;
+    drag.startDrag = [&dragged, &drags] (juce::Component&, const juce::StringArray& files) { dragged = files; ++drags; };
     auto describe = [&p, longClip] { return actions::dragJobFor (p, *longClip); };
 
     drag.pressed();
@@ -2700,14 +2703,18 @@ static void testDragOut()
     settle();
     const auto file = paths::dragExportDir().getChildFile (longClip->name + ".wav");
     drag.drag (p, source, describe);   // the next movement finds the file there
-    CHECK (file.existsAsFile() && ! drag.isPreparing(), "  ...and the drag goes ahead when the file is there");
+    CHECK (file.existsAsFile() && ! drag.isPreparing() && drags == 1 && dragged.size() == 1 && juce::File (dragged[0]) == file,
+           "  ...and the drag goes ahead, with that file, when it is there");
+    drag.drag (p, source, describe);
+    CHECK (drags == 1, "  ...once per press of the mouse button");
     drag.released();
 
     // let go before it was ready, then dragged again
     const auto stamp = file.getLastModificationTime();
     drag.pressed();
     drag.drag (p, source, describe);
-    CHECK (! drag.isPreparing() && ! p.jobs.isBusy() && file.getLastModificationTime() == stamp, "  ...the same sample dragged again starts at once, from the file that was made");
+    CHECK (! drag.isPreparing() && ! p.jobs.isBusy() && file.getLastModificationTime() == stamp && drags == 2,
+           "  ...the same sample dragged again starts at once, from the file that was made");
     drag.released();
 
     longClip->fx.driveOn = true;   // (another sound now: it has to be made again)

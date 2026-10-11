@@ -32,6 +32,10 @@ public:
     /** Wires a DragHandle up to this. */
     void attachTo (DragHandle&, SnaggerProcessor&, std::function<actions::DragJob()> describe);
 
+    /** What starts the drag once the files are there: the system's drag and drop, unless something
+        else is put here (the tests do - a real drag needs a mouse, and blocks until it is let go). */
+    std::function<void (juce::Component& source, const juce::StringArray& files)> startDrag;
+
     /** Worth a background job? (More than a minute of audio.) */
     static bool isQuick (const actions::DragJob& j) noexcept   { return j.samples <= 60 * 48000; }
 
@@ -49,6 +53,7 @@ private:
         actions::DragJob keepsAudioAlive;   // (so the key's addresses can't come to mean other audio)
     };
     std::shared_ptr<Shared> shared;   // (the job's callback can outlive the component this belongs to)
+    void begin (juce::Component& source, const juce::StringArray& files) const;
 };
 
 } // namespace snag
