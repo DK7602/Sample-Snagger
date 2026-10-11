@@ -164,31 +164,7 @@ AudioData::Ptr filter (const AudioData& a, float lowCutHz, float highCutHz)
 }
 
 //==============================================================================
-static float hermite (const float* d, int n, double pos)
-{
-    const int i = (int) pos;
-    const float t = (float) (pos - i);
-    auto at = [&] (int k) { return d[juce::jlimit (0, n - 1, k)]; };
-    const float y0 = at (i - 1), y1 = at (i), y2 = at (i + 1), y3 = at (i + 2);
-    const float c0 = y1, c1 = 0.5f * (y2 - y0), c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3,
-                c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
-    return ((c3 * t + c2) * t + c1) * t + c0;
-}
-
-static AudioData::Ptr varispeed (const AudioData& a, double ratio)
-{
-    const int n = a.getNumSamples();
-    const int outLen = juce::jmax (1, (int) std::floor ((double) n / ratio));
-    juce::AudioBuffer<float> b (a.getNumChannels(), outLen);
-    for (int c = 0; c < a.getNumChannels(); ++c)
-    {
-        const auto* src = a.buffer.getReadPointer (c);
-        auto* d = b.getWritePointer (c);
-        for (int i = 0; i < outLen; ++i)
-            d[i] = hermite (src, n, i * ratio);
-    }
-    return AudioData::make (std::move (b), a.sampleRate);
-}
+static AudioData::Ptr varispeed (const AudioData& a, double ratio);
 
 namespace
 {
@@ -247,12 +223,10 @@ namespace
     };
 }
 
-AudioData::Ptr resample (const AudioData& a, double newRate)
+/** Reads `a` at `ratio` input samples per output sample, through a sinc filter that keeps out
+    whatever the new sample spacing can't hold. The result is labelled `labelRate`. */
+static AudioData::Ptr readAtSpeed (const AudioData& a, double ratio, double labelRate)
 {
-    if (newRate <= 0 || std::abs (newRate - a.sampleRate) < 0.5)
-        return AudioData::make (copyOf (a), a.sampleRate);
-
-    const double ratio = a.sampleRate / newRate;   // input samples per output sample
     const int n = a.getNumSamples();
     const int outLen = juce::jmax (1, juce::roundToInt ((double) n / ratio));
     const int chans = a.getNumChannels();
@@ -286,7 +260,25 @@ AudioData::Ptr resample (const AudioData& a, double newRate)
     for (auto& w : workers)
         w.join();
 
-    return AudioData::make (std::move (b), newRate);
+    return AudioData::make (std::move (b), labelRate);
+}
+
+AudioData::Ptr resample (const AudioData& a, double newRate)
+{
+    if (newRate <= 0 || std::abs (newRate - a.sampleRate) < 0.5)
+        return AudioData::make (copyOf (a), a.sampleRate);
+
+    return readAtSpeed (a, a.sampleRate / newRate, newRate);   // (input samples per output sample)
+}
+
+/** TAPE: faster and higher, or slower and lower, like a tape machine. Sped up, the top of the
+    sound would go past what the sample rate can hold and fold back down as harsh tones that were
+    never in the sample: the filter takes it out first, as the tape head's limits did. */
+static AudioData::Ptr varispeed (const AudioData& a, double ratio)
+{
+    if (! (ratio > 0.0) || std::abs (ratio - 1.0) < 1.0e-9 || a.getNumSamples() < 2)
+        return AudioData::make (copyOf (a), a.sampleRate);
+    return readAtSpeed (a, ratio, a.sampleRate);
 }
 
 AudioData::Ptr musicWithoutVocals (const AudioData& mix, const AudioData& vocals, const AudioData* others, float strength)
@@ -536,10 +528,103 @@ static OnsetEnvelope computeOnsetEnvelope (const AudioData& a)
     return o;
 }
 
-int snapToZeroCrossing (const AudioData& a, int pos, int maxDistance)
+/** Looks for the start of a hit between `searchFrom` and `searchTo`: the moment the sound begins
+    to rise sharply. Returns a position just before it, or -1 when nothing there stands out. */
+static int findRise (const AudioData& a, int searchFrom, int searchTo)
+{
+    const int n = a.getNumSamples();
+    const double sr = a.sampleRate;
+    const int step = juce::jmax (1, (int) (sr * 0.00025));   // look every quarter of a millisecond ...
+    const int win  = juce::jmax (2, (int) (sr * 0.001));     // ... at the level of the next millisecond
+    const int lead = (int) (sr * 0.012);                     // room before, to know the level the hit rises from
+    const int from = juce::jmax (1, searchFrom - lead);
+    const int to   = juce::jmin (n - win - 1, searchTo);
+    if (to - from < win * 12)
+        return -1;
+
+    // The level of what changes from one sample to the next: a hit begins with something sharp,
+    // while a bass note or a pad under it moves slowly and all but disappears from this.
+    const int chans = a.getNumChannels();
+    std::vector<float> level;
+    level.reserve ((size_t) ((to - from) / step + 1));
+    for (int p = from; p <= to; p += step)
+    {
+        float sum = 0.0f;
+        for (int c = 0; c < chans; ++c)
+        {
+            const float* d = a.buffer.getReadPointer (c, p);
+            for (int i = 0; i < win; ++i) sum += std::abs (d[i] - d[i - 1]);
+        }
+        level.push_back (sum / (float) (win * chans));
+    }
+    const int count = (int) level.size();
+    const int firstSearched = juce::jmin (count - 1, juce::jmax (0, searchFrom - from) / step);
+
+    // where it gets louder fastest, over two milliseconds
+    const int lag = juce::jmax (1, (int) (sr * 0.002) / step);
+    int steepest = -1;
+    float rise = 0.0f;
+    for (int k = juce::jmax (lag, firstSearched); k < count; ++k)
+    {
+        const float r = level[(size_t) k] - level[(size_t) (k - lag)];
+        if (r > rise) { rise = r; steepest = k; }
+    }
+    if (steepest < 0)
+        return -1;
+
+    // A low drum keeps swelling after it has begun, so its steepest rise can come a few
+    // milliseconds in. The start is the first rise that is in the same league.
+    for (int k = juce::jmax (lag, firstSearched); k < steepest; ++k)
+        if (level[(size_t) k] - level[(size_t) (k - lag)] >= rise * 0.25f)
+        {
+            steepest = k;
+            break;
+        }
+
+    // the level it rises from (the most that was going on shortly before - the sound underneath has
+    // ups and downs of its own), and the level it gets to
+    float before = 0.0f, top = 0.0f;
+    const int guard = juce::jmax (1, (int) (sr * 0.0015) / step);   // (a slower attack isn't "before")
+    for (int k = juce::jmax (0, steepest - lag - guard - (int) (sr * 0.010) / step); k <= steepest - lag - guard; ++k)
+        before = juce::jmax (before, level[(size_t) k]);
+    for (int k = steepest; k < juce::jmin (count, steepest + (int) (sr * 0.005) / step + 1); ++k)
+        top = juce::jmax (top, level[(size_t) k]);
+    if (top < before * 2.0f + 1.0e-5f)
+        return -1;   // nothing stands out here: a soft start
+
+    // back from the steep part to where it first leaves the level before it
+    const float threshold = before + 0.12f * (top - before);
+    int k = steepest;
+    while (k > 0 && level[(size_t) (k - 1)] > threshold)
+        --k;
+
+    // (level[k] looks at the millisecond after its position, so the rise begins near the end of
+    //  it - and the marker goes half a millisecond before that)
+    const int start = from + k * step + win - (int) (sr * 0.0005) - step;
+    return juce::jlimit (0, juce::jmax (0, n - 1), start);
+}
+
+int refineOnset (const AudioData& a, int roughly)
+{
+    // (the analysis frame is 23 ms wide and steps by 6: the start is within a few ms of its middle)
+    const double sr = a.sampleRate;
+    const int found = findRise (a, roughly - (int) (sr * 0.008), roughly + (int) (sr * 0.016));
+    return found >= 0 ? found : juce::jlimit (0, juce::jmax (0, a.getNumSamples() - 1), roughly - (int) (0.004 * sr));
+}
+
+int snapToHit (const AudioData& a, int pos, int reach)
+{
+    if (reach <= 0)
+        return -1;
+    const int found = findRise (a, pos - reach, pos + reach);
+    return found >= 0 && std::abs (found - pos) <= reach + (int) (a.sampleRate * 0.002) ? found : -1;
+}
+
+int snapToZeroCrossing (const AudioData& a, int pos, int maxDistance, int maxForward)
 {
     const int n = a.getNumSamples();
     if (n < 3) return pos;
+    const int forward = maxForward >= 0 ? maxForward : maxDistance;
     auto mono = [&] (int i)
     {
         float s = 0;
@@ -548,7 +633,7 @@ int snapToZeroCrossing (const AudioData& a, int pos, int maxDistance)
     };
     int best = pos;
     float bestV = std::numeric_limits<float>::max();
-    for (int d = -maxDistance; d <= maxDistance; ++d)
+    for (int d = -maxDistance; d <= forward; ++d)
     {
         const int i = pos + d;
         if (i <= 0 || i >= n - 1) continue;
@@ -591,9 +676,11 @@ std::vector<int> detectTransients (const AudioData& a, float sensitivity, int mi
 
         if (v > threshold && f - lastPeak >= minGapFrames)
         {
-            // FFT frame f covers [f*hop, f*hop+size); the onset sits roughly in the middle.
-            int pos = f * o.hop + 512 - (int) (0.004 * a.sampleRate);   // a few ms of pre-roll
-            pos = snapToZeroCrossing (a, juce::jmax (0, pos), (int) (0.0015 * a.sampleRate));
+            // FFT frame f covers [f*hop, f*hop+size): the hit starts somewhere around the middle.
+            // Where exactly is looked up in the sound itself (going by the middle alone put the
+            // marker 5 to 13 ms early: every chop began with the tail of the one before).
+            int pos = refineOnset (a, f * o.hop + 512);
+            pos = snapToZeroCrossing (a, juce::jmax (0, pos), (int) (0.0015 * a.sampleRate), (int) (0.0002 * a.sampleRate));
             if (pos > (int) (0.02 * a.sampleRate) && pos < a.getNumSamples() - (int) (0.02 * a.sampleRate))
                 result.push_back (pos);
             lastPeak = f;
@@ -660,7 +747,7 @@ std::vector<int> chopAtStrongestHits (const AudioData& a, int numChops, int rang
         const float prominence = v - tmp[tmp.size() / 2];
         if (prominence < 0.01f)
             continue;
-        const int pos = f * o.hop + 512 - ms (4.0);   // same placement as detectTransients
+        const int pos = refineOnset (a, f * o.hop + 512);   // same placement as detectTransients
         if (pos <= rangeStart || pos >= rangeEnd)
             continue;
         const float jump = juce::jmax (0.0f, rms (pos - ms (5), pos + ms (30)) - rms (pos - ms (60), pos - ms (15)));
@@ -713,7 +800,7 @@ std::vector<int> chopAtStrongestHits (const AudioData& a, int numChops, int rang
         const int room = juce::jmin (placed[i] - prev, next - placed[i]) / 3;
         const int reach = juce::jmin ((int) (0.0015 * a.sampleRate), room);
         if (reach > 0)
-            cuts[i] = snapToZeroCrossing (a, placed[i], reach);
+            cuts[i] = snapToZeroCrossing (a, placed[i], reach, juce::jmin (reach, (int) (0.0002 * a.sampleRate)));   // (back rather than into the hit)
     }
     return cuts;
 }

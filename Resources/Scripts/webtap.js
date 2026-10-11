@@ -11,9 +11,23 @@
 //    mirrored into a MediaStream destination that we listen to.
 // Safety rules: page audio is never re-routed away from the speakers, and a media element that
 // the page already plays through Web Audio is captured once (at the speakers), not twice.
+//
+// Frames: a frame from the same site as the page that holds it (a player in an <iframe>, srcdoc
+// frames) is listened to by the page's own tap - there is one tap per page. A frame from another
+// site is left alone: the page can't reach into it, and what plays in there must not be handed
+// to the page around it either.
 (function () {
-  var VERSION = 5;
+  var VERSION = 6;
   if (window.__snag && window.__snag.version === VERSION) return 'ok';
+
+  if (window.top !== window) {
+    // (where the browser runs this script in every frame: join the page's tap, or stay out of it)
+    try {
+      var above = window.top.__snag;
+      if (above && above.version === VERSION) { above.install(window); window.__snag = above; }
+    } catch (e) {}
+    return 'frame';
+  }
 
   var S = window.__snag = {
     version: VERSION,
@@ -21,6 +35,8 @@
     ctx: null,
     proc: null,
     sink: null,
+    wins: [],            // same-site frames this tap also listens in
+    via: 'none',         // how the audio is picked up: 'worklet' or 'script'
     taps: [],            // media element taps: { el, src, mode, stream, track }
     blocked: [],         // media we may not listen to (cross-origin files without CORS)
     known: [],           // media elements seen via play(), including ones not in the document
@@ -31,36 +47,90 @@
     level: 0,
     err: '',
 
+    // Audio that arrived from the tap: interleaved stereo.
+    enqueue: function (il) {
+      if (!S.armed) return;
+      var n = il.length / 2, pk = 0;
+      for (var i = 0; i < il.length; i++) { var m = il[i]; if (m < 0) m = -m; if (m > pk) pk = m; }
+      S.level = Math.max(pk, S.level * 0.85);
+      S.q.push(il); S.qFrames += n;
+      while (S.qFrames > S.maxFrames && S.q.length) { S.qFrames -= S.q[0].length / 2; S.q.shift(); }
+    },
+
     ensureCtx: function () {
       if (S.ctx) return S.ctx;
       var AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) { S.err = 'Web Audio not supported'; return null; }
       try { S.ctx = new AC({ latencyHint: 'playback' }); } catch (e) { S.ctx = new AC(); }
-      S.proc = S.ctx.createScriptProcessor(4096, 2, 2);
-      S.proc.onaudioprocess = function (e) {
+
+      // Everything that is listened to goes into one bus (kept under its old name, "proc").
+      S.proc = S.ctx.createGain();
+      S.proc.channelCount = 2; S.proc.channelCountMode = 'explicit';
+      // ...and whatever reads the bus is kept pulling, without making any sound of its own
+      S.sink = S.ctx.createGain();
+      S.sink.gain.value = 0;
+      S.sink.connect(S.ctx.destination);
+
+      S.startScriptReader();   // works everywhere, at once
+      S.startWorklet();        // the better way, where the page allows it: takes over when it's ready
+      S.ctx.onstatechange = function () { if (S.ctx.state === 'running') S.scan(); };
+      return S.ctx;
+    },
+
+    // Reads the bus on the page's own thread. A page that is busy (loading, scrolling, a heavy
+    // player) makes this one skip audio - which is why the worklet below replaces it when it can.
+    startScriptReader: function () {
+      S.reader = S.ctx.createScriptProcessor(4096, 2, 2);
+      S.reader.onaudioprocess = function (e) {
         var ib = e.inputBuffer, n = ib.length;
         var out = e.outputBuffer;
         for (var c = 0; c < out.numberOfChannels; c++) out.getChannelData(c).fill(0);
         if (!S.armed) return;
         var l = ib.getChannelData(0), r = ib.numberOfChannels > 1 ? ib.getChannelData(1) : l;
-        var il = new Float32Array(n * 2), pk = 0;
-        for (var i = 0; i < n; i++) {
-          var a = l[i], b = r[i];
-          il[2 * i] = a; il[2 * i + 1] = b;
-          var m = a < 0 ? -a : a; if (m > pk) pk = m;
-          m = b < 0 ? -b : b; if (m > pk) pk = m;
-        }
-        S.level = Math.max(pk, S.level * 0.85);
-        S.q.push(il); S.qFrames += n;
-        while (S.qFrames > S.maxFrames && S.q.length) { S.qFrames -= S.q[0].length / 2; S.q.shift(); }
+        var il = new Float32Array(n * 2);
+        for (var i = 0; i < n; i++) { il[2 * i] = l[i]; il[2 * i + 1] = r[i]; }
+        S.enqueue(il);
       };
-      // keep the processor pulling audio without making any sound of its own
-      S.sink = S.ctx.createGain();
-      S.sink.gain.value = 0;
-      S.proc.connect(S.sink);
-      S.sink.connect(S.ctx.destination);
-      S.ctx.onstatechange = function () { if (S.ctx.state === 'running') S.scan(); };
-      return S.ctx;
+      S.proc.connect(S.reader);
+      S.reader.connect(S.sink);
+      S.via = 'script';
+    },
+
+    // Reads the bus on the audio thread, so nothing is lost while the page is busy. Pages whose
+    // security policy doesn't allow a script from a blob: keep the reader above.
+    startWorklet: function () {
+      var ctx = S.ctx;
+      if (!ctx.audioWorklet || typeof AudioWorkletNode === 'undefined' || typeof Blob === 'undefined') return;
+      var code =
+        'class SnagTap extends AudioWorkletProcessor {' +
+        ' constructor () { super(); this.buf = new Float32Array(4096); this.n = 0; }' +
+        ' process (inputs) {' +
+        '  var inp = inputs[0], l = inp && inp[0], r = inp && (inp[1] || inp[0]), frames = l ? l.length : 128;' +
+        '  for (var i = 0; i < frames; i++) {' +
+        '   this.buf[this.n++] = l ? l[i] : 0; this.buf[this.n++] = l ? r[i] : 0;' +
+        '   if (this.n === this.buf.length) { this.port.postMessage(this.buf, [this.buf.buffer]); this.buf = new Float32Array(4096); this.n = 0; }' +
+        '  }' +
+        '  return true;' +
+        ' }' +
+        '}' +
+        'registerProcessor("snag-tap", SnagTap);';
+      var url = null;
+      try {
+        url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+        ctx.audioWorklet.addModule(url).then(function () {
+          var node = new AudioWorkletNode(ctx, 'snag-tap', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
+                                                             channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers' });
+          node.port.onmessage = function (e) { S.enqueue(e.data); };
+          // (both changes in one go, so no stretch of audio is read twice or not at all)
+          S.proc.connect(node);
+          node.connect(S.sink);
+          S.reader.onaudioprocess = null;   // (first, and for sure: both reading would double the audio)
+          try { S.proc.disconnect(S.reader); S.reader.disconnect(); } catch (e) {}
+          S.reader = null;
+          S.worklet = node;
+          S.via = 'worklet';
+        }).catch(function () {}).then(function () { try { URL.revokeObjectURL(url); } catch (e) {} });
+      } catch (e) { try { if (url) URL.revokeObjectURL(url); } catch (e2) {} }
     },
 
     resume: function () {
@@ -71,7 +141,34 @@
       var src = el.currentSrc || el.src || '';
       if (!src || src.indexOf('blob:') === 0 || src.indexOf('data:') === 0 || src.indexOf('mediastream:') === 0) return true;
       if (el.crossOrigin) return true;
-      try { return new URL(src, location.href).origin === location.origin; } catch (e) { return false; }
+      try { return new URL(src, el.ownerDocument.location.href).origin === location.origin; } catch (e) { return false; }
+    },
+
+    // The page's document and those of the same-site frames in it (frames that are gone are dropped).
+    docs: function () {
+      var list = [document];
+      for (var i = S.wins.length - 1; i >= 0; i--) {
+        var d = null;
+        try { var w = S.wins[i]; if (!w.closed && w.frameElement && w.frameElement.isConnected) d = w.document; } catch (e) {}
+        if (d) list.push(d); else S.wins.splice(i, 1);
+      }
+      return list;
+    },
+
+    // Frames the browser didn't run this script in (WebKit only runs it in the page itself):
+    // same-site ones are taken in here. Looking into a frame from another site throws - it stays out.
+    adoptFrames: function () {
+      var docs = S.docs();
+      for (var i = 0; i < docs.length; i++) {
+        var frames = [];
+        try { frames = docs[i].querySelectorAll('iframe, frame'); } catch (e) {}
+        for (var j = 0; j < frames.length; j++) {
+          try {
+            var w = frames[j].contentWindow;
+            if (w && w.document && !w.__snagInstalled) { S.install(w); docs.push(w.document); }
+          } catch (e) {}
+        }
+      }
     },
 
     remember: function (el) {
@@ -81,8 +178,10 @@
     },
 
     mediaElements: function () {
-      var list = [];
-      try { list = Array.prototype.slice.call(document.querySelectorAll('video, audio')); } catch (e) {}
+      var list = [], docs = S.docs();
+      for (var d = 0; d < docs.length; d++) {
+        try { list = list.concat(Array.prototype.slice.call(docs[d].querySelectorAll('video, audio'))); } catch (e) {}
+      }
       for (var i = 0; i < S.known.length; i++) if (list.indexOf(S.known[i]) < 0) list.push(S.known[i]);
       return list;
     },
@@ -226,6 +325,7 @@
 
     scan: function () {
       if (!S.armed) return 0;
+      S.adoptFrames();
       var els = S.mediaElements();
       S.prune(els);
       for (var i = 0; i < els.length; i++) S.attach(els[i]);
@@ -258,7 +358,7 @@
       if (S.armed) { S.scan(); if (S.ctx) S.refreshStreams(); }
       var out = { sr: S.ctx ? S.ctx.sampleRate : 0, n: 0, b64: '', lvl: S.level,
                   st: S.ctx ? S.ctx.state : 'none', taps: S.activeTaps(), playing: S.playing(), err: S.err,
-                  blocked: S.blockedPlaying() };
+                  blocked: S.blockedPlaying(), via: S.via, frames: S.wins.length };
       if (S.q.length) {
         var all = new Float32Array(S.qFrames * 2), off = 0;
         for (var i = 0; i < S.q.length; i++) { all.set(S.q[i], off); off += S.q[i].length; }
@@ -308,84 +408,98 @@
     }
   };
 
-  // ---- hooks into the page's audio APIs (installed once per document) -----------------------
+  // ---- hooks into a window's audio APIs: the page's own, and each same-site frame's -----------
   function looksNative (fn, name) {
     try { fn.toString = function () { return 'function ' + name + '() { [native code] }'; }; } catch (e) {}
     return fn;
   }
-  function snag () { return window.__snag; }
-  function isSpeakers (node) {
-    return typeof AudioDestinationNode !== 'undefined' && node instanceof AudioDestinationNode;
-  }
+  function snag () { return S; }
 
-  try {
-    var AN = window.AudioNode;
-    if (AN && AN.prototype && !AN.prototype.__snagHooked) {
-      Object.defineProperty(AN.prototype, '__snagHooked', { value: true });
-      var connect = AN.prototype.connect, disconnect = AN.prototype.disconnect;
+  S.install = function (win) {
+    try {
+      if (!win || win.__snagInstalled) return;
+      Object.defineProperty(win, '__snagInstalled', { value: true });
+    } catch (e) { return; }
+    if (win !== window && S.wins.indexOf(win) < 0) S.wins.push(win);
 
-      AN.prototype.connect = looksNative(function (dest) {
-        var result = connect.apply(this, arguments);
-        try {
-          var s = snag();
-          if (s && isSpeakers(dest) && this.context !== s.ctx) {
-            var t = s.pageTapFor(this.context, true);
-            if (t && t.node) connect.call(this, t.node);
-          }
-        } catch (e) {}
-        return result;
-      }, 'connect');
-
-      AN.prototype.disconnect = looksNative(function (dest) {
-        try {
-          var s = snag();
-          if (s && arguments.length && isSpeakers(dest) && this.context !== s.ctx) {
-            var t = s.pageTapFor(this.context, false);
-            if (t && t.node) disconnect.call(this, t.node);
-          }
-        } catch (e) {}
-        return disconnect.apply(this, arguments);
-      }, 'disconnect');
+    function isSpeakers (node) {
+      return typeof win.AudioDestinationNode !== 'undefined' && node instanceof win.AudioDestinationNode;
     }
 
-    // media the page plays through Web Audio is captured at the speakers instead
-    // (createMediaElementSource lives on AudioContext, not BaseAudioContext)
-    [window.AudioContext, window.webkitAudioContext].forEach(function (AC) {
-      if (!AC || !AC.prototype || !AC.prototype.createMediaElementSource) return;
-      if (Object.prototype.hasOwnProperty.call(AC.prototype, '__snagHooked')) return;
-      Object.defineProperty(AC.prototype, '__snagHooked', { value: true });
-      var cmes = AC.prototype.createMediaElementSource;
-      AC.prototype.createMediaElementSource = looksNative(function (el) {
-        var s = snag();
-        if (s && el && this !== s.ctx) {
-          try { el.__snagViaWebAudio = true; s.detach(el); } catch (e) {}
-        }
-        return cmes.apply(this, arguments);
-      }, 'createMediaElementSource');
-    });
+    try {
+      var AN = win.AudioNode;
+      if (AN && AN.prototype && !AN.prototype.__snagHooked) {
+        Object.defineProperty(AN.prototype, '__snagHooked', { value: true });
+        var connect = AN.prototype.connect, disconnect = AN.prototype.disconnect;
 
-    // media elements that are never added to the document (new Audio(), players' hidden elements)
-    var HME = window.HTMLMediaElement;
-    if (HME && HME.prototype && !HME.prototype.__snagHooked) {
-      Object.defineProperty(HME.prototype, '__snagHooked', { value: true });
-      var play = HME.prototype.play;
-      HME.prototype.play = looksNative(function () {
-        try {
+        AN.prototype.connect = looksNative(function (dest) {
+          var result = connect.apply(this, arguments);
+          try {
+            var s = snag();
+            if (s && isSpeakers(dest) && this.context !== s.ctx) {
+              var t = s.pageTapFor(this.context, true);
+              if (t && t.node) connect.call(this, t.node);
+            }
+          } catch (e) {}
+          return result;
+        }, 'connect');
+
+        AN.prototype.disconnect = looksNative(function (dest) {
+          try {
+            var s = snag();
+            if (s && arguments.length && isSpeakers(dest) && this.context !== s.ctx) {
+              var t = s.pageTapFor(this.context, false);
+              if (t && t.node) disconnect.call(this, t.node);
+            }
+          } catch (e) {}
+          return disconnect.apply(this, arguments);
+        }, 'disconnect');
+      }
+
+      // media the page plays through Web Audio is captured at the speakers instead
+      // (createMediaElementSource lives on AudioContext, not BaseAudioContext)
+      [win.AudioContext, win.webkitAudioContext].forEach(function (AC) {
+        if (!AC || !AC.prototype || !AC.prototype.createMediaElementSource) return;
+        if (Object.prototype.hasOwnProperty.call(AC.prototype, '__snagHooked')) return;
+        Object.defineProperty(AC.prototype, '__snagHooked', { value: true });
+        var cmes = AC.prototype.createMediaElementSource;
+        AC.prototype.createMediaElementSource = looksNative(function (el) {
           var s = snag();
-          if (s) { s.remember(this); if (s.armed) { s.resume(); s.attach(this); } }
-        } catch (e) {}
-        return play.apply(this, arguments);
-      }, 'play');
-    }
-  } catch (e) { S.err = 'hooks: ' + e; }
+          if (s && el && this !== s.ctx) {
+            try { el.__snagViaWebAudio = true; s.detach(el); } catch (e) {}
+          }
+          return cmes.apply(this, arguments);
+        }, 'createMediaElementSource');
+      });
 
-  // Any real user gesture on the page lets us start the AudioContext.
-  ['pointerdown', 'mousedown', 'keydown', 'touchstart'].forEach(function (ev) {
-    document.addEventListener(ev, function () { var s = snag(); if (s && s.armed) { s.ensureCtx(); s.resume(); } }, true);
-  });
-  // Pick up media as soon as it starts playing.
-  document.addEventListener('play', function (e) { var s = snag(); if (s && s.armed) { s.resume(); s.attach(e.target); } }, true);
-  document.addEventListener('playing', function (e) { var s = snag(); if (s && s.armed) s.attach(e.target); }, true);
+      // media elements that are never added to the document (new Audio(), players' hidden elements)
+      var HME = win.HTMLMediaElement;
+      if (HME && HME.prototype && !HME.prototype.__snagHooked) {
+        Object.defineProperty(HME.prototype, '__snagHooked', { value: true });
+        var play = HME.prototype.play;
+        HME.prototype.play = looksNative(function () {
+          try {
+            var s = snag();
+            if (s) { s.remember(this); if (s.armed) { s.resume(); s.attach(this); } }
+          } catch (e) {}
+          return play.apply(this, arguments);
+        }, 'play');
+      }
+    } catch (e) { S.err = 'hooks: ' + e; }
+
+    try {
+      var doc = win.document;
+      // Any real user gesture on the page lets us start the AudioContext.
+      ['pointerdown', 'mousedown', 'keydown', 'touchstart'].forEach(function (ev) {
+        doc.addEventListener(ev, function () { var s = snag(); if (s && s.armed) { s.ensureCtx(); s.resume(); } }, true);
+      });
+      // Pick up media as soon as it starts playing.
+      doc.addEventListener('play', function (e) { var s = snag(); if (s && s.armed) { s.resume(); s.attach(e.target); } }, true);
+      doc.addEventListener('playing', function (e) { var s = snag(); if (s && s.armed) s.attach(e.target); }, true);
+    } catch (e) {}
+  };
+
+  S.install(window);
 
   return 'ok';
 })();

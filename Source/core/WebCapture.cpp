@@ -30,9 +30,21 @@ void WebCapture::pollProcessAudio()
         return;
     }
 
-    if (processCapture == nullptr || ! processCapture->isRunning())
+    // Opening the browser's audio can take the system a few seconds. It is asked for here and
+    // looked at again on the next polls, so the window never waits for it.
+    const auto state = processCapture != nullptr ? processCapture->getState() : ProcessAudioCapture::State::stopped;
+    if (state == ProcessAudioCapture::State::starting)
+        return;
+    if (state != ProcessAudioCapture::State::running)
     {
         const auto now = juce::Time::getMillisecondCounter();
+        if (state == ProcessAudioCapture::State::failed)
+        {
+            DBG ("Browser process audio unavailable: " << processCapture->getLastError());
+            processCapture.reset();
+            processRetryAt = now + 30000;   // e.g. Windows 10: use the page script instead, check again later
+            return;
+        }
         if (now < processRetryAt)
             return;
         processRetryAt = now + 4000;
@@ -41,21 +53,14 @@ void WebCapture::pollProcessAudio()
         if (pid == 0)
             return;
 
-        auto cap = std::make_unique<ProcessAudioCapture>();
-        const bool ok = cap->start (pid, [this] (const float* frames, int n)
+        processCapture = std::make_unique<ProcessAudioCapture>();
+        processCapture->begin (pid, [this] (const float* frames, int n)
         {
             const std::lock_guard<std::mutex> lock (pendingLock);
             if (pending.size() < (size_t) (48000 * 2 * 20))   // never hold more than 20 s
                 pending.insert (pending.end(), frames, frames + (size_t) n * 2);
         });
-        if (ok)
-            processCapture = std::move (cap);
-        else
-        {
-            DBG ("Browser process audio unavailable: " << cap->getLastError());
-            processRetryAt = now + 30000;   // e.g. Windows 10: use the page script instead, check again later
-            return;
-        }
+        return;
     }
 
     std::vector<float> take;

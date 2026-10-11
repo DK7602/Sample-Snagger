@@ -28,6 +28,7 @@
 #include <thread>
 #include <set>
 #include <atomic>
+#include <stdexcept>
 
 using namespace snag;
 
@@ -90,6 +91,67 @@ static AudioData::Ptr makeAccentClicks (double sr, double seconds, const std::ve
         }
     }
     return AudioData::make (std::move (b), sr);
+}
+
+/** Drum-like hits that start at known samples, for checking where chop markers land.
+    kind 0: a click (instant), 1: a kick (a falling sine with a 2 ms attack), 2: a snare (a noise
+    burst with a 1 ms attack). `bed` > 0 puts a held bass note under all of it. */
+static AudioData::Ptr makeHits (double sr, double seconds, const std::vector<int>& starts, int kind, float bed)
+{
+    const int n = (int) (sr * seconds);
+    juce::AudioBuffer<float> b (2, n);
+    b.clear();
+    juce::Random rnd (3);
+    const float twoPi = juce::MathConstants<float>::twoPi;
+    for (int i = 0; i < n; ++i)
+    {
+        const float v = bed * std::sin ((float) i * twoPi * 55.0f / (float) sr);
+        b.setSample (0, i, v);
+        b.setSample (1, i, v);
+    }
+    for (auto s0 : starts)
+    {
+        double phase = 0.0;
+        for (int i = 0; i < (int) (0.12 * sr) && s0 + i < n; ++i)
+        {
+            const float t = (float) i / (float) sr;
+            float v = 0.0f;
+            if (kind == 0)
+                v = std::exp (-t / 0.005f) * (std::sin (t * twoPi * 180.0f) + 0.5f * (rnd.nextFloat() * 2.0f - 1.0f));
+            else if (kind == 1)
+            {
+                phase += twoPi * (50.0 + 100.0 * std::exp (-t / 0.03)) / sr;
+                v = juce::jmin (1.0f, t / 0.002f) * std::exp (-t / 0.06f) * (float) std::sin (phase);
+            }
+            else
+                v = juce::jmin (1.0f, t / 0.001f) * std::exp (-t / 0.03f) * (rnd.nextFloat() * 2.0f - 1.0f);
+            b.addSample (0, s0 + i, 0.7f * v);
+            b.addSample (1, s0 + i, 0.7f * v);
+        }
+    }
+    return AudioData::make (std::move (b), sr);
+}
+
+/** How far the markers that AUTO CHOP finds are from where the hits start, in milliseconds
+    (negative = early). `missed` counts hits with no marker within 30 ms. */
+struct MarkerAim { double earliest = 0.0, latest = 0.0; int missed = 0; };
+static MarkerAim aimOf (const std::vector<int>& markers, const std::vector<int>& starts, double sr)
+{
+    MarkerAim aim;
+    bool any = false;
+    for (auto s0 : starts)
+    {
+        double best = 1.0e9;
+        for (auto m : markers)
+            if (std::abs ((double) (m - s0)) < std::abs (best))
+                best = (double) (m - s0);
+        const double ms = best * 1000.0 / sr;
+        if (std::abs (ms) > 30.0) { ++aim.missed; continue; }
+        aim.earliest = any ? juce::jmin (aim.earliest, ms) : ms;
+        aim.latest   = any ? juce::jmax (aim.latest, ms) : ms;
+        any = true;
+    }
+    return aim;
 }
 
 struct DemoMix
@@ -564,6 +626,10 @@ static void testProcessAudio()
     if (! ProcessAudioCapture::isSupported())
     {
         std::cout << "  (not on this system - the page script capture is used)\n";
+        ProcessAudioCapture none;
+        CHECK (! none.begin (ProcessAudioCapture::currentProcessId(), [] (const float*, int) {})
+                   && none.getState() == ProcessAudioCapture::State::failed && none.getLastError().isNotEmpty(),
+               "where the system can't do it, asking says so at once");
         return;
     }
     // Build machines have no sound card, so this only proves it opens / closes cleanly.
@@ -581,6 +647,23 @@ static void testProcessAudio()
         CHECK (frames.load() > 48000 / 4, "browser process audio keeps real time (silence is filled in)");
     }
     CHECK (openMs < 9000.0 && ! cap.isRunning(), "browser process audio opens and closes cleanly");
+
+    // the way the window asks for it: without waiting
+    {
+        ProcessAudioCapture later;
+        const auto t1 = juce::Time::getMillisecondCounterHiRes();
+        const bool begun = later.begin (ProcessAudioCapture::currentProcessId(), [] (const float*, int) {});
+        const double askMs = juce::Time::getMillisecondCounterHiRes() - t1;
+        for (int i = 0; i < 900 && later.getState() == ProcessAudioCapture::State::starting; ++i)
+            juce::Thread::sleep (10);
+        const auto state = later.getState();
+        std::cout << "  begin: " << (int) askMs << " ms, then " << (state == ProcessAudioCapture::State::running ? "running" : "not available") << "\n";
+        CHECK (begun && askMs < 500.0 && (state == ProcessAudioCapture::State::running) == ok
+                   && (state == ProcessAudioCapture::State::running || state == ProcessAudioCapture::State::failed),
+               "asking for the browser's audio doesn't hold up the window (" + juce::String (askMs, 0) + " ms)");
+        later.stop();
+        CHECK (later.getState() == ProcessAudioCapture::State::stopped, "  ...and it stops cleanly");
+    }
 }
 
 /** Dominant frequency of channel 0 by zero crossings (fine for a sine). */
@@ -957,6 +1040,14 @@ static void testStemParts()
     CHECK (actions::aiModeFor (actions::Engine::ai, { "drums" }) == ai::Mode::fourStems, "drums alone uses the 4-part model");
     CHECK (actions::aiModeFor (actions::Engine::aiMax, { "drums", "bass" }) == ai::Mode::fourStemsMax, "Max uses the fine-tuned models");
     CHECK (actions::aiModeFor (actions::Engine::aiMax, { "vocals", "music" }) == ai::Mode::fourStemsMax, "Max builds the music from all four specialists too");
+    CHECK (ai::modelsFor (ai::Mode::fourStemsMax, { "vocals", "music" }).size() == 4 && ai::modelsFor (ai::Mode::fourStemsMax).size() == 4,
+           "  ...which takes all four models");
+    {
+        const auto drumsOnly = ai::modelsFor (ai::Mode::fourStemsMax, { "drums" });
+        const auto two = ai::modelsFor (ai::Mode::fourStemsMax, { "vocals", "bass" });
+        CHECK (drumsOnly.size() == 1 && drumsOnly[0] == ai::ModelId::ftDrums && two.size() == 2,
+               "Max with single parts picked only runs their specialists (it ran all four for one drum stem)");
+    }
     CHECK (actions::aiModeFor (actions::Engine::ai, { "vocals", "piano" }) == ai::Mode::sixStems, "guitar / piano use the 6-part model");
 
     SnaggerProcessor p;
@@ -2070,6 +2161,58 @@ struct StudioPageTester
             page.wave.setSelection (0, 0);
         }
 
+        // ---- a long sample: AUTO CHOP and the tempo are worked out by a background job
+        {
+            auto c = addClip ("Long take", makeClicks (44100.0, 70.0, 0.5));   // 70 s at 120 BPM
+            c->bpm = 0.0;
+            page.chopCount.setSelectedId (StudioPage::everyHit, juce::sendNotificationSync);
+            const auto t0 = juce::Time::getMillisecondCounterHiRes();
+            page.autoChop();
+            const double clickMs = juce::Time::getMillisecondCounterHiRes() - t0;
+            const bool waiting = c->slices.empty() && page.analysing.count (c->id) == 1;
+            page.autoChop();   // (a second click while it works doesn't start it again)
+            settle();
+            CHECK (waiting && (int) c->sliceBoundaries().size() - 1 == StudioPage::maxPads && page.analysing.empty(),
+                   "AUTO CHOP on a 70-second sample runs in the background (the click took " + juce::String (clickMs, 0) + " ms) and its chops arrive when it is done");
+            CHECK (c->undoStack.size() == 1, "  ...as one undo step, however often the button was clicked meanwhile");
+
+            page.detectBpm();
+            const bool notYet = c->bpm <= 0.0;
+            settle();
+            CHECK (notYet && std::abs (c->bpm - 120.0) < 1.5, "  ...and so does DETECT (" + juce::String (c->bpm, 1) + " BPM)");
+
+            c->bpm = 0.0;
+            page.pitchDefaultBtn.onClick();
+            page.bpmKnob.slider.setValue (100.0, juce::sendNotificationSync);
+            page.matchBpm();   // finds the tempo first, then sets LENGTH
+            for (int i = 0; i < 600 && (page.analysing.count (c->id) != 0 || c->bpm <= 0.0); ++i)
+                pump (50);
+            pump (100);
+            const double aimedAt = c->bpmWith (c->adjust);
+            CHECK (std::abs (aimedAt - 100.0) < 1.5,
+                   "  ...MATCH BPM on a long sample whose tempo isn't known yet finds it, then matches (" + juce::String (aimedAt, 1) + " BPM)");
+            p->jobs.cancelAll();   // (no need to sit through the 70-second stretch here)
+            settle();
+        }
+
+        // ---- the tempo: double, half, typed in
+        {
+            auto c = addClip ("Tempo", makeSine (220.0, 2.0));
+            c->bpm = 70.0;
+            page.refreshInfo();
+            page.setHeardTempo (140.0);
+            CHECK (std::abs (c->bpm - 140.0) < 1.0e-9 && page.bpmLabel.getButtonText() == "140.0 BPM", "the tempo can be doubled when the detector heard half time (" + page.bpmLabel.getButtonText() + ")");
+            page.stretchKnob.onTyped (50.0);   // LENGTH 50%: it now plays at 280
+            settle();
+            page.setHeardTempo (300.0);        // "what I hear is 300"
+            CHECK (std::abs (c->bpm - 150.0) < 1.0e-6 && std::abs (c->heardBpm() - 300.0) < 0.01,
+                   "  ...a tempo typed in is the one you hear: with LENGTH at 50% the original is stored as half of it (" + juce::String (c->bpm, 1) + ")");
+            page.setHeardTempo (5.0);
+            CHECK (std::abs (c->bpm - 150.0) < 1.0e-6, "  ...and something that is no tempo is ignored");
+            page.pitchDefaultBtn.onClick();
+            settle();
+        }
+
         // ---- a name being typed when another sample takes over
         {
             auto first = addClip ("First", makeSine (440.0, 0.5));
@@ -2208,6 +2351,646 @@ static void testNetwork()
 }
 
 //==============================================================================
+/** Where chop markers land, and the tools around chops: placing by hand, all chops at once. */
+static void testChopWorkflow (const juce::File& tmp)
+{
+    std::cout << "\n[chops: where markers land, and all chops at once]\n";
+
+    // AUTO CHOP's markers against hits that start at known samples
+    double earliest = 0.0, latest = 0.0;
+    int missed = 0;
+    for (double sr : { 44100.0, 48000.0 })
+        for (int kind = 0; kind < 3; ++kind)
+            for (float bed : { 0.0f, 0.2f })
+            {
+                std::vector<int> starts;
+                for (int i = 0; i < 12; ++i)
+                    starts.push_back ((int) (sr * (0.4 + 0.37 * i)) + i * 37);
+                auto audio = makeHits (sr, 5.2, starts, kind, bed);
+                for (const auto& aim : { aimOf (edit::detectTransients (*audio, 0.55f), starts, sr), aimOf (edit::chopAtStrongestHits (*audio, 13), starts, sr) })
+                {
+                    earliest = juce::jmin (earliest, aim.earliest);
+                    latest = juce::jmax (latest, aim.latest);
+                    missed += aim.missed;
+                }
+            }
+    CHECK (missed == 0 && earliest >= -2.5 && latest <= 0.6,
+           "AUTO CHOP puts its markers where the hits start: " + juce::String (earliest, 1) + " to " + juce::String (latest, 1)
+               + " ms off, over clicks, kicks and snares, with and without a bass note under them (they were 3 to 13 ms early)");
+
+    // a marker placed by hand is drawn to a hit that is close, and only then
+    {
+        const double sr = 44100.0;
+        const std::vector<int> starts { 30000, 60000 };
+        auto audio = makeHits (sr, 2.0, starts, 2, 0.2f);
+        const int near = edit::snapToHit (*audio, 30000 + 400, 600), far = edit::snapToHit (*audio, 45000, 600);
+        CHECK (near > 30000 - 110 && near <= 30000 + 30 && far < 0,
+               "a marker dropped 9 ms from a hit goes to the hit's start (" + juce::String ((near - 30000) * 1000.0 / sr, 1) + " ms off); one between hits stays where it is put");
+        auto tone = makeSine (220.0, 1.0);
+        CHECK (edit::snapToHit (*tone, 20000, 800) < 0, "  ...and a steady sound has nothing to be drawn to");
+    }
+
+    // every chop as a file of its own
+    {
+        SnaggerProcessor p;
+        const auto libraryBefore = p.getSettings().getLibraryDir();
+        auto lib = tmp.getChildFile ("chop library");
+        lib.createDirectory();
+        p.getSettings().setLibraryDir (lib);
+
+        Clip::Ptr c (new Clip());
+        c->name = "Chop test " + paths::uniqueTag();
+        c->audio = makeClicks (44100.0, 6.0, 0.5);
+        p.session.add (c, true);
+        c->slices = edit::equalSlices (c->audio->getNumSamples(), 12);
+        PadParams reversed;
+        reversed.reverse = true;
+        c->setPad (2, reversed);
+
+        const auto job = actions::dragJobForAllChops (p, *c);
+        const auto files = actions::makeDragFiles (job);
+        bool named = files.size() == 12;
+        juce::int64 samples = 0;
+        for (int i = 0; i < files.size(); ++i)
+        {
+            const juce::File f (files[i]);
+            named = named && f.getFileNameWithoutExtension() == c->name + " - chop " + juce::String (i + 1).paddedLeft ('0', 2);
+            if (auto loaded = audioio::loadFile (f, {}).audio)
+                samples += loaded->getNumSamples();
+        }
+        CHECK (job.parts.size() == 12 && named && std::abs (samples - (juce::int64) c->audio->getNumSamples()) < 12 * 64,
+               "DRAG ALL CHOPS makes one file per chop, numbered so they sort like the pads (" + juce::String (files.size()) + " files)");
+        CHECK (actions::dragJobForAllChops (p, *c).key == job.key, "  ...and the same chops dragged again are the same files");
+        for (auto& f : files)
+            juce::File (f).deleteFile();
+
+        actions::saveChopsToLibrary (p, *c);
+        pump (200);
+        for (int i = 0; i < 400 && p.jobs.isBusy(); ++i) pump (50);
+        pump (200);
+        CHECK (lib.getNumberOfChildFiles (juce::File::findFiles, "*.wav") == 12, "SAVE > all chops writes them to the library ("
+                   + juce::String (lib.getNumberOfChildFiles (juce::File::findFiles, "*.wav")) + " files)");
+
+        Clip::Ptr whole (new Clip());
+        whole->audio = makeSine (220.0, 1.0);
+        CHECK (! actions::dragJobForAllChops (p, *whole).isValid(), "a sample with no chops has nothing to drag as chops");
+        p.getSettings().setLibraryDir (libraryBefore);
+    }
+}
+
+/** No clicks when a voice is taken over, and no folded-back tones from TAPE pitch. */
+static void testSoundQuality()
+{
+    std::cout << "\n[sound quality]\n";
+
+    // ---- hitting a pad again while it sounds, and running out of voices
+    {
+        SnaggerProcessor p;
+        p.prepareToPlay (48000.0, 256);
+        Clip::Ptr c (new Clip());
+        c->name = "held note";
+        c->audio = makeSine (220.0, 4.0, 48000.0);   // one long chop
+        p.session.add (c, true);
+        p.setSamplerClip (c);
+
+        juce::AudioBuffer<float> buf (2, 256);
+        juce::MidiBuffer midi;
+        float last = 0.0f;
+        auto biggestStep = [&] (int blocks)   // the largest move from one sample to the next
+        {
+            float worst = 0.0f;
+            for (int b = 0; b < blocks; ++b)
+            {
+                buf.clear();
+                p.processBlock (buf, midi);
+                midi.clear();
+                for (int i = 0; i < 256; ++i)
+                {
+                    const float v = buf.getSample (0, i);
+                    worst = juce::jmax (worst, std::abs (v - last));
+                    last = v;
+                }
+            }
+            return worst;
+        };
+
+        midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 127), 0);
+        const float playing = biggestStep (40);   // what the note itself does, sample to sample
+        midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 127), 77);   // the same pad again, mid-note
+        const float retrigger = biggestStep (8);
+        CHECK (playing > 0.001f && retrigger < playing * 4.0f + 0.01f,
+               "hitting a pad again while it sounds doesn't click (largest step " + juce::String (retrigger, 4) + ", the note itself moves " + juce::String (playing, 4)
+                   + " - the cut was a jump of up to the note's full level)");
+
+        // sixteen notes held in KEYS mode, then one more: the oldest voice is handed over
+        midi.addEvent (juce::MidiMessage::allNotesOff (1), 0);
+        biggestStep (100);
+        p.midiMode = SnaggerProcessor::keys;
+        p.oneShot = false;
+        for (int n = 0; n < 16; ++n)
+            midi.addEvent (juce::MidiMessage::noteOn (1, 48 + n, (juce::uint8) 60), n * 8);
+        biggestStep (60);
+        float held = 0.0f;
+        for (int k = 0; k < 20; ++k) held = juce::jmax (held, biggestStep (1));
+        midi.addEvent (juce::MidiMessage::noteOn (1, 70, (juce::uint8) 60), 100);
+        const float stolen = biggestStep (8);
+        CHECK (held > 0.001f && stolen < held * 2.5f + 0.01f,
+               "a 17th note takes over the oldest voice without a click (largest step " + juce::String (stolen, 4) + ", " + juce::String (held, 4) + " before it)");
+    }
+
+    // ---- TAPE pitch: what can't fit under the sample rate is taken out, not folded back
+    {
+        auto rms = [] (const AudioData& a)
+        {
+            const int n = a.getNumSamples(), edge = n / 10;   // (away from the ends)
+            return a.buffer.getRMSLevel (0, edge, n - 2 * edge);
+        };
+        auto high = makeSine (15000.0, 1.0);      // an octave up it would be 30 kHz: over the top at 44.1 kHz
+        auto mid = makeSine (5000.0, 1.0);
+        const float in = rms (*mid);
+        auto highUp = edit::pitchTime (*high, 12.0f, 1.0, false, true);
+        auto midUp = edit::pitchTime (*mid, 12.0f, 1.0, false, true);
+        auto midDown = edit::pitchTime (*mid, -12.0f, 1.0, false, true);
+        CHECK (rms (*highUp) < in * 0.01f, "TAPE an octave up: a 15 kHz tone is gone, not folded back down to 14 kHz (level "
+                   + juce::String (juce::Decibels::gainToDecibels (rms (*highUp) / in), 0) + " dB - it came back at full level)");
+        CHECK (std::abs (rms (*midUp) / in - 1.0f) < 0.03f && std::abs (zeroCrossHz (*midUp) - 10000.0) < 60.0
+                   && std::abs (midUp->getNumSamples() - mid->getNumSamples() / 2) <= 1,
+               "  ...a 5 kHz tone comes out at 10 kHz, as loud as it went in, in half the time");
+        CHECK (std::abs (rms (*midDown) / in - 1.0f) < 0.03f && std::abs (zeroCrossHz (*midDown) - 2500.0) < 20.0
+                   && std::abs (midDown->getNumSamples() - mid->getNumSamples() * 2) <= 1,
+               "  ...and an octave down at 2.5 kHz, in twice the time");
+    }
+}
+
+/** The undo history is kept within a memory budget. */
+static void testUndoMemory()
+{
+    std::cout << "\n[undo history and memory]\n";
+    const juce::int64 second = 44100 * 2 * (juce::int64) sizeof (float);   // one second of stereo audio, in bytes
+
+    Session s;
+    s.setUndoBudget (3 * second + 1000, 6 * second);
+    auto newClip = [&s] (double hz)
+    {
+        Clip::Ptr c (new Clip());
+        juce::AudioBuffer<float> b (2, 44100);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < 44100; ++i)
+                b.setSample (ch, i, 0.3f * std::sin ((float) i * (float) hz * 0.0001f));
+        c->audio = AudioData::make (std::move (b), 44100.0);
+        s.add (c, true);
+        return c;
+    };
+    auto editAudio = [&s] (Clip::Ptr c)   // an edit that makes new audio of the same size
+    {
+        c->pushUndo ("Reverse");
+        c->audio = edit::reverse (*c->audio, 0, c->audio->getNumSamples());
+        s.clipChanged (c.get());
+    };
+
+    auto a = newClip (440.0);
+    CHECK (a->undoBytes() == 0, "a fresh sample's history holds no audio");
+
+    // steps that leave the audio alone cost nothing, and all of them are kept
+    for (int i = 0; i < 20; ++i)
+    {
+        a->pushUndo ("Add marker");
+        a->slices.push_back (1000 + i * 100);
+        s.clipChanged (a.get(), false);
+    }
+    CHECK (a->undoStack.size() == 20 && a->undoBytes() == 0, "20 marker steps share the audio: no extra memory, none let go");
+
+    for (int i = 0; i < 8; ++i)
+        editAudio (a);
+    CHECK (a->undoBytes() <= 3 * second + 1000 && a->undoBytes() >= 2 * second,
+           "8 edits of the audio: the history keeps to its budget (" + juce::String ((double) a->undoBytes() / (double) second, 1) + " s of audio, where it held 8)");
+    CHECK (a->canUndo() && a->undoStack.size() >= 3 && s.takeUndoStepsDropped() > 0 && s.takeUndoStepsDropped() == 0,
+           "  ...the newest steps stay, the oldest went, and that is reported");
+    const auto before = a->audio;
+    a->undo();
+    CHECK (a->audio != before && a->audio != nullptr && a->audio->getNumSamples() == 44100, "  ...and UNDO still brings back the last version");
+    a->redo();
+
+    // the whole tray: the sample edited longest ago gives up its history first
+    juce::Thread::sleep (5);
+    auto b = newClip (330.0);
+    for (int i = 0; i < 3; ++i) editAudio (b);
+    juce::Thread::sleep (5);
+    auto c = newClip (220.0);
+    for (int i = 0; i < 3; ++i) editAudio (c);
+    const auto total = a->undoBytes() + b->undoBytes() + c->undoBytes();
+    CHECK (total <= 6 * second && a->undoBytes() < b->undoBytes() + 1 && c->undoBytes() >= 2 * second,
+           "across the tray the history keeps to its budget too, taking from the sample that was edited longest ago ("
+               + juce::String ((double) a->undoBytes() / (double) second, 1) + " / " + juce::String ((double) b->undoBytes() / (double) second, 1)
+               + " / " + juce::String ((double) c->undoBytes() / (double) second, 1) + " s)");
+
+    // one huge step is still kept: the last two steps always stay
+    Session tight;
+    tight.setUndoBudget (1000, 1000);
+    Clip::Ptr d (new Clip());
+    d->audio = makeSine (440.0, 1.0);
+    tight.add (d, true);
+    for (int i = 0; i < 4; ++i)
+    {
+        d->pushUndo ("Reverse");
+        d->audio = edit::reverse (*d->audio, 0, d->audio->getNumSamples());
+        tight.clipChanged (d.get());
+    }
+    CHECK (d->undoStack.size() == 2, "however tight the memory, the last two steps of the sample being worked on can be undone");
+
+    for (auto* session : { &s, &tight })
+    {
+        session->flushWrites();
+        session->getSessionDir().deleteRecursively();
+    }
+}
+
+/** Cancel ends the program that was started and everything that program started in turn. */
+static void testCancelStopsEverything (const juce::File& tmp)
+{
+    std::cout << "\n[cancel stops the whole program tree]\n";
+    auto dir = tmp.getChildFile ("tree");
+    dir.createDirectory();
+    const auto marker = dir.getChildFile ("still-running.txt");
+
+    // A program that starts another one, which carries on for three seconds and then leaves a
+    // mark - the way yt-dlp runs ffmpeg (and, on Windows, the way yt-dlp.exe runs the real yt-dlp).
+   #if JUCE_WINDOWS
+    const auto inner = dir.getChildFile ("inner.cmd"), outer = dir.getChildFile ("outer.cmd");
+    inner.replaceWithText ("@echo off\r\nping -n 4 127.0.0.1 >nul\r\necho done > \"" + marker.getFullPathName() + "\"\r\n");
+    outer.replaceWithText ("@echo off\r\necho started\r\ncmd /c \"" + inner.getFullPathName() + "\"\r\n");
+    const juce::StringArray command { "cmd", "/c", outer.getFullPathName() };
+   #else
+    const auto inner = dir.getChildFile ("inner.sh"), outer = dir.getChildFile ("outer.sh");
+    inner.replaceWithText ("#!/bin/sh\nsleep 3\necho done > '" + marker.getFullPathName() + "'\n", false, false, "\n");
+    outer.replaceWithText ("#!/bin/sh\necho started\n/bin/sh '" + inner.getFullPathName() + "' &\nwait\n", false, false, "\n");
+    const juce::StringArray command { "/bin/sh", outer.getFullPathName() };
+   #endif
+
+    // first, what the mark looks like when nothing is cancelled (so the test below means something)
+    {
+        juce::String out;
+        const int code = ProcessRunner::runAndCapture (command, out, 20000);
+        CHECK (code == 0 && marker.existsAsFile(), "the test program runs its second program to the end when left alone");
+        marker.deleteFile();
+    }
+
+    ProcessRunner runner;
+    std::thread canceller ([&runner]
+    {
+        juce::Thread::sleep (900);   // (both programs are running by now)
+        runner.cancel();
+    });
+    const auto t0 = juce::Time::getMillisecondCounterHiRes();
+    const int code = runner.run (command);
+    const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+    canceller.join();
+    juce::Thread::sleep (4500);   // long enough for the second program to have left its mark
+    CHECK (code == -2 && ms < 2500.0, "a cancelled program stops at once (" + juce::String (ms, 0) + " ms)");
+    CHECK (! marker.existsAsFile(), "  ...and so does the program it had started (it used to run on in the background)");
+
+    dir.deleteRecursively();
+}
+
+/** Dragging a sound out: what the file is made from, and a long one made in the background. */
+static void testDragOut()
+{
+    std::cout << "\n[dragging a sound out]\n";
+    juce::StringArray said;
+    SnaggerProcessor p;
+    p.onNotify = [&said] (const juce::String& m, bool) { said.add (m); };
+    auto settle = [&p] { pump (200); for (int i = 0; i < 400 && p.jobs.isBusy(); ++i) pump (50); pump (200); };
+
+    Clip::Ptr shortClip (new Clip());
+    shortClip->name = "Drag test " + paths::uniqueTag();
+    shortClip->audio = makeSine (440.0, 2.0);
+    shortClip->fx.reverbOn = true;
+    p.session.add (shortClip, true);
+
+    // the same sound, described on the message thread and made on another one
+    const auto job = actions::dragJobFor (p, *shortClip, 1000, 40000, " (cut)");
+    auto direct = actions::renderForExport (p, *shortClip, 1000, 40000);
+    juce::File made;
+    std::thread worker ([&made, job] { made = actions::makeDragFile (job); });
+    worker.join();
+    auto loaded = made.existsAsFile() ? audioio::loadFile (made, {}).audio : nullptr;
+    CHECK (job.isValid() && DragOut::isQuick (job) && loaded != nullptr && direct != nullptr && loaded->getNumSamples() == direct->getNumSamples()
+               && made.getFileNameWithoutExtension() == shortClip->name + " (cut)",
+           "a drag file can be made away from the window's thread, FX and all");
+    auto other = actions::dragJobFor (p, *shortClip, 1000, 30000, " (cut)");
+    CHECK (actions::dragJobFor (p, *shortClip, 1000, 40000, " (cut)").key == job.key && other.key != job.key,
+           "  ...and the same pick of the same sound is recognised as the same file");
+
+    // a long sample: the drag doesn't wait for the file
+    Clip::Ptr longClip (new Clip());
+    longClip->name = "Long drag test " + paths::uniqueTag();
+    longClip->audio = makeSine (220.0, 150.0);
+    p.session.add (longClip, true);
+    juce::Component source;
+    DragOut drag;
+    juce::StringArray dragged;   // (what a real drag would have carried: here it is only noted)
+    int drags = 0;
+    drag.startDrag = [&dragged, &drags] (juce::Component&, const juce::StringArray& files) { dragged = files; ++drags; };
+    auto describe = [&p, longClip] { return actions::dragJobFor (p, *longClip); };
+
+    drag.pressed();
+    const auto t0 = juce::Time::getMillisecondCounterHiRes();
+    drag.drag (p, source, describe);
+    const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+    CHECK (drag.isPreparing() && ! DragOut::isQuick (describe()), "a 150-second sample is made ready by a background job (the mouse move took " + juce::String (ms, 0) + " ms)");
+    drag.drag (p, source, describe);   // the mouse keeps moving
+    CHECK (drag.isPreparing(), "  ...which is started once, however much the mouse moves");
+    settle();
+    const auto file = paths::dragExportDir().getChildFile (longClip->name + ".wav");
+    drag.drag (p, source, describe);   // the next movement finds the file there
+    CHECK (file.existsAsFile() && ! drag.isPreparing() && drags == 1 && dragged.size() == 1 && juce::File (dragged[0]) == file,
+           "  ...and the drag goes ahead, with that file, when it is there");
+    drag.drag (p, source, describe);
+    CHECK (drags == 1, "  ...once per press of the mouse button");
+    drag.released();
+
+    // let go before it was ready, then dragged again
+    const auto stamp = file.getLastModificationTime();
+    drag.pressed();
+    drag.drag (p, source, describe);
+    CHECK (! drag.isPreparing() && ! p.jobs.isBusy() && file.getLastModificationTime() == stamp && drags == 2,
+           "  ...the same sample dragged again starts at once, from the file that was made");
+    drag.released();
+
+    longClip->fx.driveOn = true;   // (another sound now: it has to be made again)
+    drag.pressed();
+    drag.drag (p, source, describe);
+    const bool again = drag.isPreparing();
+    drag.released();               // let go while it is still being made
+    settle();
+    CHECK (again && said.joinIntoString ("|").contains ("drag again"), "  ...a changed sample is made again; letting go early says the file will be ready for the next drag");
+
+    for (auto& f : paths::dragExportDir().findChildFiles (juce::File::findFiles, false, "*drag test*"))
+        f.deleteFile();
+}
+
+/** Helper tools and AI models are checked against a checksum before they are used. */
+static void testDownloadChecks (const juce::File& tmp)
+{
+    std::cout << "\n[downloads are checked]\n";
+    auto src = tmp.getChildFile ("download-source.bin");
+    src.replaceWithText ("abc");
+    const juce::String abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    CHECK (ToolManager::sha256Of (src) == abc && ToolManager::sha256Of (tmp.getChildFile ("not-there")).isEmpty(), "the SHA-256 of a file is worked out");
+
+    // the three ways the projects publish theirs
+    const juce::String list = "1fa6733c37ea6fb51c99ad8fe785e7b7e5f3246c9b980230329d4fb72ed8d4d6  yt-dlp\n"
+                              "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a  yt-dlp.exe\n"
+                              "58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a  yt-dlp_linux\n"
+                              "32e72032766bef9199d99d15beb69fd52e46df8f8b06f0d8745db59e04d339e9  yt-dlp_linux.zip\n";
+    CHECK (ToolManager::checksumFrom (list, "yt-dlp_linux") == "58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a"
+               && ToolManager::checksumFrom (list, "yt-dlp") == "1fa6733c37ea6fb51c99ad8fe785e7b7e5f3246c9b980230329d4fb72ed8d4d6"
+               && ToolManager::checksumFrom (list, "yt-dlp_macos").isEmpty(),
+           "a checksum is found by file name in a release's list (and not for a file that isn't in it)");
+    CHECK (ToolManager::checksumFrom ("5cd46d6268f6f78f5d88bdc7159d20bd44cdaa4b3303474839f87ec6fe7ae25c  deno-aarch64-apple-darwin.zip\n", "deno-aarch64-apple-darwin.zip")
+               == "5cd46d6268f6f78f5d88bdc7159d20bd44cdaa4b3303474839f87ec6fe7ae25c"
+               && ToolManager::checksumFrom ("5cd46d6268f6f78f5d88bdc7159d20bd44cdaa4b3303474839f87ec6fe7ae25c  some-other-file.zip\n", "deno-aarch64-apple-darwin.zip").isEmpty(),
+           "  ...in a file of its own, for that file only");
+    CHECK (ToolManager::checksumFrom ("\r\nAlgorithm : SHA256\r\nHash      : A0C3101B4158D1DFB7D6A78A7BF0F3DE80C96BB423C152BEEC8BEB22786F2238\r\n"
+                                      "Path      : C:\\a\\deno\\deno\\target\\release\\deno-x86_64-pc-windows-msvc.zip\r\n\r\n", "deno-x86_64-pc-windows-msvc.zip")
+               == "a0c3101b4158d1dfb7d6a78a7bf0f3de80c96bb423c152beec8beb22786f2238",
+           "  ...and the way Windows writes it");
+    CHECK (ToolManager::pinnedChecksum ("ffmpeg-linux-x64.gz").length() == 64 && ToolManager::pinnedChecksum ("ffmpeg-win32-x64.gz").length() == 64
+               && ToolManager::pinnedChecksum ("ffmpeg-darwin-arm64.gz").length() == 64 && ToolManager::pinnedChecksum ("something-else.gz").isEmpty(),
+           "FFmpeg's checksums are built in");
+    bool modelSums = true;
+    for (auto id : { ai::ModelId::htdemucs4, ai::ModelId::htdemucs6, ai::ModelId::ftVocals, ai::ModelId::ftDrums, ai::ModelId::ftBass, ai::ModelId::ftOther })
+        modelSums = modelSums && juce::String (ai::info (id).sha256).length() == 64;
+    CHECK (modelSums && ai::defaultModelBaseUrl().contains ("/resolve/") && ! ai::defaultModelBaseUrl().contains ("/main/"),
+           "  ...and so are the AI models', for one fixed revision of the files");
+
+    // a download that matches is put in place; one that doesn't is thrown away
+    const auto url = juce::URL (src).toString (true);
+    {
+        Job job ("download", nullptr, nullptr);
+        auto dest = tmp.getChildFile ("downloaded-good.bin");
+        const bool ok = ToolManager::download (url, dest, job, 0.0f, 1.0f, abc.toUpperCase());
+        CHECK (ok && dest.loadFileAsString() == "abc" && ! job.hasFailed(), "a download that matches its checksum is installed " + job.getError());
+    }
+    {
+        Job job ("download", nullptr, nullptr);
+        auto dest = tmp.getChildFile ("downloaded-bad.bin");
+        dest.replaceWithText ("the copy that works");
+        const bool ok = ToolManager::download (url, dest, job, 0.0f, 1.0f, juce::String::repeatedString ("0", 64));
+        CHECK (! ok && job.hasFailed() && dest.loadFileAsString() == "the copy that works"
+                   && tmp.getNumberOfChildFiles (juce::File::findFiles, "*.part") == 0,
+               "one that doesn't match is thrown away, and what was installed before stays");
+    }
+}
+
+/** The Sessions folder: what is left behind, what is kept, and the clean-up in Settings. */
+static void testSessionCleanUp (const juce::File& tmp)
+{
+    std::cout << "\n[tray samples on disk: clean-up]\n";
+    auto restoreInto = [] (SnaggerProcessor& p, const juce::MemoryBlock& state) { p.setStateInformation (state.getData(), (int) state.getSize()); };
+    auto addClip = [] (SnaggerProcessor& p, double hz)
+    {
+        Clip::Ptr c (new Clip());
+        c->name = "Kept";
+        c->audio = makeSine (hz, 0.5);
+        p.session.add (c, true);
+        return c;
+    };
+
+    // a plug-in that is closed without its project ever being saved leaves nothing behind
+    juce::File unsavedFolder;
+    {
+        SnaggerProcessor p;
+        addClip (p, 440.0);
+        p.session.flushWrites();
+        unsavedFolder = p.session.getSessionDir();
+        CHECK (unsavedFolder.getNumberOfChildFiles (juce::File::findFiles, "*.wav") == 1, "a clip is on disk while the plug-in is open");
+    }
+    CHECK (! unsavedFolder.exists(), "closed without the project being saved: its samples go too (they stayed for good)");
+
+    // ...one whose project was saved keeps exactly what the project needs
+    juce::File savedFolder, savedFile, laterFile;
+    juce::MemoryBlock state;
+    {
+        SnaggerProcessor p;
+        auto c = addClip (p, 440.0);
+        p.getStateInformation (state);
+        p.session.flushWrites();
+        savedFolder = p.session.getSessionDir();
+        savedFile = c->cacheFile;
+        auto later = addClip (p, 330.0);   // added after the last save
+        p.session.flushWrites();
+        laterFile = later->cacheFile;
+    }
+    CHECK (savedFile.existsAsFile() && ! laterFile.existsAsFile(), "a saved project keeps its samples; what was added after the last save goes");
+
+    // the list the clean-up works from
+    auto find = [] (const std::vector<sessioncache::Folder>& folders, const juce::File& dir) -> const sessioncache::Folder*
+    {
+        for (auto& f : folders)
+            if (f.dir == dir)
+                return &f;
+        return nullptr;
+    };
+    const auto now = juce::Time::getCurrentTime();
+    const auto monthAgo = now - juce::RelativeTime::days (30);
+    {
+        const auto folders = sessioncache::scan();
+        auto* f = find (folders, savedFolder);
+        CHECK (f != nullptr && f->bytes > 40000 && ! f->inUse && f->lastUsed > now - juce::RelativeTime::minutes (10),
+               "the saved project's folder is listed with its size, as used just now");
+        CHECK (f != nullptr && ! sessioncache::removable (*f, monthAgo), "  ...so a clean-up of what wasn't used for a month leaves it alone");
+    }
+
+    // not opened for a long time: it may go - unless a plug-in that is open right now uses it
+    savedFolder.getChildFile (".used").setLastModificationTime (now - juce::RelativeTime::days (100));
+    {
+        const auto folders = sessioncache::scan();
+        auto* f = find (folders, savedFolder);
+        CHECK (f != nullptr && sessioncache::removable (*f, monthAgo), "a folder no project has opened for 100 days can be cleaned up");
+    }
+    {
+        SnaggerProcessor p;
+        restoreInto (p, state);
+        CHECK (p.session.getClips().size() == 1, "the project opens again");
+        const auto folders = sessioncache::scan();
+        auto* f = find (folders, savedFolder);
+        CHECK (f != nullptr && f->inUse && f->lastUsed > now - juce::RelativeTime::minutes (10) && ! sessioncache::removable (*f, monthAgo),
+               "opening the project marks its folder as used again - and it can't go while the project is open");
+    }
+    savedFolder.deleteRecursively();
+
+    // the removal itself, on a folder of our own
+    {
+        auto root = tmp.getChildFile ("sessions");
+        auto make = [&root] (const juce::String& name, int usedDaysAgo)
+        {
+            auto dir = root.getChildFile (name);
+            dir.createDirectory();
+            dir.getChildFile ("clip.wav").replaceWithData (juce::MemoryBlock (5000, true).getData(), 5000);
+            if (usedDaysAgo >= 0)
+            {
+                dir.getChildFile (".used").create();
+                dir.getChildFile (".used").setLastModificationTime (juce::Time::getCurrentTime() - juce::RelativeTime::days (usedDaysAgo));
+            }
+            return dir;
+        };
+        auto old = make ("old", 200), recent = make ("recent", 3), legacy = make ("from-before", -1);
+        const auto before = sessioncache::scan ({}, root);
+        auto* l = find (before, legacy);
+        CHECK (before.size() == 3 && l != nullptr && l->lastUsed == sessioncache::trackedSince(),
+               "a folder from before \"last used\" was kept counts from the day this version first ran, not from its files' dates");
+        int removed = 0;
+        const auto freed = sessioncache::removeUnusedSince (juce::Time::getCurrentTime() - juce::RelativeTime::days (90), &removed, {}, root);
+        CHECK (removed >= 1 && freed >= 5000 && ! old.exists() && recent.isDirectory(),
+               "the clean-up removes what wasn't used for 3 months and nothing else (freed " + sessioncache::sizeText (freed) + ")");
+        CHECK (sessioncache::sizeText (1536 * 1024) == "2 MB" && sessioncache::sizeText ((juce::int64) 3 * 1024 * 1024 * 1024) == "3.0 GB", "sizes read as people write them");
+    }
+}
+
+#if SNAGGER_BUILTIN_AI
+/** The built-in AI without its model: how the audio is cut up for the network and put back together. */
+static void testAiWindows()
+{
+    std::cout << "\n[built-in AI: how the audio is cut up]\n";
+
+    // every sample is looked at, neighbours share enough to cross-fade, and no look is wasted
+    bool planned = true;
+    for (int n : { 1, 999, 1000, 1001, 1850, 2700, 8500, 123457 })
+    {
+        const int segment = 1000, overlap = 150;
+        const auto starts = snagai::planWindows (n, segment, overlap);
+        planned = planned && ! starts.empty() && starts.front() <= 0 && starts.back() + segment >= n;
+        for (size_t i = 1; i < starts.size(); ++i)
+            planned = planned && starts[i] > starts[i - 1] && starts[i] <= starts[i - 1] + segment - overlap;
+        const int needed = n <= segment ? 1 : (int) std::ceil ((double) (n - overlap) / (double) (segment - overlap));
+        planned = planned && (int) starts.size() == needed;
+    }
+    CHECK (planned, "the audio is covered by overlapping looks, with no more of them than it takes");
+
+    const int realSegment = (int) (7.8 * 44100.0), realOverlap = (int) (1.2 * 44100.0);
+    const int looks = (int) snagai::planWindows (60 * 44100, realSegment, realOverlap).size();
+    CHECK (looks == 9, "a minute of audio takes " + juce::String (looks) + " runs of the network (it took 20: two for every six seconds)");
+
+    // A "network" that hands back what it was given: the parts must come out as the audio went in,
+    // whatever the length, through the scaling and the cross-fades, on several threads.
+    std::atomic<int> runs { 0 };
+    auto echo = [&runs]() -> snagai::WindowFn
+    {
+        return [&runs] (const std::vector<float>& l, const std::vector<float>& r, std::vector<std::vector<float>>& parts,
+                        const std::function<void (float)>& progress)
+        {
+            ++runs;
+            for (size_t c = 0; c < parts.size(); ++c)
+                parts[c] = (c % 2 == 0) ? l : r;
+            progress (1.0f);
+        };
+    };
+    juce::Random rng (11);
+    double worst = 0.0;
+    bool ran = true, counted = true;
+    for (int n : { 37, 1000, 1001, 2333, 9100 })
+    {
+        std::vector<float> l ((size_t) n), r ((size_t) n);
+        for (int i = 0; i < n; ++i)
+        {
+            const bool gap = i >= 3000 && i < 6500;   // digital silence, longer than a look
+            l[(size_t) i] = gap ? 0.0f : 0.1f + 0.4f * std::sin ((float) i * 0.05f) + 0.05f * (rng.nextFloat() - 0.5f);
+            r[(size_t) i] = gap ? 0.0f : 0.1f + 0.3f * std::sin ((float) i * 0.031f);
+        }
+        std::vector<std::vector<float>> out;
+        std::string err;
+        snagai::SeparateOptions opts;
+        opts.numThreads = 3;
+        runs = 0;
+        ran = ran && snagai::separateWith (4, 1000, 150, echo, l.data(), r.data(), n, out, opts, err) && out.size() == 8;
+        if (! ran) break;
+        for (size_t c = 0; c < out.size(); ++c)
+            for (int i = 0; i < n; ++i)
+                worst = juce::jmax (worst, (double) std::abs (out[c][(size_t) i] - (c % 2 == 0 ? l : r)[(size_t) i]));
+        const int windows = (int) snagai::planWindows (n, 1000, 150).size();
+        counted = counted && (n < 9000 ? runs == windows : runs < windows);   // (the look that falls inside the silent gap isn't run)
+    }
+    CHECK (ran && worst < 1.0e-4, "what the network returns is put back together exactly (worst error " + juce::String (worst, 7) + ")");
+    CHECK (counted, "  ...one run of the network per look, none for a look at digital silence");
+
+    {
+        std::vector<float> nothing (5000, 0.0f);
+        std::vector<std::vector<float>> out;
+        std::string err;
+        runs = 0;
+        const bool ok = snagai::separateWith (4, 1000, 150, echo, nothing.data(), nothing.data(), 5000, out, {}, err);
+        bool silent = ok && out.size() == 8;
+        for (auto& channel : out)
+            for (auto v : channel)
+                silent = silent && v == 0.0f;
+        CHECK (silent && runs == 0, "pure silence comes back as silence, without running the network");
+    }
+    {
+        std::vector<float> tone (5000);
+        for (size_t i = 0; i < tone.size(); ++i) tone[i] = std::sin ((float) i * 0.1f);
+        std::vector<std::vector<float>> out;
+        std::string err;
+        snagai::SeparateOptions opts;
+        opts.numThreads = 2;
+        opts.shouldCancel = [&runs] { return runs.load() >= 2; };
+        runs = 0;
+        const bool cancelled = ! snagai::separateWith (4, 1000, 150, echo, tone.data(), tone.data(), 5000, out, opts, err) && err == "Cancelled" && out.empty();
+        auto broken = []() -> snagai::WindowFn
+        {
+            return [] (const std::vector<float>&, const std::vector<float>&, std::vector<std::vector<float>>&, const std::function<void (float)>&)
+            {
+                throw std::runtime_error ("boom");
+            };
+        };
+        opts.shouldCancel = nullptr;
+        err.clear();
+        const bool failed = ! snagai::separateWith (4, 1000, 150, broken, tone.data(), tone.data(), 5000, out, opts, err) && juce::String (err).contains ("boom");
+        CHECK (cancelled && failed, "a cancelled or failing run stops cleanly, on every thread (" + juce::String (err) + ")");
+    }
+}
+#endif
+
 static void testBuiltinAi()
 {
     std::cout << "\n[built-in AI stems - downloads the models]\n";
@@ -2255,6 +3038,25 @@ static void testBuiltinAi()
                 CHECK (bestLag (*demo.mix, *stems[1].audio, 32) == 0, "music lines up with the original to the sample");
             }
         }
+    }
+
+    // The models that were just downloaded are the files Sample Snagger expects, byte for byte.
+    for (auto id : { ai::ModelId::htdemucs4, ai::ModelId::ftVocals })
+        CHECK (ToolManager::sha256Of (ai::modelFile (id)) == juce::String (ai::info (id).sha256),
+               "the AI " + juce::String (ai::info (id).label) + " on disk matches its built-in checksum");
+
+    // How fast it is (the models are on disk by now), noted on the CI run so it can be compared.
+    {
+        auto longer = makeDemoMix (44100.0, 30.0, 92.0);
+        Job job ("ai", nullptr, nullptr);
+        std::vector<ai::Stem> stems;
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        const bool ok = ai::separate (*longer.mix, ai::Mode::fourStems, job, {}, stems);
+        const double secs = (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0;
+        const auto line = "AI speed: 30 s of audio into 4 stems in " + juce::String (secs, 1) + " s on " + juce::String (ai::defaultThreadCount())
+                          + " threads (" + juce::String (30.0 / juce::jmax (0.1, secs), 2) + "x real time)";
+        CHECK (ok && stems.size() == 4, line);
+        ciAnnotate ("notice", line);
     }
 
     // Digital silence in the sample (a track's tail, the gap before a grab starts): the engine scales
@@ -3046,6 +3848,27 @@ int main (int argc, char** argv)
     std::cout << "Sample Snagger test runner\n";
 
     // --chop <file>: print where AUTO CHOP cuts a real sample at each count (for tuning)
+    // --onsets: print how far AUTO CHOP's markers land from where hits start (for tuning)
+    if (args.contains ("--onsets"))
+    {
+        for (double sr : { 44100.0, 48000.0 })
+            for (int kind = 0; kind < 3; ++kind)
+                for (float bed : { 0.0f, 0.2f })
+                {
+                    std::vector<int> starts;
+                    for (int i = 0; i < 12; ++i)
+                        starts.push_back ((int) (sr * (0.4 + 0.37 * i)) + i * 37);   // (off any grid of the analysis)
+                    auto audio = makeHits (sr, 5.2, starts, kind, bed);
+                    const auto every = aimOf (edit::detectTransients (*audio, 0.55f), starts, sr);
+                    const auto count = aimOf (edit::chopAtStrongestHits (*audio, 13), starts, sr);
+                    const char* names[] = { "click", "kick", "snare" };
+                    std::cout << names[kind] << (bed > 0 ? " over bass" : "          ") << " @" << (int) sr
+                              << "  every hit: " << juce::String (every.earliest, 1) << " .. " << juce::String (every.latest, 1) << " ms, missed " << every.missed
+                              << "   13 chops: " << juce::String (count.earliest, 1) << " .. " << juce::String (count.latest, 1) << " ms, missed " << count.missed << "\n";
+                }
+        return 0;
+    }
+
     const int chopIdx = args.indexOf ("--chop");
     if (chopIdx >= 0 && chopIdx + 1 < args.size())
     {
@@ -3096,6 +3919,16 @@ int main (int argc, char** argv)
     testAuditEngine();
     testAuditKnobs();
     testAuditSecondPass();
+    testSessionCleanUp (tmp);
+    testDownloadChecks (tmp);
+    testDragOut();
+    testCancelStopsEverything (tmp);
+    testUndoMemory();
+    testChopWorkflow (tmp);
+    testSoundQuality();
+   #if SNAGGER_BUILTIN_AI
+    testAiWindows();
+   #endif
     testAuditStems (tmp);
     snag::StudioPageTester::runAudit();
     testProcessor();

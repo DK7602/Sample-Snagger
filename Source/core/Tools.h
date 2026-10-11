@@ -58,8 +58,22 @@ public:
     /** Finds a suitable system Python (3.9+) and returns the command to run it. */
     juce::StringArray findSystemPython (juce::String& versionOut) const;
 
-    /** Downloads a URL to a file with progress (0..1 mapped into [p0, p1] of the job). */
-    static bool download (const juce::String& url, const juce::File& dest, Job&, float p0, float p1);
+    /** Downloads a URL to a file with progress (0..1 mapped into [p0, p1] of the job).
+        With a `sha256` (64 hex digits) the download has to match it: one that doesn't is thrown
+        away, nothing is put in place and the job fails. */
+    static bool download (const juce::String& url, const juce::File& dest, Job&, float p0, float p1,
+                          const juce::String& sha256 = {});
+
+    /** The SHA-256 of a file, as 64 lower-case hex digits (empty if it can't be read). */
+    static juce::String sha256Of (const juce::File&);
+
+    /** Finds a file's checksum in what a project publishes with its releases: a list of
+        "<sha256>  <file name>" lines, or a file holding just the one checksum (also the way
+        PowerShell's Get-FileHash writes it). Empty if there is none for that file. */
+    static juce::String checksumFrom (const juce::String& published, const juce::String& fileName);
+
+    /** The checksum built into Sample Snagger for a download with a fixed version (FFmpeg). */
+    static juce::String pinnedChecksum (const juce::String& fileName);
 
     static juce::String exeName (const juce::String& base);
 

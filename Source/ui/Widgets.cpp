@@ -383,8 +383,19 @@ void DragHandle::paint (juce::Graphics& g)
     }
 }
 
-void DragHandle::mouseDown (const juce::MouseEvent&) { pressed = true; }
-void DragHandle::mouseUp (const juce::MouseEvent&)   { pressed = false; dragging = false; repaint(); }
+void DragHandle::mouseDown (const juce::MouseEvent&)
+{
+    pressed = true;
+    if (onPressChange) onPressChange (true);
+}
+
+void DragHandle::mouseUp (const juce::MouseEvent&)
+{
+    pressed = false;
+    dragging = false;
+    if (onPressChange) onPressChange (false);
+    repaint();
+}
 
 bool DragHandle::startExternalDrag (juce::Component& source, const juce::File& file)
 {
@@ -393,8 +404,23 @@ bool DragHandle::startExternalDrag (juce::Component& source, const juce::File& f
     return juce::DragAndDropContainer::performExternalDragDropOfFiles ({ file.getFullPathName() }, false, &source);
 }
 
+bool DragHandle::startExternalDrag (juce::Component& source, const juce::StringArray& files)
+{
+    juce::StringArray there;
+    for (auto& f : files)
+        if (juce::File (f).existsAsFile())
+            there.add (f);
+    return ! there.isEmpty() && juce::DragAndDropContainer::performExternalDragDropOfFiles (there, false, &source);
+}
+
 void DragHandle::mouseDrag (const juce::MouseEvent& e)
 {
+    if (onDragging)
+    {
+        if (pressed && e.getDistanceFromDragStart() >= 4)
+            onDragging();
+        return;
+    }
     if (dragging || ! pressed || e.getDistanceFromDragStart() < 4 || ! makeFile)
         return;
 

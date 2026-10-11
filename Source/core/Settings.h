@@ -12,6 +12,9 @@ namespace paths
     juce::File appDataDir();
     juce::File toolsDir();
     juce::File sessionsDir();
+    /** A few random characters for a temporary file's name. Safe to call from any thread (the
+        shared system random generator isn't). */
+    juce::String uniqueTag();
     juce::File tempDir();          // downloads, conversions
     juce::File dragExportDir();    // Documents/Sample Snagger/Dragged to DAW: files DAW projects keep using
     juce::File webDataDir();

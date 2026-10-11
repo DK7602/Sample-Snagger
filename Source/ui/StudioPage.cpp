@@ -128,6 +128,8 @@ void SlicePads::mouseDown (const juce::MouseEvent& e)
 {
     pressed = padAt (e.getPosition());
     dragStarted = false;
+    dragPad = -1;
+    dragOut.pressed();
     if (pressed >= 0)
     {
         proc.sendUiNote (proc.rootNote.load() + pressed, 0.9f);
@@ -138,24 +140,28 @@ void SlicePads::mouseDown (const juce::MouseEvent& e)
 
 void SlicePads::mouseDrag (const juce::MouseEvent& e)
 {
-    if (pressed < 0 || dragStarted || e.getDistanceFromDragStart() < 8 || clip == nullptr)
+    if (clip == nullptr || e.getDistanceFromDragStart() < 8)
         return;
 
-    dragStarted = true;
-    proc.sendUiNote (proc.rootNote.load() + pressed, 0.0f);
-    auto b = clip->sliceBoundaries();
-    const int idx = pressed;
-    pressed = -1;
-    repaint();
-    if (idx + 1 < (int) b.size())
+    if (! dragStarted)
     {
-        auto f = actions::makePadDragFile (proc, *clip, idx);   // with the pad's sound and the FX
-        DragHandle::startExternalDrag (*this, f);
+        if (pressed < 0)
+            return;
+        dragStarted = true;
+        proc.sendUiNote (proc.rootNote.load() + pressed, 0.0f);
+        dragPad = pressed;
+        pressed = -1;
+        repaint();
     }
+
+    // with the pad's sound and the FX (a very long chop is rendered by a background job first)
+    if (dragPad >= 0)
+        dragOut.drag (proc, *this, [this] { return clip != nullptr ? actions::dragJobForPad (proc, *clip, dragPad) : actions::DragJob(); });
 }
 
 void SlicePads::mouseUp (const juce::MouseEvent&)
 {
+    dragOut.released();
     if (pressed >= 0)
         proc.sendUiNote (proc.rootNote.load() + pressed, 0.0f);
     pressed = -1;
@@ -178,9 +184,9 @@ StudioPage::StudioPage (EditorContext& c)
     infoLabel.setColour (juce::Label::textColourId, col::textDim);
     addAndMakeVisible (infoLabel);
 
-    bpmLabel.setFont (ui (12.0f, true));
-    bpmLabel.setColour (juce::Label::textColourId, col::goldPale);
-    bpmLabel.setJustificationType (juce::Justification::centredRight);
+    setStyle (bpmLabel, "chip");
+    bpmLabel.setTooltip ("The sample's tempo. Click to double or halve it (a detector can't always tell 70 from 140), or to type it in.");
+    bpmLabel.onClick = [this] { showTempoMenu(); };
     addAndMakeVisible (bpmLabel);
 
     setStyle (detectBpmBtn, "chip");
@@ -249,19 +255,32 @@ StudioPage::StudioPage (EditorContext& c)
     addAndMakeVisible (zoomOutBtn);
     addAndMakeVisible (fitBtn);
 
-    saveBtn.setTooltip ("Save the selection (or whole sample) as a WAV in your Sample Snagger library");
+    saveBtn.setTooltip ("Save the selection (or whole sample) as a WAV in your Sample Snagger library - or, once there are chops, every chop as a file of its own");
     saveBtn.onClick = [this]
     {
         if (clip == nullptr) return;
-        actions::saveToLibrary (proc, *clip, selStartOrZero(), selEndOrAll(), wave.hasSelection() ? " (cut)" : "");
+        if ((int) clip->sliceBoundaries().size() - 1 >= 2)
+            showSaveMenu();   // (with chops there is more than one thing "save" can mean)
+        else
+            actions::saveToLibrary (proc, *clip, selStartOrZero(), selEndOrAll(), wave.hasSelection() ? " (cut)" : "");
     };
     addAndMakeVisible (saveBtn);
+
+    chopsDrag.setTooltip ("Drag every chop into your DAW at once, each as a file of its own (with its pad sound and the FX) - onto a drum rack, a sampler or a row of tracks");
+    allChopsDrag.attachTo (chopsDrag, proc, [this] { return clip != nullptr ? actions::dragJobForAllChops (proc, *clip) : actions::DragJob(); });
+    addChildComponent (chopsDrag);
 
     dragHandle.makeFile = [this]
     {
         if (clip == nullptr) return juce::File();
         return actions::makeDragFile (proc, *clip, selStartOrZero(), selEndOrAll(), wave.hasSelection() ? " (cut)" : "");
     };
+    // (the drag itself goes through this: a long sample is rendered by a background job first)
+    sampleDrag.attachTo (dragHandle, proc, [this]
+    {
+        return clip != nullptr ? actions::dragJobFor (proc, *clip, selStartOrZero(), selEndOrAll(), wave.hasSelection() ? " (cut)" : "")
+                               : actions::DragJob();
+    });
     addAndMakeVisible (dragHandle);
 
     pads.onSliceSelected = [this] (int idx)
@@ -623,6 +642,77 @@ void StudioPage::detectKey (bool quiet)
     });
 }
 
+void StudioPage::showSaveMenu()
+{
+    if (clip == nullptr) return;
+    const int chops = (int) clip->sliceBoundaries().size() - 1;
+    juce::PopupMenu m;
+    m.addItem (1, wave.hasSelection() ? "Save the selection" : "Save the whole sample");
+    if (wave.hasSelection())
+        m.addItem (2, "Save the whole sample");
+    m.addSeparator();
+    m.addItem (3, "Save all " + juce::String (chops) + " chops, each as a file of its own");
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (saveBtn),
+                     [safe = juce::Component::SafePointer<StudioPage> (this), c = clip] (int r)
+    {
+        if (safe == nullptr || r == 0 || safe->clip != c) return;
+        if (r == 1)      actions::saveToLibrary (safe->proc, *c, safe->selStartOrZero(), safe->selEndOrAll(), safe->wave.hasSelection() ? " (cut)" : "");
+        else if (r == 2) actions::saveToLibrary (safe->proc, *c);
+        else if (r == 3) actions::saveChopsToLibrary (safe->proc, *c);
+    });
+}
+
+/** `bpm` is the tempo as it is heard now, knobs and all; the sample remembers its original's. */
+void StudioPage::setHeardTempo (double bpm)
+{
+    if (clip == nullptr || ! (bpm >= 20.0 && bpm <= 999.0))
+        return;
+    const auto& k = clip->adjust;
+    const double factor = clip->adjustBase == nullptr ? 1.0
+                        : k.tape ? std::pow (2.0, k.semitones / 12.0) : 1.0 / juce::jmax (0.01, k.length);
+    clip->bpm = bpm / factor;
+    proc.session.clipChanged (clip.get(), false);
+    syncSampler();
+    refreshInfo();
+}
+
+void StudioPage::showTempoMenu()
+{
+    if (clip == nullptr) return;
+    const double now = clip->bpmWith (clip->adjust);
+    juce::PopupMenu m;
+    m.addSectionHeader (now > 0 ? "Tempo: " + juce::String (now, 1) + " BPM" : juce::String ("Tempo not known yet"));
+    m.addItem (1, "Double it  (" + juce::String (now * 2.0, 1) + " BPM)", now > 0 && now * 2.0 <= 999.0);
+    m.addItem (2, "Halve it  (" + juce::String (now * 0.5, 1) + " BPM)", now > 0 && now * 0.5 >= 20.0);
+    m.addItem (3, "Type it in...");
+    m.addSeparator();
+    m.addItem (4, now > 0 ? "Measure it again" : "Measure it");
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (bpmLabel),
+                     [safe = juce::Component::SafePointer<StudioPage> (this), c = clip, now] (int r)
+    {
+        if (safe == nullptr || r == 0 || safe->clip != c) return;
+        if (r == 1)      safe->setHeardTempo (now * 2.0);
+        else if (r == 2) safe->setHeardTempo (now * 0.5);
+        else if (r == 4) safe->detectBpm();
+        else if (r == 3)
+        {
+            auto* w = new juce::AlertWindow ("Tempo", "The tempo of this sample as you hear it now, in BPM:", juce::MessageBoxIconType::NoIcon);
+            w->addTextEditor ("bpm", now > 0 ? juce::String (now, 1) : juce::String());
+            w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+            w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+            w->enterModalState (true, juce::ModalCallbackFunction::create ([w, c, safe] (int res)
+            {
+                if (res != 1 || safe == nullptr || safe->clip != c) return;
+                const double typed = w->getTextEditorContents ("bpm").replaceCharacter (',', '.').retainCharacters ("0123456789.").getDoubleValue();
+                if (typed >= 20.0 && typed <= 999.0)
+                    safe->setHeardTempo (typed);
+                else
+                    safe->ctx.toast ("A tempo is between 20 and 999 BPM.", true);
+            }), true);
+        }
+    });
+}
+
 void StudioPage::showKeyMenu()
 {
     if (clip == nullptr) return;
@@ -730,7 +820,7 @@ void StudioPage::setClip (Clip::Ptr c)
     const bool has = clip != nullptr;
     for (auto* b : editButtons) b->setEnabled (has);
     for (auto* comp : std::initializer_list<juce::Component*> { &pitchDefaultBtn, &matchBpmBtn, &toneDefaultBtn, &autoChopBtn,
-                                                                &equalBtn, &clearChopsBtn, &playBtn, &stopBtn, &saveBtn, &detectBpmBtn, &dragHandle, &keyBtn })
+                                                                &equalBtn, &clearChopsBtn, &playBtn, &stopBtn, &saveBtn, &detectBpmBtn, &dragHandle, &keyBtn, &bpmLabel })
         comp->setEnabled (has);
     dragHandle.setAlpha (has ? 1.0f : 0.4f);
 }
@@ -750,7 +840,8 @@ void StudioPage::refreshInfo()
     {
         nameLabel.setText ("Studio", juce::dontSendNotification);
         infoLabel.setText ("Nothing loaded yet", juce::dontSendNotification);
-        bpmLabel.setText ({}, juce::dontSendNotification);
+        bpmLabel.setButtonText ({});
+        chopsDrag.setVisible (false);
         selLabel.setText ({}, juce::dontSendNotification);
         undoBtn.setEnabled (false);
         redoBtn.setEnabled (false);
@@ -767,7 +858,11 @@ void StudioPage::refreshInfo()
         info << "   " << (int) clip->sliceBoundaries().size() - 1 << " CHOPS";
     infoLabel.setText (info, juce::dontSendNotification);
     const double shownBpm = clip->bpmWith (clip->adjust);   // where the knobs are taking it
-    bpmLabel.setText (shownBpm > 0 ? juce::String (shownBpm, 1) + " BPM" : "BPM  -", juce::dontSendNotification);
+    bpmLabel.setButtonText (shownBpm > 0 ? juce::String (shownBpm, 1) + " BPM" : "BPM  -");
+
+    const int chops = (int) clip->sliceBoundaries().size() - 1;
+    chopsDrag.setVisible (chops >= 2);
+    chopsDrag.setCaption ("DRAG ALL " + juce::String (chops) + " CHOPS");
 
     const double sr = a.sampleRate;
     if (wave.hasSelection())
@@ -1130,36 +1225,85 @@ void StudioPage::redo()
     ctx.toast ("Redid " + what);
 }
 
-void StudioPage::detectBpm()
+void StudioPage::detectBpm (std::function<void()> then)
 {
-    if (clip == nullptr) return;
-    const int s = selStartOrZero();
-    const int e = selEndOrAll() < 0 ? clip->audio->getNumSamples() : selEndOrAll();
-    auto part = wave.hasSelection() ? edit::crop (*clip->audio, s, e) : clip->audio;
-    const double bpm = edit::estimateBpm (*part);
-    if (bpm <= 0)
+    if (clip == nullptr || clip->audio == nullptr) return;
+    if (analysing.count (clip->id))
     {
-        ctx.toast ("Couldn't find a steady tempo in this sample.", true);
+        ctx.toast ("Still working on this sample - one moment.");
         return;
     }
-    // stored for the original, so LENGTH / MATCH BPM always start from the same place. What was
-    // measured is the sound as it is rendered now: stretched by LENGTH, or sped up by TAPE pitch.
-    const auto& heard = clip->audioAdjust;
-    clip->bpm = clip->adjustBase == nullptr ? bpm
-              : heard.tape ? bpm / std::pow (2.0, heard.semitones / 12.0)
-                           : bpm * heard.length;
-    proc.session.clipChanged (clip.get(), false);
-    refreshInfo();
-    ctx.toast ("Tempo: " + juce::String (bpm, 1) + " BPM");
+    const bool sel = wave.hasSelection();
+    const int s = selStartOrZero();
+    const int e = selEndOrAll() < 0 ? clip->audio->getNumSamples() : selEndOrAll();
+    auto c = clip;
+    auto audio = clip->audio;
+    auto measure = [audio, sel, s, e] { return edit::estimateBpm (sel ? *edit::crop (*audio, s, e) : *audio); };
+
+    auto& p = proc;
+    juce::Component::SafePointer<StudioPage> safe (this);
+    auto finish = [&p, safe, c, audio, then] (double bpm)
+    {
+        if (c->audio != audio)
+        {
+            actions::notify (p, "The sample changed while its tempo was being measured - click DETECT again.", true);
+            return;
+        }
+        if (bpm <= 0)
+        {
+            actions::notify (p, "Couldn't find a steady tempo in this sample.", true);
+            if (then) then();
+            return;
+        }
+        // stored for the original, so LENGTH / MATCH BPM always start from the same place. What was
+        // measured is the sound as it is rendered now: stretched by LENGTH, or sped up by TAPE pitch.
+        const auto& heard = c->audioAdjust;
+        c->bpm = c->adjustBase == nullptr ? bpm
+               : heard.tape ? bpm / std::pow (2.0, heard.semitones / 12.0)
+                            : bpm * heard.length;
+        p.session.clipChanged (c.get(), false);
+        if (safe != nullptr && safe->clip == c)
+            safe->refreshInfo();
+        actions::notify (p, "Tempo: " + juce::String (bpm, 1) + " BPM");
+        if (then) then();
+    };
+
+    const double seconds = (double) (sel ? e - s : audio->getNumSamples()) / juce::jmax (1.0, audio->sampleRate);
+    if (seconds <= 45.0)   // (as quickToAnalyse: what is listened to here can be just the selection)
+    {
+        finish (measure());
+        return;
+    }
+
+    analysing.insert (c->id);
+    auto result = std::make_shared<double> (0.0);
+    proc.jobs.start ("Finding the tempo", [measure, result] (Job& job)
+    {
+        job.setStatus ("Listening to the rhythm");
+        *result = measure();
+    },
+    [safe, c, result, finish] (Job& job)
+    {
+        if (safe != nullptr) safe->analysing.erase (c->id);
+        if (! job.isCancelled())
+            finish (*result);
+    });
 }
 
 void StudioPage::matchBpm()
 {
     if (clip == nullptr) return;
     if (clip->bpm <= 0)
-        detectBpm();
-    if (clip->bpm <= 0)
+    {
+        // (the tempo isn't known yet: find it first - which is a background job for a long sample)
+        juce::Component::SafePointer<StudioPage> safe (this);
+        detectBpm ([safe, c = clip]
+        {
+            if (safe != nullptr && safe->clip == c && c->bpm > 0)
+                safe->matchBpm();
+        });
         return;
+    }
     const double wanted = targetBpm();
     double target = wanted;
     // too far for the LENGTH knob (50 - 200%)? half or double time sits on the same grid
@@ -1239,45 +1383,99 @@ void StudioPage::chopCountChanged()
                                : "Cut into " + n + " equal chops (great for loops)");
 }
 
-void StudioPage::autoChop()
+StudioPage::ChopFind StudioPage::findChops (const AudioData& audio, const ChopAsk& ask, const std::vector<int>& slicesNow)
 {
-    if (clip == nullptr || clip->audio == nullptr) return;
-    const int len = clip->audio->getNumSamples();
-    const int count = chopCount.getSelectedId();
-    const bool every = count == everyHit;
-    const bool sel = wave.hasSelection();
-    const int a = sel ? wave.getSelectionStart() : 0, b = sel ? wave.getSelectionEnd() : len;
-
-    std::vector<int> found = every ? edit::detectTransients (*clip->audio, (float) sensKnob.slider.getValue() / 100.0f)
-                                   : edit::chopAtStrongestHits (*clip->audio, count, a, b);
+    const int len = audio.getNumSamples();
+    ChopFind r;
+    r.found = ask.every ? edit::detectTransients (audio, ask.sensitivity)
+                        : edit::chopAtStrongestHits (audio, ask.count, ask.a, ask.b);
 
     // There are 32 pads. "Every hit" on a long sample can find far more: keep the 32 strongest
     // rather than leave chops that no pad shows (and that can't be dragged or shaped).
-    int hitsFound = 0;
-    if (every && ! sel && (int) found.size() > maxPads - 1)
+    if (ask.every && ! ask.sel && (int) r.found.size() > maxPads - 1)
     {
-        hitsFound = (int) found.size() + 1;
-        found = edit::chopAtStrongestHits (*clip->audio, maxPads, 0, len);
+        r.hitsFound = (int) r.found.size() + 1;
+        r.found = edit::chopAtStrongestHits (audio, maxPads, 0, len);
     }
-    else if (every && sel)
+    else if (ask.every && ask.sel)
     {
         // (the same inside a selection: the markers that stay elsewhere use up pads too)
-        int others = (a > 0 ? 1 : 0) + (b < len ? 1 : 0), inside = 0;
-        for (auto s : clip->slices) if ((s < a || s > b) && s > 0 && s < len) ++others;
-        for (auto s : found)        if (s > a && s < b) ++inside;
+        int others = (ask.a > 0 ? 1 : 0) + (ask.b < len ? 1 : 0), inside = 0;
+        for (auto s : slicesNow) if ((s < ask.a || s > ask.b) && s > 0 && s < len) ++others;
+        for (auto s : r.found)   if (s > ask.a && s < ask.b) ++inside;
         const int room = juce::jmax (0, maxPads - 1 - others);
         if (inside > room)
         {
-            hitsFound = inside + 1;
-            found = edit::chopAtStrongestHits (*clip->audio, room + 1, a, b);
+            r.hitsFound = inside + 1;
+            r.found = edit::chopAtStrongestHits (audio, room + 1, ask.a, ask.b);
         }
     }
-    const auto slicesBefore = clip->slices;
+    return r;
+}
+
+void StudioPage::autoChop()
+{
+    if (clip == nullptr || clip->audio == nullptr) return;
+    if (analysing.count (clip->id))
+    {
+        ctx.toast ("Still working on this sample - one moment.");
+        return;
+    }
+    const int len = clip->audio->getNumSamples();
+    ChopAsk ask;
+    ask.count = chopCount.getSelectedId();
+    ask.every = ask.count == everyHit;
+    ask.sel = wave.hasSelection();
+    ask.a = ask.sel ? wave.getSelectionStart() : 0;
+    ask.b = ask.sel ? wave.getSelectionEnd() : len;
+    ask.sensitivity = (float) sensKnob.slider.getValue() / 100.0f;
+
+    auto c = clip;
+    auto audio = clip->audio;
+    if (quickToAnalyse (*audio))
+    {
+        applyChops (c, findChops (*audio, ask, c->slices), ask);
+        return;
+    }
+
+    // a long sample: look for the hits in the background
+    analysing.insert (c->id);
+    auto result = std::make_shared<ChopFind>();
+    const auto slicesThen = c->slices;
+    juce::Component::SafePointer<StudioPage> safe (this);
+    proc.jobs.start ("Auto chop", [audio, ask, slicesThen, result] (Job& job)
+    {
+        job.setStatus ("Finding the hits");
+        *result = findChops (*audio, ask, slicesThen);
+    },
+    [safe, c, audio, slicesThen, ask, result] (Job& job)
+    {
+        if (safe == nullptr) return;
+        safe->analysing.erase (c->id);
+        if (job.isCancelled()) return;
+        if (c->audio != audio || c->slices != slicesThen)
+        {
+            safe->ctx.toast ("The sample changed while AUTO CHOP was looking at it - click it again.", true);
+            return;
+        }
+        safe->applyChops (c, *result, ask);
+    });
+}
+
+void StudioPage::applyChops (Clip::Ptr c, const ChopFind& find, const ChopAsk& ask)
+{
+    if (c == nullptr || c->audio == nullptr) return;
+    const int len = c->audio->getNumSamples();
+    const bool every = ask.every, sel = ask.sel;
+    const int a = ask.a, b = ask.b, count = ask.count, hitsFound = find.hitsFound;
+    auto found = find.found;
+
+    const auto slicesBefore = c->slices;
     if (sel)
     {
         // only chop inside the selection, keep markers elsewhere
         std::vector<int> keep;
-        for (auto s : clip->slices) if (s < a || s > b) keep.push_back (s);
+        for (auto s : c->slices) if (s < a || s > b) keep.push_back (s);
         for (auto s : found) if (s > a && s < b) keep.push_back (s);
         keep.push_back (a);
         keep.push_back (b);
@@ -1286,21 +1484,24 @@ void StudioPage::autoChop()
         keep.erase (std::remove_if (keep.begin(), keep.end(), [len] (int v) { return v <= 0 || v >= len; }), keep.end());
         found = keep;
     }
-    clip->pushUndo ("Auto chop");
-    clip->slices = found;
+    c->pushUndo ("Auto chop");
+    c->slices = found;
     // new chops start with a clean sound (UNDO brings the old ones back); with a selection,
     // the chops outside it are left alone - their pad sounds too
     if (sel)
-        clip->remapPads (slicesBefore, [a, b] (int pos) { return pos >= a && pos < b ? -1 : pos; });
+        c->remapPads (slicesBefore, [a, b] (int pos) { return pos >= a && pos < b ? -1 : pos; });
     else
-        clip->pads.clear();
-    selectedPad = 0;
-    proc.session.clipChanged (clip.get(), false);
-    syncSampler();
-    chopsChanged();
-    wave.repaint();
+        c->pads.clear();
+    proc.session.clipChanged (c.get(), false);
+    if (c == clip)   // (a long sample's chops can arrive after another sample was opened)
+    {
+        selectedPad = 0;
+        syncSampler();
+        chopsChanged();
+        wave.repaint();
+    }
 
-    const int total = (int) clip->sliceBoundaries().size() - 1;
+    const int total = (int) c->sliceBoundaries().size() - 1;
     const auto where = "play them from pads " + noteName (proc.rootNote.load()) + " and up";
     if (hitsFound > 0 && sel)
         ctx.toast ("Found " + juce::String (hitsFound) + " hits in the selection - kept the strongest, so every chop has a pad ("
@@ -1367,7 +1568,7 @@ void StudioPage::resized()
     head.removeFromRight (10);
     detectBpmBtn.setBounds (head.removeFromRight (70).reduced (0, 6));
     head.removeFromRight (6);
-    bpmLabel.setBounds (head.removeFromRight (84));
+    bpmLabel.setBounds (head.removeFromRight (92).reduced (0, 6));
     head.removeFromRight (8);
     keyBtn.setBounds (head.removeFromRight (122).reduced (0, 6));
     head.removeFromRight (6);
@@ -1415,7 +1616,8 @@ void StudioPage::resized()
             b->setBounds (t.removeFromLeft (120));
             t.removeFromLeft (6);
         }
-        deckHint.setBounds (t.withTrimmedRight (6));
+        chopsDrag.setBounds (t.removeFromRight (196).reduced (0, 1));
+        deckHint.setBounds (t.withTrimmedRight (10));
     }
 
     // tool panels

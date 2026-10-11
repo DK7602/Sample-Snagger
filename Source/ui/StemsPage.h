@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Page.h"
+#include "DragOut.h"
 #include "SeparationAnimation.h"
 
 namespace snag
@@ -81,6 +82,7 @@ private:
     IconButton stopBtn    { "stop", theme::icons::stop(), {}, "gold" };
     IconButton saveAllBtn { "saveall", theme::icons::save(), "SAVE ALL STEMS", "gold" };
     DragHandle dragMix { "DRAG MIX OF UNMUTED STEMS" };
+    DragOut mixDrag;
 
     Clip::Ptr shownParent;
     juce::StringArray shownStemIds;
@@ -93,6 +95,7 @@ private:
 
     // the "first use downloads N MB" note: when the model files were last looked at
     int downloadCheckedMode = -1, downloadMegabytes = 0;
+    juce::String downloadCheckedParts;
     juce::uint32 downloadCheckedAt = 0;
 };
 

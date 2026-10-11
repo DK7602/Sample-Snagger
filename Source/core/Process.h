@@ -2,11 +2,35 @@
 
 #include <juce_core/juce_core.h>
 #include <atomic>
+#include <algorithm>
 #include <functional>
 #include <thread>
+#include <vector>
 
 namespace snag
 {
+
+//==============================================================================
+/** The programs a program has started in turn. yt-dlp runs ffmpeg, and on Windows yt-dlp.exe is
+    a small starter that runs the real yt-dlp as a child: ending only the program that was
+    launched left those running - a cancelled download carried on in the background. */
+namespace proctree
+{
+    int currentProcess();
+    std::vector<int> childrenOfCurrentProcess();
+
+    /** When a process started, in the system's own units (0 where that isn't needed or known). */
+    juce::uint64 startTimeOf (int pid);
+
+    /** Everything below `root`: its children, theirs, and so on. */
+    std::vector<int> descendantsOf (int root, juce::uint64 rootStarted = 0);
+
+    /** Ends everything below `root` (not `root` itself). Returns how many processes that was. */
+    int killDescendants (int root, juce::uint64 rootStarted = 0);
+
+    /** Stops a process from running on, where the system can do that, until it is ended. */
+    void freeze (int pid);
+}
 
 //==============================================================================
 /** Runs a command-line tool, streams its output line-by-line and can be cancelled
@@ -24,12 +48,30 @@ public:
         cancelled = false;
 
         {
+            // Which process is ours? The one that is new among our children once it has started -
+            // one program is started at a time, so that there is only one new one to find.
+            static juce::CriticalSection oneStartAtATime;
+            const juce::ScopedLock starting (oneStartAtATime);
+            const auto before = proctree::childrenOfCurrentProcess();
+
             const juce::ScopedLock sl (lock);
+            childPid = 0;
+            childStarted = 0;
             process = std::make_unique<juce::ChildProcess>();
             if (! process->start (args, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr))
             {
                 process.reset();
                 return -1;
+            }
+
+            std::vector<int> fresh;
+            for (auto pid : proctree::childrenOfCurrentProcess())
+                if (std::find (before.begin(), before.end(), pid) == before.end())
+                    fresh.push_back (pid);
+            if (fresh.size() == 1)   // (anything else: something beside us started a program just then - don't guess)
+            {
+                childPid = fresh[0];
+                childStarted = proctree::startTimeOf (childPid);
             }
         }
 
@@ -132,7 +174,7 @@ public:
         if (process != nullptr)
         {
             if (cancelled)
-                process->kill();
+                endProcessAndItsChildren();
             else
                 process->waitForProcessToFinish (5000);
 
@@ -147,7 +189,7 @@ public:
         cancelled = true;
         const juce::ScopedLock sl (lock);
         if (process != nullptr)
-            process->kill();
+            endProcessAndItsChildren();
     }
 
     bool wasCancelled() const noexcept { return cancelled; }
@@ -164,8 +206,26 @@ public:
     }
 
 private:
+    /** (call with the lock held) */
+    void endProcessAndItsChildren()
+    {
+        // (only while it is still there: once it has ended, its number can come to mean another program)
+        const bool tree = childPid > 0 && process->isRunning();
+        if (tree)
+        {
+            proctree::freeze (childPid);
+            proctree::killDescendants (childPid, childStarted);
+        }
+        process->kill();
+        if (tree)
+            proctree::killDescendants (childPid, childStarted);   // (anything it still got started in between)
+        childPid = 0;
+    }
+
     juce::CriticalSection lock;
     std::unique_ptr<juce::ChildProcess> process;
+    int childPid = 0;                 // 0: not known, so only the process itself can be ended
+    juce::uint64 childStarted = 0;
     std::atomic<bool> cancelled { false };
 };
 

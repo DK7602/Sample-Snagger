@@ -160,6 +160,7 @@ set(SNAGGER_SOURCES
     Source/core/Jobs.cpp
     Source/core/WebCapture.cpp
     Source/core/ProcessAudioCapture.cpp
+    Source/core/ProcessTree.cpp
     Source/core/AiStems.cpp
     Source/core/KeyDetect.cpp
     Source/core/PadFx.cpp
@@ -168,6 +169,7 @@ set(SNAGGER_SOURCES
     Source/core/AudioToMidi.cpp
     Source/ui/Theme.cpp
     Source/ui/Widgets.cpp
+    Source/ui/DragOut.cpp
     Source/ui/WaveformView.cpp
     Source/ui/BrowsePage.cpp
     Source/ui/StudioPage.cpp
@@ -186,6 +188,7 @@ target_link_libraries(SnaggerShared INTERFACE
     signalsmith-stretch
     juce::juce_audio_utils
     juce::juce_audio_formats
+    juce::juce_cryptography
     juce::juce_dsp
     juce::juce_gui_extra
     juce::juce_recommended_config_flags

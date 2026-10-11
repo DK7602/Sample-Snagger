@@ -207,6 +207,14 @@ SettingsPanel::SettingsPanel (EditorContext& c) : ctx (c), proc (c.getProcessor(
     };
     addAndMakeVisible (libBtn);
 
+    cacheLabel.setFont (ui (11.5f, true));
+    cacheLabel.setColour (juce::Label::textColourId, col::goldPale);
+    cacheLabel.setMinimumHorizontalScale (0.6f);
+    addAndMakeVisible (cacheLabel);
+    cacheBtn.setTooltip ("Free disk space: remove the tray samples of projects you haven't opened for a long time");
+    cacheBtn.onClick = [this] { showCleanUpMenu(); };
+    addAndMakeVisible (cacheBtn);
+
     audioBtn.onClick = []
     {
         standalone::showAudioSettings();
@@ -225,6 +233,7 @@ SettingsPanel::SettingsPanel (EditorContext& c) : ctx (c), proc (c.getProcessor(
 
 SettingsPanel::~SettingsPanel()
 {
+    *cacheStop = true;   // (a scan or clean-up that is under way stops at the next folder)
     proc.getTools().removeChangeListener (this);
 }
 
@@ -234,7 +243,107 @@ void SettingsPanel::open()
     toFront (true);
     proc.getTools().refreshAsync();
     updateRows();
+    scanCache();
     startTimerHz (4);
+}
+
+//==============================================================================
+// Tray samples on disk. The scan and the clean-up walk a folder that can hold gigabytes, so both
+// run on a thread of their own and report back.
+void SettingsPanel::scanCache()
+{
+    const int serial = ++cacheScanSerial;
+    cacheWorker.addJob ([safe = juce::Component::SafePointer<SettingsPanel> (this), stop = cacheStop, serial]
+    {
+        auto folders = sessioncache::scan ([stop] { return stop->load(); });
+        juce::MessageManager::callAsync ([safe, serial, folders = std::move (folders)]() mutable
+        {
+            if (safe == nullptr || serial != safe->cacheScanSerial)
+                return;
+            safe->cacheFolders = std::move (folders);
+            safe->cacheScanned = true;
+            safe->updateRows();
+        });
+    });
+}
+
+juce::int64 SettingsPanel::removableAfter (int days) const
+{
+    const auto cutoff = juce::Time::getCurrentTime() - juce::RelativeTime::days (days);
+    juce::int64 bytes = 0;
+    for (auto& f : cacheFolders)
+        if (sessioncache::removable (f, cutoff))
+            bytes += f.bytes;
+    return bytes;
+}
+
+void SettingsPanel::showCleanUpMenu()
+{
+    if (! cacheScanned)
+    {
+        ctx.toast ("Still looking at what's there - try again in a moment.");
+        return;
+    }
+
+    const std::pair<int, const char*> ages[] = { { 30, "a month" }, { 90, "3 months" }, { 180, "6 months" }, { 365, "a year" } };
+    juce::PopupMenu m;
+    m.addSectionHeader ("Remove the tray samples of projects not opened for...");
+    bool any = false;
+    for (auto& [days, label] : ages)
+    {
+        const auto bytes = removableAfter (days);
+        any = any || bytes > 0;
+        m.addItem (days, juce::String (label) + (bytes > 0 ? "   (frees " + sessioncache::sizeText (bytes) + ")" : juce::String ("   (nothing that old)")), bytes > 0);
+    }
+    if (! any)
+    {
+        m.addSeparator();
+        m.addItem (-1, "Nothing can go yet: everything here was used within the last month", false);
+    }
+    m.addSeparator();
+    m.addItem (1, "Show the folder");
+
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (cacheBtn),
+                     [safe = juce::Component::SafePointer<SettingsPanel> (this)] (int r)
+    {
+        if (safe == nullptr || r == 0) return;
+        if (r == 1) { paths::sessionsDir().revealToUser(); return; }
+
+        const int days = r;
+        const auto bytes = safe->removableAfter (days);
+        if (bytes <= 0) return;
+        juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::WarningIcon, "Remove old tray samples?",
+            "This frees " + sessioncache::sizeText (bytes) + ".\n\nA project you haven't opened for " + juce::String (days)
+                + " days or more will then open with those samples missing from its tray. Samples you saved to your library, "
+                  "and files you dragged into your DAW, are separate and stay where they are.",
+            "Remove", "Cancel", safe.getComponent(),
+            juce::ModalCallbackFunction::create ([safe, days] (int answer)
+            {
+                if (answer == 1 && safe != nullptr)
+                    safe->cleanUp (days);
+            }));
+    });
+}
+
+void SettingsPanel::cleanUp (int days)
+{
+    cacheBtn.setEnabled (false);
+    cacheLabel.setText ("Removing...", juce::dontSendNotification);
+    cacheScanned = false;
+    const auto cutoff = juce::Time::getCurrentTime() - juce::RelativeTime::days (days);
+    cacheWorker.addJob ([safe = juce::Component::SafePointer<SettingsPanel> (this), stop = cacheStop, cutoff]
+    {
+        int folders = 0;
+        const auto freed = sessioncache::removeUnusedSince (cutoff, &folders, [stop] { return stop->load(); });
+        juce::MessageManager::callAsync ([safe, freed, folders]
+        {
+            if (safe == nullptr) return;
+            safe->cacheBtn.setEnabled (true);
+            safe->ctx.toast (folders > 0 ? "Freed " + sessioncache::sizeText (freed) + "."
+                                         : juce::String ("Nothing was removed - those samples are in use right now."));
+            safe->scanCache();
+        });
+    });
 }
 
 void SettingsPanel::close()
@@ -250,6 +359,19 @@ void SettingsPanel::updateRows()
 {
     for (auto* r : rows) r->update();
     libLabel.setText (proc.getSettings().getLibraryDir().getFullPathName(), juce::dontSendNotification);
+
+    if (cacheScanned)
+    {
+        juce::int64 total = 0;
+        for (auto& f : cacheFolders)
+            total += f.bytes;
+        cacheLabel.setText (total > 0 ? sessioncache::sizeText (total) + "  -  kept on this computer so your projects reopen with their samples"
+                                      : juce::String ("Nothing kept yet"), juce::dontSendNotification);
+    }
+    else if (cacheBtn.isEnabled())
+    {
+        cacheLabel.setText ("Looking...", juce::dontSendNotification);
+    }
 }
 
 void SettingsPanel::mouseDown (const juce::MouseEvent& e)
@@ -260,7 +382,7 @@ void SettingsPanel::mouseDown (const juce::MouseEvent& e)
 
 void SettingsPanel::resized()
 {
-    card = getLocalBounds().withSizeKeepingCentre (juce::jmin (820, getWidth() - 40), juce::jmin (640, getHeight() - 40));
+    card = getLocalBounds().withSizeKeepingCentre (juce::jmin (820, getWidth() - 40), juce::jmin (660, getHeight() - 40));
     auto r = card.reduced (24, 18);
     closeBtn.setBounds (r.getRight() - 30, r.getY(), 30, 30);
     r.removeFromTop (44);
@@ -292,6 +414,13 @@ void SettingsPanel::resized()
     lib.removeFromRight (10);
     lib.removeFromLeft (110);
     libLabel.setBounds (lib);
+
+    r.removeFromTop (4);
+    auto cache = r.removeFromTop (30);
+    cacheBtn.setBounds (cache.removeFromRight (100).reduced (0, 1));
+    cache.removeFromRight (10);
+    cache.removeFromLeft (110);
+    cacheLabel.setBounds (cache);
 
     licencesBtn.setBounds (card.reduced (24, 16).removeFromBottom (32).removeFromRight (96).reduced (0, 5));
 }
@@ -343,6 +472,7 @@ void SettingsPanel::paint (juce::Graphics& g)
     g.setColour (col::textDim);
     g.setFont (ui (11.5f, true));
     g.drawText ("LIBRARY FOLDER", juce::Rectangle<float> (r.getX(), (float) libLabel.getY(), 110.0f, (float) libLabel.getHeight()), juce::Justification::centredLeft);
+    g.drawText ("TRAY SAMPLES", juce::Rectangle<float> (r.getX(), (float) cacheLabel.getY(), 110.0f, (float) cacheLabel.getHeight()), juce::Justification::centredLeft);
 
     g.setColour (col::textFaint);
     g.setFont (ui (10.5f));

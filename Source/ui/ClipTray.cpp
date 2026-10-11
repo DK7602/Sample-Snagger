@@ -1,4 +1,5 @@
 #include "ClipTray.h"
+#include "DragOut.h"
 #include "../PluginProcessor.h"
 #include "../Actions.h"
 
@@ -73,7 +74,7 @@ public:
     void mouseDown (const juce::MouseEvent& e) override
     {
         dragging = false;
-        dragStarted = false;
+        dragOut.pressed();
         auto& proc = owner.getProcessor();
         if (e.mods.isPopupMenu())
         {
@@ -91,21 +92,15 @@ public:
 
     void mouseDrag (const juce::MouseEvent& e) override
     {
-        // One drag per press. The drag itself runs on after startExternalDrag returns, and the mouse
-        // keeps moving: without this the clip was rendered and written again on every movement.
-        if (dragging || dragStarted || e.getDistanceFromDragStart() < 6 || e.mods.isPopupMenu())
+        // (one drag per press; a long clip is rendered and written by a background job first)
+        if (e.getDistanceFromDragStart() < 6 || e.mods.isPopupMenu())
             return;
-        dragging = true;
-        dragStarted = true;
-        repaint();
-        auto f = actions::makeDragFile (owner.getProcessor(), *clip);
-        DragHandle::startExternalDrag (*this, f);
-        dragging = false;
-        repaint();
+        dragOut.drag (owner.getProcessor(), *this, [this] { return actions::dragJobFor (owner.getProcessor(), *clip); });
     }
 
     void mouseUp (const juce::MouseEvent& e) override
     {
+        dragOut.released();
         if (! dragging && ! e.mods.isPopupMenu() && e.getNumberOfClicks() == 1 && e.getDistanceFromDragStart() < 4)
         {
             auto& proc = owner.getProcessor();
@@ -189,7 +184,8 @@ public:
 
 private:
     WaveThumb thumb;
-    bool dragging = false, dragStarted = false;
+    bool dragging = false;
+    DragOut dragOut;
 };
 
 //==============================================================================

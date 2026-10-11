@@ -69,6 +69,8 @@ void SnaggerProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     {
         v.active = false;
         v.state = nullptr;
+        v.tailState = nullptr;
+        v.tailLevel = 0.0f;
     }
     pRunning = false;
     fxChain.prepare (currentSampleRate);
@@ -220,6 +222,16 @@ void SnaggerProcessor::noteOn (int note, float velocity, SamplerState::Ptr state
             if (cand.age < v->age) v = &cand;
     }
 
+    // Taking over a voice that is still sounding: what it was playing fades out quickly under the
+    // new note. (If an earlier fade is still going on this voice, the newer sound takes its place.)
+    if (v->active && v->state != nullptr && v->pv.isActive())
+    {
+        v->tailState = v->state;
+        v->tail = v->pv;
+        v->tailLevel = 1.0f;
+        v->tailStep = (float) (1.0 / juce::jmax (1.0, currentSampleRate * 0.004));
+    }
+
     v->state = state;
     v->active = true;
     v->note = note;
@@ -250,6 +262,25 @@ void SnaggerProcessor::renderVoices (juce::AudioBuffer<float>& out, int startSam
     float* R = out.getWritePointer (1);
     for (auto& v : voices)
     {
+        // the fading end of what this voice played before it was taken over
+        if (v.tailLevel > 0.0f && v.tailState != nullptr)
+        {
+            for (int i = 0; i < num; ++i)
+            {
+                float l = 0, r = 0;
+                if (v.tailLevel <= 0.0f || ! v.tail.next (l, r))
+                {
+                    v.tailLevel = 0.0f;
+                    break;
+                }
+                L[startSample + i] += l * master * v.tailLevel;
+                R[startSample + i] += r * master * v.tailLevel;
+                v.tailLevel -= v.tailStep;
+            }
+            if (v.tailLevel <= 0.0f)
+                v.tailState = nullptr;   // (kept alive by the release pool, like `state` below)
+        }
+
         if (! v.active || v.state == nullptr)
             continue;
         for (int i = 0; i < num; ++i)

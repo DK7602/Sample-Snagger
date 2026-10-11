@@ -109,7 +109,7 @@ static LoadResult convertWithFfmpeg (const juce::File& file, const juce::File& f
         return r;
     }
 
-    auto tmp = uniqueFile (paths::tempDir(), "convert_" + juce::String::toHexString (juce::Random::getSystemRandom().nextInt64()));
+    auto tmp = uniqueFile (paths::tempDir(), "convert_" + paths::uniqueTag());
 
     juce::StringArray args { ffmpeg.getFullPathName(), "-hide_banner", "-nostdin", "-y",
                              "-i", file.getFullPathName(),
@@ -249,7 +249,7 @@ juce::File writeDragFile (const AudioData& audio, const juce::String& name, int 
     // Nothing in this folder is ever removed for the user: a DAW project that had a sound dropped
     // into it usually keeps reading it from right here.
     auto dir = paths::dragExportDir();
-    auto tmp = dir.getChildFile ("drag-" + juce::String::toHexString (juce::Random::getSystemRandom().nextInt64()) + ".tmp");
+    auto tmp = dir.getChildFile ("drag-" + paths::uniqueTag() + ".tmp");
     if (! writeWav (audio, tmp, bitDepth, startSample, numSamples))
     {
         tmp.deleteFile();

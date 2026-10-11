@@ -4,7 +4,10 @@
 #include <juce_data_structures/juce_data_structures.h>
 #include <juce_events/juce_events.h>
 #include <atomic>
+#include <functional>
+#include <map>
 #include <utility>
+#include <vector>
 
 namespace snag
 {
@@ -61,11 +64,23 @@ public:
     /** How many clips couldn't be written to the cache since the last call (a full disk, mostly). */
     int takeFailedWriteCount() noexcept  { return failedWrites.exchange (0); }
 
+    /** The undo history is kept within a memory budget: per sample, and for the whole tray (where
+        the samples edited longest ago give theirs up first). Called from clipChanged(). */
+    void setUndoBudget (juce::int64 bytesPerClip, juce::int64 bytesInAll) noexcept   { undoBudgetPerClip = bytesPerClip; undoBudgetTotal = bytesInAll; }
+    /** How many undo steps were let go for that since the last call. */
+    int takeUndoStepsDropped() noexcept  { return std::exchange (undoStepsDropped, 0); }
+
+    /** The session folders this instance works in or was restored from (for the clean-up). */
+    juce::StringArray getFoldersInUse() const;
+
 private:
     void persist (Clip::Ptr clip);
+    void noteFolderUsed (const juce::File& folder) const;
+    void removeWhatNoProjectKnows();
     juce::File freshCacheFile (const Clip&, const juce::String& tag) const;
     bool mayDelete (const juce::File&, const juce::File& ownFolder) const;
     void retire (const juce::File&);
+    void trimUndoHistory (Clip* edited);
     void queueWrite (AudioData::Ptr, const juce::File& file, const juce::File& replaces);
 
     juce::ReferenceCountedArray<Clip> clips;
@@ -74,6 +89,8 @@ private:
     juce::File dir;
     bool adoptRestoredFolder = false;
     int missingClips = 0;
+    juce::int64 undoBudgetPerClip = (juce::int64) 512 * 1024 * 1024, undoBudgetTotal = (juce::int64) 1536 * 1024 * 1024;
+    int undoStepsDropped = 0;
     std::atomic<int> failedWrites { 0 };
 
     // Plug-in instances: files that a saved state (DAW project) may point at. They are never
@@ -81,7 +98,47 @@ private:
     mutable juce::CriticalSection savedLock;
     mutable juce::StringArray savedFiles;
 
+    // Session folders this instance uses, and when each was last marked as used (for the clean-up).
+    mutable juce::StringArray foldersUsed;
+    mutable std::map<juce::String, juce::int64> folderMarkedAt;
+
     juce::ThreadPool writer { juce::ThreadPoolOptions{}.withThreadName ("Snagger cache").withNumberOfThreads (1) };
 };
+
+//==============================================================================
+/** Looking after the Sessions folder, where every tray's samples are kept so that projects reopen
+    with them. Nothing in here can know which DAW projects exist, so "unused" goes by time: a
+    folder is marked whenever a project that uses it is opened or saved. */
+namespace sessioncache
+{
+    struct Folder
+    {
+        juce::File dir;
+        juce::int64 bytes = 0;
+        juce::Time lastUsed;
+        bool inUse = false;      // by a Sample Snagger that is open right now, in this program
+    };
+
+    /** Every session folder, with its size and when it was last used. Slow on a big folder: call
+        it from a background thread. (`root`: the Sessions folder, unless a test says otherwise.) */
+    std::vector<Folder> scan (const std::function<bool()>& shouldStop = {}, const juce::File& root = {});
+
+    /** May this folder go, when everything not used since `cutoff` is to be removed? */
+    bool removable (const Folder&, juce::Time cutoff);
+
+    /** Removes the folders that aren't in use and weren't used since `cutoff`. Returns the bytes freed. */
+    juce::int64 removeUnusedSince (juce::Time cutoff, int* foldersRemoved = nullptr,
+                                   const std::function<bool()>& shouldStop = {}, const juce::File& root = {});
+
+    /** Folders from before "last used" was kept count as used from this moment on (the first time
+        this version ran): how old they really are says nothing about the projects that need them. */
+    juce::Time trackedSince();
+
+    /** Marks a session folder as used now. */
+    void markUsed (const juce::File& sessionFolder);
+
+    /** "1.3 GB", "240 MB", "12 KB" */
+    juce::String sizeText (juce::int64 bytes);
+}
 
 } // namespace snag

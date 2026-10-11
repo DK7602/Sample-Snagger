@@ -50,7 +50,8 @@ Every capture lands in the **Session tray** at the bottom. Tray clips are saved 
   (Esc cancels).
 - **Chop:** pick how many chops (2, 3, 4 ... 32) and AUTO CHOP cuts exactly that many at the strongest hits, or EQUAL
   cuts them evenly. "Every hit" puts a chop on each hit instead, with SENSITIVITY deciding how many. With a selection,
-  only the selection is chopped. Alt-click adds a marker by hand.
+  only the selection is chopped. Markers land where each hit starts. Alt-click adds a marker by hand, and markers can
+  be dragged: one that comes close to a hit is drawn to its start (hold Cmd / Ctrl to place it freely).
 - **MIDI pads:** chop 1 plays on C3, chop 2 on C#3, and so on. Play them from your MIDI keyboard or the on-screen pads.
   One-shot or gated. **KEYS mode** plays the sample chromatically instead.
 - **Drag to DAW:** drag the selection, the whole sample, or *any single pad* onto a track.
@@ -59,6 +60,11 @@ Every capture lands in the **Session tray** at the bottom. Tray clips are saved 
   open a sample (tuning-aware, so slightly-off vinyl rips still work). Click it to pick from the likeliest keys or
   set it yourself. **TO KEY** in PITCH & TIME shifts the sample into any key, and the PITCH knob shows the key it
   lands on.
+- **All chops at once:** **DRAG ALL CHOPS** takes every chop into your DAW in one go, each as a file of its own with
+  its pad sound - onto a drum rack, a sampler or a row of tracks. SAVE offers the same into your library once a
+  sample has chops. (A long sample is rendered in the background first: keep the mouse button held and the drag
+  starts when it's ready.)
+- **Tempo:** click the BPM to double or halve it (detectors can't always tell 70 from 140) or to type it in.
 
 The tool area has four tabs:
 
@@ -115,6 +121,8 @@ Grab the installer for your system from the **Releases** page (built automatical
   *System Settings -> Privacy & Security* and click **Open Anyway**.)
   If a DAW refuses to load the plug-in, run once in Terminal:
   `sudo xattr -dr com.apple.quarantine "/Library/Audio/Plug-Ins/Components/Sample Snagger.component" "/Library/Audio/Plug-Ins/VST3/Sample Snagger.vst3" "/Applications/Sample Snagger.app"`
+  (The build can sign and notarise itself once an Apple developer certificate is set up -
+  [packaging/mac/SIGNING.md](packaging/mac/SIGNING.md) - and then none of this is needed.)
 - **Windows:** `Sample-Snagger-x.y.z-Windows-Setup.exe` - installs the VST3 into `C:\Program Files\Common Files\VST3`
   and the standalone app. (SmartScreen may warn about an unknown publisher -> *More info* -> *Run anyway*.)
 - **Linux:** unpack the `.tar.gz`, and in the folder it makes run `./install.sh`.
@@ -137,12 +145,19 @@ releases, FFmpeg from the [ffmpeg-static](https://github.com/eugeneware/ffmpeg-s
 from Hugging Face. Everything goes into Sample Snagger's own folder - nothing else on your system is touched. LIVE REC, hindsight grabs,
 Quick Split and everything in STUDIO work with no tools at all.
 
+Every download is checked before it is used: FFmpeg and the AI models against checksums built into Sample Snagger
+(one fixed version of each), yt-dlp and Deno - always the newest release - against the checksums their projects
+publish with it. A download that doesn't match is thrown away and whatever was installed before stays.
+
 ---
 
 ## Tips
 - **YouTube asks you to sign in / age-restricted videos:** Settings -> *Use cookies from* -> pick the browser
   you're logged into. Or just use LIVE REC / hindsight.
 - **HQ SNAG fails on YouTube after a while:** click **UPDATE** next to yt-dlp - sites change often and yt-dlp keeps up.
+- **A player embedded from another site (a YouTube video inside a blog post):** on Windows 11 LIVE REC hears it like
+  everything else. On macOS, Linux and Windows 10 it can't: open the video's own page (its title or logo usually links
+  there) and record it there. Players that a site embeds from itself are heard everywhere.
 - **Record system audio from other apps (Spotify, a game...):** use the standalone app, choose a loopback
   input in Audio Settings (BlackHole on Mac, "Stereo Mix" or VB-Cable on Windows) and press REC INPUT.
 - **Recording inside a DAW:** enable Sample Snagger's side-chain / audio input in your DAW and route a track into it,
@@ -164,8 +179,11 @@ never cleans it up. Remove files there yourself once no project uses them (or le
 **Tray clips** are cached as WAVs in `Sessions`, on this computer - they are not inside the DAW project file, so a
 project opened on another computer comes up without them (Sample Snagger says so). The audio a saved project points
 at is never changed or deleted behind its back: a copy of the project, or closing without saving, can't damage it.
-That also means old versions add up over time. Delete a folder in `Sessions` only when you no longer need the projects
-that used it.
+A plug-in that is closed without its project ever being saved takes its samples with it, so nothing is left behind
+for those. What saved projects need does add up over time: **Settings > TRAY SAMPLES** shows how much there is, and
+**CLEAN UP** removes the samples of projects you haven't opened for a month, three months, six months or a year
+(anything a plug-in is using right now is never touched). A project opened after its samples were cleaned up comes
+up with an emptier tray - samples you saved to the library or dragged into the DAW are separate files and stay.
 
 ## Sampling responsibly
 Sample Snagger captures audio you can already hear or have on disk. Clear any samples you use in released music,

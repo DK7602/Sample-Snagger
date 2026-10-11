@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <future>
 #include <mutex>
@@ -136,6 +137,8 @@ struct ProcessAudioCapture::Impl
 {
     std::thread thread;
     std::atomic<bool> running { false }, stopRequested { false };
+    std::future<bool> starting;          // what the capture thread reports once the audio is open (or not)
+    bool startFailed = false;
     mutable std::mutex errorLock;
     juce::String error;
 
@@ -329,40 +332,64 @@ bool ProcessAudioCapture::isSupported()
     return SNAGGER_PROCESS_LOOPBACK != 0;
 }
 
-bool ProcessAudioCapture::start (juce::uint32 processId, Callback callback)
+bool ProcessAudioCapture::begin (juce::uint32 processId, Callback callback)
 {
     stop();
    #if SNAGGER_PROCESS_LOOPBACK
     if (processId == 0 || ! callback)
     {
         impl->setError ("No browser process to record");
+        impl->startFailed = true;
         return false;
     }
     impl->stopRequested = false;
     auto started = std::make_shared<std::promise<bool>>();
-    auto result = started->get_future();
+    impl->starting = started->get_future();
     impl->thread = std::thread ([this, processId, cb = std::move (callback), started]() mutable
     {
         impl->run ((DWORD) processId, std::move (cb), started);
     });
-
-    if (result.wait_for (std::chrono::seconds (8)) != std::future_status::ready)
-    {
-        impl->setError ("Timed out opening the browser's audio");
-        stop();
-        return false;
-    }
-    if (! result.get())
-    {
-        stop();
-        return false;
-    }
     return true;
    #else
     juce::ignoreUnused (processId, callback);
     impl->setError ("Only available on Windows");
+    impl->startFailed = true;
     return false;
    #endif
+}
+
+ProcessAudioCapture::State ProcessAudioCapture::getState() const
+{
+    if (impl->starting.valid())
+    {
+        if (impl->starting.wait_for (std::chrono::seconds (0)) != std::future_status::ready)
+            return State::starting;
+        impl->startFailed = ! impl->starting.get();   // (the answer is taken once)
+    }
+    if (impl->running.load())
+        return State::running;
+    return impl->startFailed ? State::failed : State::stopped;
+}
+
+bool ProcessAudioCapture::start (juce::uint32 processId, Callback callback)
+{
+    if (! begin (processId, std::move (callback)))
+        return false;
+
+    for (int i = 0; i < 800 && getState() == State::starting; ++i)
+        juce::Thread::sleep (10);
+
+    if (getState() == State::starting)
+        impl->setError ("Timed out opening the browser's audio");
+    if (getState() != State::running)
+    {
+        const auto why = getLastError();
+        stop();
+        impl->setError (why);
+        impl->startFailed = true;
+        return false;
+    }
+    return true;
 }
 
 void ProcessAudioCapture::stop()
@@ -371,6 +398,8 @@ void ProcessAudioCapture::stop()
     if (impl->thread.joinable())
         impl->thread.join();
     impl->running = false;
+    impl->starting = {};
+    impl->startFailed = false;
 }
 
 bool ProcessAudioCapture::isRunning() const   { return impl->running.load(); }
