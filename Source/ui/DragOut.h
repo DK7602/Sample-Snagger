@@ -36,7 +36,7 @@ public:
     static bool isQuick (const actions::DragJob& j) noexcept   { return j.samples <= 60 * 48000; }
 
 private:
-    struct Prepared { bool ready = false; juce::File file; };
+    struct Prepared { bool ready = false; juce::StringArray files; };
     enum class State { idle, preparing, done };
     struct Shared
     {
@@ -45,8 +45,8 @@ private:
         std::shared_ptr<Prepared> waitingFor;
         // the last file a job made
         juce::String lastKey;
-        juce::File lastFile;
-        std::function<AudioData::Ptr()> keepsAudioAlive;   // (so the key's addresses can't come to mean other audio)
+        juce::StringArray lastFiles;
+        actions::DragJob keepsAudioAlive;   // (so the key's addresses can't come to mean other audio)
     };
     std::shared_ptr<Shared> shared;   // (the job's callback can outlive the component this belongs to)
 };

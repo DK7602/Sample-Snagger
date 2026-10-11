@@ -404,6 +404,15 @@ bool DragHandle::startExternalDrag (juce::Component& source, const juce::File& f
     return juce::DragAndDropContainer::performExternalDragDropOfFiles ({ file.getFullPathName() }, false, &source);
 }
 
+bool DragHandle::startExternalDrag (juce::Component& source, const juce::StringArray& files)
+{
+    juce::StringArray there;
+    for (auto& f : files)
+        if (juce::File (f).existsAsFile())
+            there.add (f);
+    return ! there.isEmpty() && juce::DragAndDropContainer::performExternalDragDropOfFiles (there, false, &source);
+}
+
 void DragHandle::mouseDrag (const juce::MouseEvent& e)
 {
     if (onDragging)

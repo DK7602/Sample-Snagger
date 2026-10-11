@@ -794,9 +794,96 @@ DragJob dragJobForMix (SnaggerProcessor& p, const juce::String& name, const std:
 
 juce::File makeDragFile (const DragJob& j)
 {
-    auto a = j.isValid() ? j.render() : nullptr;
+    auto a = j.render ? j.render() : nullptr;
     if (a == nullptr) return {};
     return audioio::writeDragFile (*a, j.name, j.bitDepth, 0, a->getNumSamples());
+}
+
+juce::StringArray makeDragFiles (const DragJob& j)
+{
+    juce::StringArray files;
+    if (j.parts.empty())
+    {
+        const auto f = makeDragFile (j);
+        if (f.existsAsFile())
+            files.add (f.getFullPathName());
+        return files;
+    }
+    for (auto& part : j.parts)
+    {
+        const auto f = makeDragFile (part);
+        if (f.existsAsFile())
+            files.add (f.getFullPathName());
+    }
+    return files;
+}
+
+/** "chop 03" of 12, "chop 3" of 8: numbered so the files sort the way the pads are laid out. */
+static juce::String chopNumber (int index, int count)
+{
+    return juce::String (index + 1).paddedLeft ('0', count >= 10 ? 2 : 1);
+}
+
+DragJob dragJobForAllChops (SnaggerProcessor& p, const Clip& clip)
+{
+    DragJob all;
+    if (clip.audio == nullptr)
+        return all;
+    const int count = (int) clip.sliceBoundaries().size() - 1;
+    if (count < 2)
+        return all;
+    all.name = clip.name + " - chops";
+    all.bitDepth = p.getSettings().getExportBitDepth();
+    all.key = "chops";
+    for (int i = 0; i < count; ++i)
+    {
+        auto part = dragJobForPad (p, clip, i);
+        if (! part.isValid())
+            continue;
+        part.name = clip.name + " - chop " + chopNumber (i, count);
+        all.samples += part.samples;
+        all.key << "|" << part.key;
+        all.parts.push_back (std::move (part));
+    }
+    return all;
+}
+
+void saveChopsToLibrary (SnaggerProcessor& p, const Clip& clip)
+{
+    const auto job = dragJobForAllChops (p, clip);
+    if (! job.isValid())
+    {
+        notify (p, "There are no chops yet - AUTO CHOP or EQUAL makes them.", true);
+        return;
+    }
+    const auto dir = p.getSettings().getLibraryDir();
+    auto saved = std::make_shared<int> (0);
+    auto* processor = &p;
+    p.jobs.start ("Saving chops", [job, dir, saved] (Job& j)
+    {
+        const int count = (int) job.parts.size();
+        for (int i = 0; i < count && ! j.isCancelled(); ++i)
+        {
+            j.setStatus ("Chop " + juce::String (i + 1) + " of " + juce::String (count));
+            j.setProgress ((float) i / (float) count);
+            auto a = job.parts[(size_t) i].render();
+            if (a == nullptr)
+                continue;
+            const auto f = audioio::uniqueFile (dir, job.parts[(size_t) i].name);
+            if (audioio::writeWav (*a, f, job.bitDepth, 0, a->getNumSamples()))
+                ++*saved;
+        }
+    },
+    [processor, saved, dir, job] (Job& j)
+    {
+        if (j.isCancelled())
+            return;
+        if (*saved == (int) job.parts.size())
+            notify (*processor, "Saved " + juce::String (*saved) + " chops to your library");
+        else
+            notify (*processor, "Only " + juce::String (*saved) + " of " + juce::String ((int) job.parts.size())
+                                    + " chops could be saved to " + dir.getFullPathName(), true);
+    });
 }
 
 AudioData::Ptr renderForExport (SnaggerProcessor& p, const Clip& clip, int start, int end)

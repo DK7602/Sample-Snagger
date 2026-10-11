@@ -55,6 +55,18 @@ namespace snag::edit
 
     float peakLevel (const AudioData&, int start = 0, int end = -1);
 
-    /** Moves a position to the nearest zero crossing within +-maxDistance samples. */
-    int snapToZeroCrossing (const AudioData&, int pos, int maxDistance);
+    /** Moves a position to the nearest zero crossing within +-maxDistance samples.
+        With `maxForward` (>= 0) it may go that far forward and `maxDistance` back: a chop marker
+        that sits just before a hit must not be moved into the hit. */
+    int snapToZeroCrossing (const AudioData&, int pos, int maxDistance, int maxForward = -1);
+
+    /** A hit is known to start somewhere around `roughly` (the middle of the analysis frame that
+        caught it): finds where it really starts - the moment the sound begins to rise - and
+        returns a position just before that. A soft start with no clear rise gives back a
+        position a few milliseconds before `roughly`, as a safe guess. */
+    int refineOnset (const AudioData&, int roughly);
+
+    /** For a chop marker being placed by hand: the start of a hit within `reach` samples of
+        `pos`, or -1 if there is no clear one. */
+    int snapToHit (const AudioData&, int pos, int reach);
 }

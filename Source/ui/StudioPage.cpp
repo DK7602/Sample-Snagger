@@ -184,9 +184,9 @@ StudioPage::StudioPage (EditorContext& c)
     infoLabel.setColour (juce::Label::textColourId, col::textDim);
     addAndMakeVisible (infoLabel);
 
-    bpmLabel.setFont (ui (12.0f, true));
-    bpmLabel.setColour (juce::Label::textColourId, col::goldPale);
-    bpmLabel.setJustificationType (juce::Justification::centredRight);
+    setStyle (bpmLabel, "chip");
+    bpmLabel.setTooltip ("The sample's tempo. Click to double or halve it (a detector can't always tell 70 from 140), or to type it in.");
+    bpmLabel.onClick = [this] { showTempoMenu(); };
     addAndMakeVisible (bpmLabel);
 
     setStyle (detectBpmBtn, "chip");
@@ -255,13 +255,20 @@ StudioPage::StudioPage (EditorContext& c)
     addAndMakeVisible (zoomOutBtn);
     addAndMakeVisible (fitBtn);
 
-    saveBtn.setTooltip ("Save the selection (or whole sample) as a WAV in your Sample Snagger library");
+    saveBtn.setTooltip ("Save the selection (or whole sample) as a WAV in your Sample Snagger library - or, once there are chops, every chop as a file of its own");
     saveBtn.onClick = [this]
     {
         if (clip == nullptr) return;
-        actions::saveToLibrary (proc, *clip, selStartOrZero(), selEndOrAll(), wave.hasSelection() ? " (cut)" : "");
+        if ((int) clip->sliceBoundaries().size() - 1 >= 2)
+            showSaveMenu();   // (with chops there is more than one thing "save" can mean)
+        else
+            actions::saveToLibrary (proc, *clip, selStartOrZero(), selEndOrAll(), wave.hasSelection() ? " (cut)" : "");
     };
     addAndMakeVisible (saveBtn);
+
+    chopsDrag.setTooltip ("Drag every chop into your DAW at once, each as a file of its own (with its pad sound and the FX) - onto a drum rack, a sampler or a row of tracks");
+    allChopsDrag.attachTo (chopsDrag, proc, [this] { return clip != nullptr ? actions::dragJobForAllChops (proc, *clip) : actions::DragJob(); });
+    addChildComponent (chopsDrag);
 
     dragHandle.makeFile = [this]
     {
@@ -635,6 +642,77 @@ void StudioPage::detectKey (bool quiet)
     });
 }
 
+void StudioPage::showSaveMenu()
+{
+    if (clip == nullptr) return;
+    const int chops = (int) clip->sliceBoundaries().size() - 1;
+    juce::PopupMenu m;
+    m.addItem (1, wave.hasSelection() ? "Save the selection" : "Save the whole sample");
+    if (wave.hasSelection())
+        m.addItem (2, "Save the whole sample");
+    m.addSeparator();
+    m.addItem (3, "Save all " + juce::String (chops) + " chops, each as a file of its own");
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (saveBtn),
+                     [safe = juce::Component::SafePointer<StudioPage> (this), c = clip] (int r)
+    {
+        if (safe == nullptr || r == 0 || safe->clip != c) return;
+        if (r == 1)      actions::saveToLibrary (safe->proc, *c, safe->selStartOrZero(), safe->selEndOrAll(), safe->wave.hasSelection() ? " (cut)" : "");
+        else if (r == 2) actions::saveToLibrary (safe->proc, *c);
+        else if (r == 3) actions::saveChopsToLibrary (safe->proc, *c);
+    });
+}
+
+/** `bpm` is the tempo as it is heard now, knobs and all; the sample remembers its original's. */
+void StudioPage::setHeardTempo (double bpm)
+{
+    if (clip == nullptr || ! (bpm >= 20.0 && bpm <= 999.0))
+        return;
+    const auto& k = clip->adjust;
+    const double factor = clip->adjustBase == nullptr ? 1.0
+                        : k.tape ? std::pow (2.0, k.semitones / 12.0) : 1.0 / juce::jmax (0.01, k.length);
+    clip->bpm = bpm / factor;
+    proc.session.clipChanged (clip.get(), false);
+    syncSampler();
+    refreshInfo();
+}
+
+void StudioPage::showTempoMenu()
+{
+    if (clip == nullptr) return;
+    const double now = clip->bpmWith (clip->adjust);
+    juce::PopupMenu m;
+    m.addSectionHeader (now > 0 ? "Tempo: " + juce::String (now, 1) + " BPM" : juce::String ("Tempo not known yet"));
+    m.addItem (1, "Double it  (" + juce::String (now * 2.0, 1) + " BPM)", now > 0 && now * 2.0 <= 999.0);
+    m.addItem (2, "Halve it  (" + juce::String (now * 0.5, 1) + " BPM)", now > 0 && now * 0.5 >= 20.0);
+    m.addItem (3, "Type it in...");
+    m.addSeparator();
+    m.addItem (4, now > 0 ? "Measure it again" : "Measure it");
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (bpmLabel),
+                     [safe = juce::Component::SafePointer<StudioPage> (this), c = clip, now] (int r)
+    {
+        if (safe == nullptr || r == 0 || safe->clip != c) return;
+        if (r == 1)      safe->setHeardTempo (now * 2.0);
+        else if (r == 2) safe->setHeardTempo (now * 0.5);
+        else if (r == 4) safe->detectBpm();
+        else if (r == 3)
+        {
+            auto* w = new juce::AlertWindow ("Tempo", "The tempo of this sample as you hear it now, in BPM:", juce::MessageBoxIconType::NoIcon);
+            w->addTextEditor ("bpm", now > 0 ? juce::String (now, 1) : juce::String());
+            w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+            w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+            w->enterModalState (true, juce::ModalCallbackFunction::create ([w, c, safe] (int res)
+            {
+                if (res != 1 || safe == nullptr || safe->clip != c) return;
+                const double typed = w->getTextEditorContents ("bpm").replaceCharacter (',', '.').retainCharacters ("0123456789.").getDoubleValue();
+                if (typed >= 20.0 && typed <= 999.0)
+                    safe->setHeardTempo (typed);
+                else
+                    safe->ctx.toast ("A tempo is between 20 and 999 BPM.", true);
+            }), true);
+        }
+    });
+}
+
 void StudioPage::showKeyMenu()
 {
     if (clip == nullptr) return;
@@ -742,7 +820,7 @@ void StudioPage::setClip (Clip::Ptr c)
     const bool has = clip != nullptr;
     for (auto* b : editButtons) b->setEnabled (has);
     for (auto* comp : std::initializer_list<juce::Component*> { &pitchDefaultBtn, &matchBpmBtn, &toneDefaultBtn, &autoChopBtn,
-                                                                &equalBtn, &clearChopsBtn, &playBtn, &stopBtn, &saveBtn, &detectBpmBtn, &dragHandle, &keyBtn })
+                                                                &equalBtn, &clearChopsBtn, &playBtn, &stopBtn, &saveBtn, &detectBpmBtn, &dragHandle, &keyBtn, &bpmLabel })
         comp->setEnabled (has);
     dragHandle.setAlpha (has ? 1.0f : 0.4f);
 }
@@ -762,7 +840,8 @@ void StudioPage::refreshInfo()
     {
         nameLabel.setText ("Studio", juce::dontSendNotification);
         infoLabel.setText ("Nothing loaded yet", juce::dontSendNotification);
-        bpmLabel.setText ({}, juce::dontSendNotification);
+        bpmLabel.setButtonText ({});
+        chopsDrag.setVisible (false);
         selLabel.setText ({}, juce::dontSendNotification);
         undoBtn.setEnabled (false);
         redoBtn.setEnabled (false);
@@ -779,7 +858,11 @@ void StudioPage::refreshInfo()
         info << "   " << (int) clip->sliceBoundaries().size() - 1 << " CHOPS";
     infoLabel.setText (info, juce::dontSendNotification);
     const double shownBpm = clip->bpmWith (clip->adjust);   // where the knobs are taking it
-    bpmLabel.setText (shownBpm > 0 ? juce::String (shownBpm, 1) + " BPM" : "BPM  -", juce::dontSendNotification);
+    bpmLabel.setButtonText (shownBpm > 0 ? juce::String (shownBpm, 1) + " BPM" : "BPM  -");
+
+    const int chops = (int) clip->sliceBoundaries().size() - 1;
+    chopsDrag.setVisible (chops >= 2);
+    chopsDrag.setCaption ("DRAG ALL " + juce::String (chops) + " CHOPS");
 
     const double sr = a.sampleRate;
     if (wave.hasSelection())
@@ -1485,7 +1568,7 @@ void StudioPage::resized()
     head.removeFromRight (10);
     detectBpmBtn.setBounds (head.removeFromRight (70).reduced (0, 6));
     head.removeFromRight (6);
-    bpmLabel.setBounds (head.removeFromRight (84));
+    bpmLabel.setBounds (head.removeFromRight (92).reduced (0, 6));
     head.removeFromRight (8);
     keyBtn.setBounds (head.removeFromRight (122).reduced (0, 6));
     head.removeFromRight (6);
@@ -1533,7 +1616,8 @@ void StudioPage::resized()
             b->setBounds (t.removeFromLeft (120));
             t.removeFromLeft (6);
         }
-        deckHint.setBounds (t.withTrimmedRight (6));
+        chopsDrag.setBounds (t.removeFromRight (196).reduced (0, 1));
+        deckHint.setBounds (t.withTrimmedRight (10));
     }
 
     // tool panels

@@ -148,7 +148,11 @@ private:
     Clip::Ptr clip;
 
     // header row
-    juce::Label nameLabel, infoLabel, bpmLabel;
+    juce::Label nameLabel, infoLabel;
+    juce::TextButton bpmLabel;   // the tempo: click for double / half / type it in
+    void showTempoMenu();
+    void setHeardTempo (double bpm);
+    void showSaveMenu();
     juce::TextButton keyBtn { "KEY  -" };
     juce::TextButton detectBpmBtn { "DETECT" };
     IconButton undoBtn { "undo", theme::icons::undo(), {}, "icon" };
@@ -168,6 +172,8 @@ private:
     IconButton saveBtn { "save", theme::icons::save(), "SAVE", "gold" };
     DragHandle dragHandle;
     DragOut sampleDrag;
+    DragHandle chopsDrag { "DRAG ALL CHOPS" };
+    DragOut allChopsDrag;
 
     SlicePads pads;
 

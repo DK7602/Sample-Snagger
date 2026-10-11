@@ -70,13 +70,19 @@ namespace snag::actions
         int bitDepth = 24;
         juce::int64 samples = 0;                  // how much there is to render and write
         juce::String key;                         // the same key gives the same file
-        bool isValid() const   { return render != nullptr; }
+        std::vector<DragJob> parts;               // instead of `render`: several files in one drag (all the chops)
+        bool isValid() const   { return render != nullptr || ! parts.empty(); }
     };
     DragJob dragJobFor (SnaggerProcessor&, const Clip& clip, int start = 0, int end = -1, const juce::String& suffix = {});
     DragJob dragJobForPad (SnaggerProcessor&, const Clip& clip, int padIndex);
     DragJob dragJobForMix (SnaggerProcessor&, const juce::String& name, const std::vector<AudioData::Ptr>& layers,
                            const std::vector<float>& gains);
     juce::File makeDragFile (const DragJob&);
+    juce::StringArray makeDragFiles (const DragJob&);   // (one, or one per part)
+
+    /** Every chop as a file of its own, with its pad sound and the FX rack: for one drag, or for the library. */
+    DragJob dragJobForAllChops (SnaggerProcessor&, const Clip& clip);
+    void saveChopsToLibrary (SnaggerProcessor&, const Clip& clip);
 
     /** The audio you'd hear for (a range of) a clip: with its FX rack, echoes / reverb ringing out. */
     AudioData::Ptr renderForExport (SnaggerProcessor&, const Clip& clip, int start, int end);

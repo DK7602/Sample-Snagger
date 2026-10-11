@@ -377,6 +377,7 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
         drag = Drag::marker;
         dragMarker = m;
         markerMoved = false;
+        markerOnHit = false;
         markerStartPos = clip->slices[(size_t) m];
         slicesBeforeDrag = clip->slices;
         dragClip = clip;
@@ -395,7 +396,7 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
     {
         clip->pushUndo ("Add marker");
         const auto before = clip->slices;
-        clip->slices.push_back (edit::snapToZeroCrossing (*clip->audio, s, 64));
+        clip->slices.push_back (markerSpotNear (s, e.mods.isCommandDown()));
         std::sort (clip->slices.begin(), clip->slices.end());
         clip->remapPads (before, [] (int pos) { return pos; });   // both halves keep the chop's pad sound
         repaint();
@@ -418,6 +419,25 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
     cursor = s;
     selStart = selEnd = s;
     repaint();
+}
+
+/** How far (in samples) a marker reaches for a hit: about 8 pixels at this zoom, 2 to 40 ms. */
+int WaveformView::hitReach() const
+{
+    if (clip == nullptr || clip->audio == nullptr)
+        return 0;
+    const double sr = clip->audio->sampleRate;
+    const double perPixel = viewLen / juce::jmax (1.0, (double) getWaveArea().getWidth());
+    return (int) juce::jlimit (sr * 0.002, sr * 0.040, perPixel * 8.0);
+}
+
+/** Where a marker put down at `s` goes: the start of a hit close by, else the nearest zero crossing. */
+int WaveformView::markerSpotNear (int s, bool exactly) const
+{
+    if (exactly || clip == nullptr || clip->audio == nullptr)
+        return s;
+    const int hit = edit::snapToHit (*clip->audio, s, hitReach());
+    return hit > 0 ? hit : edit::snapToZeroCrossing (*clip->audio, s, 64);
 }
 
 /** The sample changed under a marker that was being dragged: the marker stays where it got to (in
@@ -467,7 +487,10 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
         case Drag::marker:
             if (dragMarker >= 0 && dragMarker < (int) clip->slices.size())
             {
-                const int to = juce::jlimit (1, juce::jmax (1, n - 1), s);
+                // (a marker is drawn to the start of a hit that is near the mouse - Cmd / Ctrl lets it go)
+                const int hit = e.mods.isCommandDown() ? -1 : edit::snapToHit (*clip->audio, s, hitReach());
+                const int to = juce::jlimit (1, juce::jmax (1, n - 1), hit >= 0 ? hit : s);
+                markerOnHit = hit >= 0;
                 if (to != clip->slices[(size_t) dragMarker])
                 {
                     if (! markerMoved)
@@ -498,6 +521,10 @@ void WaveformView::mouseUp (const juce::MouseEvent& e)
     {
         if (markerMoved && dragMarker >= 0 && dragMarker < (int) clip->slices.size())
         {
+            // let go between hits: on a zero crossing at least, so the chop doesn't start with a click
+            if (! markerOnHit && ! e.mods.isCommandDown())
+                clip->slices[(size_t) dragMarker] = juce::jlimit (1, juce::jmax (1, numSamples() - 1),
+                                                                 edit::snapToZeroCrossing (*clip->audio, clip->slices[(size_t) dragMarker], 64));
             const int from = markerStartPos, to = clip->slices[(size_t) dragMarker];
             std::sort (clip->slices.begin(), clip->slices.end());
             clip->slices.erase (std::unique (clip->slices.begin(), clip->slices.end()), clip->slices.end());

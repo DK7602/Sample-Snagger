@@ -138,6 +138,7 @@ public:
 
     /** Starts an OS drag of a file; returns false if not possible. */
     static bool startExternalDrag (juce::Component& source, const juce::File& file);
+    static bool startExternalDrag (juce::Component& source, const juce::StringArray& files);
 
 private:
     juce::String caption;

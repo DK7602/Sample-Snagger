@@ -31,10 +31,10 @@ void DragOut::drag (SnaggerProcessor& p, juce::Component& source, const std::fun
     {
         if (s.waitingFor != nullptr && s.waitingFor->ready)
         {
-            const auto file = s.waitingFor->file;
+            const auto files = s.waitingFor->files;
             s.waitingFor = nullptr;
             s.state = State::done;
-            DragHandle::startExternalDrag (source, file);
+            DragHandle::startExternalDrag (source, files);
         }
         return;
     }
@@ -46,17 +46,25 @@ void DragOut::drag (SnaggerProcessor& p, juce::Component& source, const std::fun
         return;
     }
 
-    if (job.key == s.lastKey && s.lastFile.existsAsFile())
+    auto allThere = [] (const juce::StringArray& files)
+    {
+        for (auto& f : files)
+            if (! juce::File (f).existsAsFile())
+                return false;
+        return ! files.isEmpty();
+    };
+
+    if (job.key == s.lastKey && allThere (s.lastFiles))
     {
         s.state = State::done;
-        DragHandle::startExternalDrag (source, s.lastFile);
+        DragHandle::startExternalDrag (source, s.lastFiles);
         return;
     }
 
     if (isQuick (job))
     {
         s.state = State::done;
-        DragHandle::startExternalDrag (source, actions::makeDragFile (job));
+        DragHandle::startExternalDrag (source, actions::makeDragFiles (job));
         return;
     }
 
@@ -70,12 +78,12 @@ void DragOut::drag (SnaggerProcessor& p, juce::Component& source, const std::fun
     p.jobs.start ("Preparing the drag", [prepared, job] (Job& j)
     {
         j.setStatus ("Rendering " + job.name);
-        prepared->file = actions::makeDragFile (job);
+        prepared->files = actions::makeDragFiles (job);
     },
     [weak, prepared, job, processor] (Job& j)
     {
         auto state = weak.lock();
-        const bool made = ! j.isCancelled() && prepared->file.existsAsFile();
+        const bool made = ! j.isCancelled() && ! prepared->files.isEmpty();
         if (! made)
         {
             if (state != nullptr && state->waitingFor == prepared)
@@ -90,8 +98,8 @@ void DragOut::drag (SnaggerProcessor& p, juce::Component& source, const std::fun
         if (state == nullptr)
             return;
         state->lastKey = job.key;
-        state->lastFile = prepared->file;
-        state->keepsAudioAlive = job.render;
+        state->lastFiles = prepared->files;
+        state->keepsAudioAlive = job;
         prepared->ready = true;
         if (state->waitingFor != prepared)   // the button was let go in the meantime
             actions::notify (*processor, "The file is ready - drag again and it starts at once.");

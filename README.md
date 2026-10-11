@@ -50,11 +50,15 @@ Every capture lands in the **Session tray** at the bottom. Tray clips are saved 
   (Esc cancels).
 - **Chop:** pick how many chops (2, 3, 4 ... 32) and AUTO CHOP cuts exactly that many at the strongest hits, or EQUAL
   cuts them evenly. "Every hit" puts a chop on each hit instead, with SENSITIVITY deciding how many. With a selection,
-  only the selection is chopped. Alt-click adds a marker by hand.
+  only the selection is chopped. Markers land where each hit starts. Alt-click adds a marker by hand, and markers can
+  be dragged: one that comes close to a hit is drawn to its start (hold Cmd / Ctrl to place it freely).
 - **MIDI pads:** chop 1 plays on C3, chop 2 on C#3, and so on. Play them from your MIDI keyboard or the on-screen pads.
   One-shot or gated. **KEYS mode** plays the sample chromatically instead.
-- **Drag to DAW:** drag the selection, the whole sample, or *any single pad* onto a track.
-- **SAVE** writes a WAV into your sample library.
+- **Drag to DAW:** drag the selection, the whole sample, or *any single pad* onto a track - or **DRAG ALL CHOPS**:
+  every chop as a file of its own in one go, with its pad sound, onto a drum rack, a sampler or a row of tracks.
+  (A long sample is rendered in the background first; keep the mouse button held and the drag starts when it's ready.)
+- **SAVE** writes a WAV into your sample library; with chops it also offers all of them as separate files.
+- **Tempo:** click the BPM to double or halve it (detectors can't always tell 70 from 140) or to type it in.
 - **Key detection:** the key and its Camelot code (e.g. *Am 8A*) show next to the BPM, found by itself when you
   open a sample (tuning-aware, so slightly-off vinyl rips still work). Click it to pick from the likeliest keys or
   set it yourself. **TO KEY** in PITCH & TIME shifts the sample into any key, and the PITCH knob shows the key it

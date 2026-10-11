@@ -77,6 +77,9 @@ private:
     const AudioData* dragAudio = nullptr;   // another sample be selected, while the mouse is down
     bool markerDragStillValid() const       { return clip == dragClip && clip != nullptr && clip->audio.get() == dragAudio; }
     void dropMarkerDrag();
+    bool markerOnHit = false;               // the dragged marker sits on the start of a hit right now
+    int hitReach() const;
+    int markerSpotNear (int sample, bool exactly) const;
     float hoverX = -1.0f;
     int hoverMarker = -1;
 

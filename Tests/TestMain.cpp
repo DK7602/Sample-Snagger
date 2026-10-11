@@ -93,6 +93,67 @@ static AudioData::Ptr makeAccentClicks (double sr, double seconds, const std::ve
     return AudioData::make (std::move (b), sr);
 }
 
+/** Drum-like hits that start at known samples, for checking where chop markers land.
+    kind 0: a click (instant), 1: a kick (a falling sine with a 2 ms attack), 2: a snare (a noise
+    burst with a 1 ms attack). `bed` > 0 puts a held bass note under all of it. */
+static AudioData::Ptr makeHits (double sr, double seconds, const std::vector<int>& starts, int kind, float bed)
+{
+    const int n = (int) (sr * seconds);
+    juce::AudioBuffer<float> b (2, n);
+    b.clear();
+    juce::Random rnd (3);
+    const float twoPi = juce::MathConstants<float>::twoPi;
+    for (int i = 0; i < n; ++i)
+    {
+        const float v = bed * std::sin ((float) i * twoPi * 55.0f / (float) sr);
+        b.setSample (0, i, v);
+        b.setSample (1, i, v);
+    }
+    for (auto s0 : starts)
+    {
+        double phase = 0.0;
+        for (int i = 0; i < (int) (0.12 * sr) && s0 + i < n; ++i)
+        {
+            const float t = (float) i / (float) sr;
+            float v = 0.0f;
+            if (kind == 0)
+                v = std::exp (-t / 0.005f) * (std::sin (t * twoPi * 180.0f) + 0.5f * (rnd.nextFloat() * 2.0f - 1.0f));
+            else if (kind == 1)
+            {
+                phase += twoPi * (50.0 + 100.0 * std::exp (-t / 0.03)) / sr;
+                v = juce::jmin (1.0f, t / 0.002f) * std::exp (-t / 0.06f) * (float) std::sin (phase);
+            }
+            else
+                v = juce::jmin (1.0f, t / 0.001f) * std::exp (-t / 0.03f) * (rnd.nextFloat() * 2.0f - 1.0f);
+            b.addSample (0, s0 + i, 0.7f * v);
+            b.addSample (1, s0 + i, 0.7f * v);
+        }
+    }
+    return AudioData::make (std::move (b), sr);
+}
+
+/** How far the markers that AUTO CHOP finds are from where the hits start, in milliseconds
+    (negative = early). `missed` counts hits with no marker within 30 ms. */
+struct MarkerAim { double earliest = 0.0, latest = 0.0; int missed = 0; };
+static MarkerAim aimOf (const std::vector<int>& markers, const std::vector<int>& starts, double sr)
+{
+    MarkerAim aim;
+    bool any = false;
+    for (auto s0 : starts)
+    {
+        double best = 1.0e9;
+        for (auto m : markers)
+            if (std::abs ((double) (m - s0)) < std::abs (best))
+                best = (double) (m - s0);
+        const double ms = best * 1000.0 / sr;
+        if (std::abs (ms) > 30.0) { ++aim.missed; continue; }
+        aim.earliest = any ? juce::jmin (aim.earliest, ms) : ms;
+        aim.latest   = any ? juce::jmax (aim.latest, ms) : ms;
+        any = true;
+    }
+    return aim;
+}
+
 struct DemoMix
 {
     AudioData::Ptr mix, vocal, drums, bass, keys;
@@ -2134,6 +2195,24 @@ struct StudioPageTester
             settle();
         }
 
+        // ---- the tempo: double, half, typed in
+        {
+            auto c = addClip ("Tempo", makeSine (220.0, 2.0));
+            c->bpm = 70.0;
+            page.refreshInfo();
+            page.setHeardTempo (140.0);
+            CHECK (std::abs (c->bpm - 140.0) < 1.0e-9 && page.bpmLabel.getButtonText() == "140.0 BPM", "the tempo can be doubled when the detector heard half time (" + page.bpmLabel.getButtonText() + ")");
+            page.stretchKnob.onTyped (50.0);   // LENGTH 50%: it now plays at 280
+            settle();
+            page.setHeardTempo (300.0);        // "what I hear is 300"
+            CHECK (std::abs (c->bpm - 150.0) < 1.0e-6 && std::abs (c->heardBpm() - 300.0) < 0.01,
+                   "  ...a tempo typed in is the one you hear: with LENGTH at 50% the original is stored as half of it (" + juce::String (c->bpm, 1) + ")");
+            page.setHeardTempo (5.0);
+            CHECK (std::abs (c->bpm - 150.0) < 1.0e-6, "  ...and something that is no tempo is ignored");
+            page.pitchDefaultBtn.onClick();
+            settle();
+        }
+
         // ---- a name being typed when another sample takes over
         {
             auto first = addClip ("First", makeSine (440.0, 0.5));
@@ -2272,6 +2351,93 @@ static void testNetwork()
 }
 
 //==============================================================================
+/** Where chop markers land, and the tools around chops: placing by hand, all chops at once. */
+static void testChopWorkflow (const juce::File& tmp)
+{
+    std::cout << "\n[chops: where markers land, and all chops at once]\n";
+
+    // AUTO CHOP's markers against hits that start at known samples
+    double earliest = 0.0, latest = 0.0;
+    int missed = 0;
+    for (double sr : { 44100.0, 48000.0 })
+        for (int kind = 0; kind < 3; ++kind)
+            for (float bed : { 0.0f, 0.2f })
+            {
+                std::vector<int> starts;
+                for (int i = 0; i < 12; ++i)
+                    starts.push_back ((int) (sr * (0.4 + 0.37 * i)) + i * 37);
+                auto audio = makeHits (sr, 5.2, starts, kind, bed);
+                for (const auto& aim : { aimOf (edit::detectTransients (*audio, 0.55f), starts, sr), aimOf (edit::chopAtStrongestHits (*audio, 13), starts, sr) })
+                {
+                    earliest = juce::jmin (earliest, aim.earliest);
+                    latest = juce::jmax (latest, aim.latest);
+                    missed += aim.missed;
+                }
+            }
+    CHECK (missed == 0 && earliest >= -2.5 && latest <= 0.6,
+           "AUTO CHOP puts its markers where the hits start: " + juce::String (earliest, 1) + " to " + juce::String (latest, 1)
+               + " ms off, over clicks, kicks and snares, with and without a bass note under them (they were 3 to 13 ms early)");
+
+    // a marker placed by hand is drawn to a hit that is close, and only then
+    {
+        const double sr = 44100.0;
+        const std::vector<int> starts { 30000, 60000 };
+        auto audio = makeHits (sr, 2.0, starts, 2, 0.2f);
+        const int near = edit::snapToHit (*audio, 30000 + 400, 600), far = edit::snapToHit (*audio, 45000, 600);
+        CHECK (near > 30000 - 110 && near <= 30000 + 30 && far < 0,
+               "a marker dropped 9 ms from a hit goes to the hit's start (" + juce::String ((near - 30000) * 1000.0 / sr, 1) + " ms off); one between hits stays where it is put");
+        auto tone = makeSine (220.0, 1.0);
+        CHECK (edit::snapToHit (*tone, 20000, 800) < 0, "  ...and a steady sound has nothing to be drawn to");
+    }
+
+    // every chop as a file of its own
+    {
+        SnaggerProcessor p;
+        const auto libraryBefore = p.getSettings().getLibraryDir();
+        auto lib = tmp.getChildFile ("chop library");
+        lib.createDirectory();
+        p.getSettings().setLibraryDir (lib);
+
+        Clip::Ptr c (new Clip());
+        c->name = "Chop test " + paths::uniqueTag();
+        c->audio = makeClicks (44100.0, 6.0, 0.5);
+        p.session.add (c, true);
+        c->slices = edit::equalSlices (c->audio->getNumSamples(), 12);
+        PadParams reversed;
+        reversed.reverse = true;
+        c->setPad (2, reversed);
+
+        const auto job = actions::dragJobForAllChops (p, *c);
+        const auto files = actions::makeDragFiles (job);
+        bool named = files.size() == 12;
+        juce::int64 samples = 0;
+        for (int i = 0; i < files.size(); ++i)
+        {
+            const juce::File f (files[i]);
+            named = named && f.getFileNameWithoutExtension() == c->name + " - chop " + juce::String (i + 1).paddedLeft ('0', 2);
+            if (auto loaded = audioio::loadFile (f, {}).audio)
+                samples += loaded->getNumSamples();
+        }
+        CHECK (job.parts.size() == 12 && named && std::abs (samples - (juce::int64) c->audio->getNumSamples()) < 12 * 64,
+               "DRAG ALL CHOPS makes one file per chop, numbered so they sort like the pads (" + juce::String (files.size()) + " files)");
+        CHECK (actions::dragJobForAllChops (p, *c).key == job.key, "  ...and the same chops dragged again are the same files");
+        for (auto& f : files)
+            juce::File (f).deleteFile();
+
+        actions::saveChopsToLibrary (p, *c);
+        pump (200);
+        for (int i = 0; i < 400 && p.jobs.isBusy(); ++i) pump (50);
+        pump (200);
+        CHECK (lib.getNumberOfChildFiles (juce::File::findFiles, "*.wav") == 12, "SAVE > all chops writes them to the library ("
+                   + juce::String (lib.getNumberOfChildFiles (juce::File::findFiles, "*.wav")) + " files)");
+
+        Clip::Ptr whole (new Clip());
+        whole->audio = makeSine (220.0, 1.0);
+        CHECK (! actions::dragJobForAllChops (p, *whole).isValid(), "a sample with no chops has nothing to drag as chops");
+        p.getSettings().setLibraryDir (libraryBefore);
+    }
+}
+
 /** The undo history is kept within a memory budget. */
 static void testUndoMemory()
 {
@@ -3591,6 +3757,27 @@ int main (int argc, char** argv)
     std::cout << "Sample Snagger test runner\n";
 
     // --chop <file>: print where AUTO CHOP cuts a real sample at each count (for tuning)
+    // --onsets: print how far AUTO CHOP's markers land from where hits start (for tuning)
+    if (args.contains ("--onsets"))
+    {
+        for (double sr : { 44100.0, 48000.0 })
+            for (int kind = 0; kind < 3; ++kind)
+                for (float bed : { 0.0f, 0.2f })
+                {
+                    std::vector<int> starts;
+                    for (int i = 0; i < 12; ++i)
+                        starts.push_back ((int) (sr * (0.4 + 0.37 * i)) + i * 37);   // (off any grid of the analysis)
+                    auto audio = makeHits (sr, 5.2, starts, kind, bed);
+                    const auto every = aimOf (edit::detectTransients (*audio, 0.55f), starts, sr);
+                    const auto count = aimOf (edit::chopAtStrongestHits (*audio, 13), starts, sr);
+                    const char* names[] = { "click", "kick", "snare" };
+                    std::cout << names[kind] << (bed > 0 ? " over bass" : "          ") << " @" << (int) sr
+                              << "  every hit: " << juce::String (every.earliest, 1) << " .. " << juce::String (every.latest, 1) << " ms, missed " << every.missed
+                              << "   13 chops: " << juce::String (count.earliest, 1) << " .. " << juce::String (count.latest, 1) << " ms, missed " << count.missed << "\n";
+                }
+        return 0;
+    }
+
     const int chopIdx = args.indexOf ("--chop");
     if (chopIdx >= 0 && chopIdx + 1 < args.size())
     {
@@ -3646,6 +3833,7 @@ int main (int argc, char** argv)
     testDragOut();
     testCancelStopsEverything (tmp);
     testUndoMemory();
+    testChopWorkflow (tmp);
    #if SNAGGER_BUILTIN_AI
     testAiWindows();
    #endif
