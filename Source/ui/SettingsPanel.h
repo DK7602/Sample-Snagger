@@ -1,7 +1,10 @@
 #pragma once
 
 #include "Page.h"
+#include "../core/Session.h"
 #include "../core/Tools.h"
+#include <atomic>
+#include <memory>
 
 namespace snag
 {
@@ -47,6 +50,19 @@ private:
     juce::TextButton licencesBtn { "LICENCES" };
     void showLicences();
     std::unique_ptr<juce::FileChooser> chooser;
+
+    // the tray samples kept on disk for projects ("Sessions" folder): how much, and the clean-up
+    juce::Label cacheLabel;
+    juce::TextButton cacheBtn { "CLEAN UP" };
+    std::vector<sessioncache::Folder> cacheFolders;
+    bool cacheScanned = false;
+    int cacheScanSerial = 0;
+    std::shared_ptr<std::atomic<bool>> cacheStop = std::make_shared<std::atomic<bool>> (false);
+    void scanCache();
+    void showCleanUpMenu();
+    void cleanUp (int days);
+    juce::int64 removableAfter (int days) const;
+    juce::ThreadPool cacheWorker { juce::ThreadPoolOptions{}.withThreadName ("Snagger sessions").withNumberOfThreads (1) };
 };
 
 } // namespace snag

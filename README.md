@@ -164,8 +164,11 @@ never cleans it up. Remove files there yourself once no project uses them (or le
 **Tray clips** are cached as WAVs in `Sessions`, on this computer - they are not inside the DAW project file, so a
 project opened on another computer comes up without them (Sample Snagger says so). The audio a saved project points
 at is never changed or deleted behind its back: a copy of the project, or closing without saving, can't damage it.
-That also means old versions add up over time. Delete a folder in `Sessions` only when you no longer need the projects
-that used it.
+A plug-in that is closed without its project ever being saved takes its samples with it, so nothing is left behind
+for those. What saved projects need does add up over time: **Settings > TRAY SAMPLES** shows how much there is, and
+**CLEAN UP** removes the samples of projects you haven't opened for a month, three months, six months or a year
+(anything a plug-in is using right now is never touched). A project opened after its samples were cleaned up comes
+up with an emptier tray - samples you saved to the library or dragged into the DAW are separate files and stay.
 
 ## Sampling responsibly
 Sample Snagger captures audio you can already hear or have on disk. Clear any samples you use in released music,

@@ -2217,6 +2217,111 @@ static void testNetwork()
 }
 
 //==============================================================================
+/** The Sessions folder: what is left behind, what is kept, and the clean-up in Settings. */
+static void testSessionCleanUp (const juce::File& tmp)
+{
+    std::cout << "\n[tray samples on disk: clean-up]\n";
+    auto restoreInto = [] (SnaggerProcessor& p, const juce::MemoryBlock& state) { p.setStateInformation (state.getData(), (int) state.getSize()); };
+    auto addClip = [] (SnaggerProcessor& p, double hz)
+    {
+        Clip::Ptr c (new Clip());
+        c->name = "Kept";
+        c->audio = makeSine (hz, 0.5);
+        p.session.add (c, true);
+        return c;
+    };
+
+    // a plug-in that is closed without its project ever being saved leaves nothing behind
+    juce::File unsavedFolder;
+    {
+        SnaggerProcessor p;
+        addClip (p, 440.0);
+        p.session.flushWrites();
+        unsavedFolder = p.session.getSessionDir();
+        CHECK (unsavedFolder.getNumberOfChildFiles (juce::File::findFiles, "*.wav") == 1, "a clip is on disk while the plug-in is open");
+    }
+    CHECK (! unsavedFolder.exists(), "closed without the project being saved: its samples go too (they stayed for good)");
+
+    // ...one whose project was saved keeps exactly what the project needs
+    juce::File savedFolder, savedFile, laterFile;
+    juce::MemoryBlock state;
+    {
+        SnaggerProcessor p;
+        auto c = addClip (p, 440.0);
+        p.getStateInformation (state);
+        p.session.flushWrites();
+        savedFolder = p.session.getSessionDir();
+        savedFile = c->cacheFile;
+        auto later = addClip (p, 330.0);   // added after the last save
+        p.session.flushWrites();
+        laterFile = later->cacheFile;
+    }
+    CHECK (savedFile.existsAsFile() && ! laterFile.existsAsFile(), "a saved project keeps its samples; what was added after the last save goes");
+
+    // the list the clean-up works from
+    auto find = [] (const std::vector<sessioncache::Folder>& folders, const juce::File& dir) -> const sessioncache::Folder*
+    {
+        for (auto& f : folders)
+            if (f.dir == dir)
+                return &f;
+        return nullptr;
+    };
+    const auto now = juce::Time::getCurrentTime();
+    const auto monthAgo = now - juce::RelativeTime::days (30);
+    {
+        const auto folders = sessioncache::scan();
+        auto* f = find (folders, savedFolder);
+        CHECK (f != nullptr && f->bytes > 40000 && ! f->inUse && f->lastUsed > now - juce::RelativeTime::minutes (10),
+               "the saved project's folder is listed with its size, as used just now");
+        CHECK (f != nullptr && ! sessioncache::removable (*f, monthAgo), "  ...so a clean-up of what wasn't used for a month leaves it alone");
+    }
+
+    // not opened for a long time: it may go - unless a plug-in that is open right now uses it
+    savedFolder.getChildFile (".used").setLastModificationTime (now - juce::RelativeTime::days (100));
+    {
+        const auto folders = sessioncache::scan();
+        auto* f = find (folders, savedFolder);
+        CHECK (f != nullptr && sessioncache::removable (*f, monthAgo), "a folder no project has opened for 100 days can be cleaned up");
+    }
+    {
+        SnaggerProcessor p;
+        restoreInto (p, state);
+        CHECK (p.session.getClips().size() == 1, "the project opens again");
+        const auto folders = sessioncache::scan();
+        auto* f = find (folders, savedFolder);
+        CHECK (f != nullptr && f->inUse && f->lastUsed > now - juce::RelativeTime::minutes (10) && ! sessioncache::removable (*f, monthAgo),
+               "opening the project marks its folder as used again - and it can't go while the project is open");
+    }
+    savedFolder.deleteRecursively();
+
+    // the removal itself, on a folder of our own
+    {
+        auto root = tmp.getChildFile ("sessions");
+        auto make = [&root] (const juce::String& name, int usedDaysAgo)
+        {
+            auto dir = root.getChildFile (name);
+            dir.createDirectory();
+            dir.getChildFile ("clip.wav").replaceWithData (juce::MemoryBlock (5000, true).getData(), 5000);
+            if (usedDaysAgo >= 0)
+            {
+                dir.getChildFile (".used").create();
+                dir.getChildFile (".used").setLastModificationTime (juce::Time::getCurrentTime() - juce::RelativeTime::days (usedDaysAgo));
+            }
+            return dir;
+        };
+        auto old = make ("old", 200), recent = make ("recent", 3), legacy = make ("from-before", -1);
+        const auto before = sessioncache::scan ({}, root);
+        auto* l = find (before, legacy);
+        CHECK (before.size() == 3 && l != nullptr && l->lastUsed == sessioncache::trackedSince(),
+               "a folder from before \"last used\" was kept counts from the day this version first ran, not from its files' dates");
+        int removed = 0;
+        const auto freed = sessioncache::removeUnusedSince (juce::Time::getCurrentTime() - juce::RelativeTime::days (90), &removed, {}, root);
+        CHECK (removed >= 1 && freed >= 5000 && ! old.exists() && recent.isDirectory(),
+               "the clean-up removes what wasn't used for 3 months and nothing else (freed " + sessioncache::sizeText (freed) + ")");
+        CHECK (sessioncache::sizeText (1536 * 1024) == "2 MB" && sessioncache::sizeText ((juce::int64) 3 * 1024 * 1024 * 1024) == "3.0 GB", "sizes read as people write them");
+    }
+}
+
 #if SNAGGER_BUILTIN_AI
 /** The built-in AI without its model: how the audio is cut up for the network and put back together. */
 static void testAiWindows()
@@ -3222,6 +3327,7 @@ int main (int argc, char** argv)
     testAuditEngine();
     testAuditKnobs();
     testAuditSecondPass();
+    testSessionCleanUp (tmp);
    #if SNAGGER_BUILTIN_AI
     testAiWindows();
    #endif
