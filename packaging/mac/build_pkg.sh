@@ -5,7 +5,9 @@
 #   Standalone -> /Applications
 #
 # usage: packaging/mac/build_pkg.sh <artefacts dir> <output dir>
-set -euo pipefail
+set -Eeuo pipefail
+# (on GitHub Actions a failure shows up on the run's summary page, with the command that failed)
+trap 'echo "::error title=macOS installer::build_pkg.sh line $LINENO: $BASH_COMMAND"' ERR
 
 ART="${1:?artefacts dir, e.g. build/SampleSnagger_artefacts/Release}"
 OUT="${2:-dist}"
@@ -30,9 +32,13 @@ pin_bundles() {   # <root dir> <plist to write>
     pkgbuild --analyze --root "$1" "$2" > /dev/null
     local i=0
     while /usr/libexec/PlistBuddy -c "Print :$i:RootRelativeBundlePath" "$2" > /dev/null 2>&1; do
-        /usr/libexec/PlistBuddy -c "Set :$i:BundleIsRelocatable false" "$2"
+        # (the key is only in the template for some kinds of bundle: change it, or put it there)
+        /usr/libexec/PlistBuddy -c "Set :$i:BundleIsRelocatable false" "$2" > /dev/null 2>&1 \
+            || /usr/libexec/PlistBuddy -c "Add :$i:BundleIsRelocatable bool false" "$2"
         i=$((i + 1))
     done
+    echo "pinned $i bundle(s) in $(basename "$1")"
+    [ "$i" -gt 0 ] || echo "::warning title=macOS installer::pkgbuild found no bundle in $(basename "$1"), so nothing was pinned there"
 }
 pin_bundles "$WORK/au"   "$WORK/au.plist"
 pin_bundles "$WORK/vst3" "$WORK/vst3.plist"
