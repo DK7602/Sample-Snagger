@@ -64,22 +64,38 @@ juce::String unavailableReason()
     return {};
 }
 
-std::vector<ModelId> modelsFor (Mode mode)
+std::vector<ModelId> modelsFor (Mode mode, const juce::StringArray& parts)
 {
     switch (mode)
     {
         case Mode::vocalsMusic:  return { ModelId::ftVocals };
         case Mode::fourStems:    return { ModelId::htdemucs4 };
-        case Mode::fourStemsMax: return { ModelId::ftDrums, ModelId::ftBass, ModelId::ftOther, ModelId::ftVocals };
         case Mode::sixStems:     return { ModelId::htdemucs6 };
+        case Mode::fourStemsMax:
+        {
+            // Each specialist makes one part. "Music" is built from all of them (the vocal
+            // specialist for the voice, the other three for what the music is), so it needs the
+            // lot; a pick of single parts only needs theirs.
+            const std::pair<const char*, ModelId> specialists[] = { { "drums", ModelId::ftDrums }, { "bass", ModelId::ftBass },
+                                                                    { "other", ModelId::ftOther }, { "vocals", ModelId::ftVocals } };
+            std::vector<ModelId> ids;
+            const bool all = parts.isEmpty() || parts.contains ("music");
+            for (auto& [part, id] : specialists)
+                if (all || parts.contains (part))
+                    ids.push_back (id);
+            if (ids.empty())
+                for (auto& [part, id] : specialists)
+                    ids.push_back (id);
+            return ids;
+        }
     }
     return {};
 }
 
-int downloadMegabytesFor (Mode mode)
+int downloadMegabytesFor (Mode mode, const juce::StringArray& parts)
 {
     int mb = 0;
-    for (auto id : modelsFor (mode))
+    for (auto id : modelsFor (mode, parts))
         if (! isDownloaded (id))
             mb += info (id).megabytes;
     return mb;
@@ -90,14 +106,14 @@ juce::String defaultModelBaseUrl()
     return "https://huggingface.co/datasets/Retrobear/demucs.cpp/resolve/main/";
 }
 
-bool ensureModels (Mode mode, Job& job, const juce::String& baseUrlIn, float p0, float p1)
+bool ensureModels (Mode mode, Job& job, const juce::String& baseUrlIn, float p0, float p1, const juce::StringArray& parts)
 {
     auto baseUrl = baseUrlIn.isNotEmpty() ? baseUrlIn : defaultModelBaseUrl();
     if (! baseUrl.endsWithChar ('/'))
         baseUrl << "/";
 
     std::vector<ModelId> missing;
-    for (auto id : modelsFor (mode))
+    for (auto id : modelsFor (mode, parts))
         if (! isDownloaded (id))
             missing.push_back (id);
 
@@ -155,11 +171,12 @@ static AudioData::Ptr toSourceRate (std::vector<float>& l, std::vector<float>& r
 }
 #endif
 
-bool separate (const AudioData& input, Mode mode, Job& job, const juce::String& baseUrl, std::vector<Stem>& stems)
+bool separate (const AudioData& input, Mode mode, Job& job, const juce::String& baseUrl, std::vector<Stem>& stems,
+               const juce::StringArray& parts)
 {
     stems.clear();
    #if ! SNAGGER_BUILTIN_AI
-    juce::ignoreUnused (input, mode, baseUrl);
+    juce::ignoreUnused (input, mode, baseUrl, parts);
     job.fail (unavailableReason());
     return false;
    #else
@@ -169,9 +186,9 @@ bool separate (const AudioData& input, Mode mode, Job& job, const juce::String& 
         return false;
     }
 
-    const int downloadMB = downloadMegabytesFor (mode);
+    const int downloadMB = downloadMegabytesFor (mode, parts);
     const float separateStart = downloadMB > 0 ? 0.25f : 0.02f;
-    if (! ensureModels (mode, job, baseUrl, 0.0f, separateStart))
+    if (! ensureModels (mode, job, baseUrl, 0.0f, separateStart, parts))
         return false;
 
     // One separation at a time, across every Sample Snagger in this process: each one already uses
@@ -198,7 +215,7 @@ bool separate (const AudioData& input, Mode mode, Job& job, const juce::String& 
             work = edit::resample (*work, (double) snagai::sampleRate);
     }
 
-    const auto ids = modelsFor (mode);
+    const auto ids = modelsFor (mode, parts);
     const int passes = (int) ids.size();
     const int threads = defaultThreadCount();
     std::vector<std::vector<float>> combined;   // [source*2 + ch] at 44.1 kHz

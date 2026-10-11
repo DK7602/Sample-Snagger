@@ -36,12 +36,14 @@ namespace snag::ai
         sixStems        // htdemucs_6s: + guitar, piano
     };
 
-    std::vector<ModelId> modelsFor (Mode);
-    int downloadMegabytesFor (Mode);          // 0 if everything is already on disk
+    /** `parts` (the stems that were asked for) only matters for fourStemsMax: a pick of single
+        parts runs just their specialists. Empty = everything the mode makes. */
+    std::vector<ModelId> modelsFor (Mode, const juce::StringArray& parts = {});
+    int downloadMegabytesFor (Mode, const juce::StringArray& parts = {});   // 0 if everything is already on disk
     juce::String defaultModelBaseUrl();
 
     /** Downloads (if needed) the models for a mode. Runs inside a Job. */
-    bool ensureModels (Mode, Job&, const juce::String& baseUrl, float p0, float p1);
+    bool ensureModels (Mode, Job&, const juce::String& baseUrl, float p0, float p1, const juce::StringArray& parts = {});
 
     struct Stem
     {
@@ -52,7 +54,7 @@ namespace snag::ai
     /** Full pipeline: download models if needed, resample, separate on all cores, resample back.
         Runs inside a Job (reports progress, honours cancel). */
     bool separate (const AudioData& input, Mode mode, Job& job, const juce::String& baseUrl,
-                   std::vector<Stem>& stems);
+                   std::vector<Stem>& stems, const juce::StringArray& parts = {});
 
     int defaultThreadCount();
 }

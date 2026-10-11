@@ -458,14 +458,16 @@ void StemsPage::timerCallback()
 
     // (looking at the model files means going to the disk: once every couple of seconds is plenty
     //  for a line of text, where this used to be 15 times a second on every tab)
-    auto dl = [this] (ai::Mode m)
+    auto dl = [this, &parts] (ai::Mode m)
     {
         const auto now = juce::Time::getMillisecondCounter();
-        if ((int) m != downloadCheckedMode || now - downloadCheckedAt > 2000)
+        const auto picked = parts.joinIntoString (",");
+        if ((int) m != downloadCheckedMode || picked != downloadCheckedParts || now - downloadCheckedAt > 2000)
         {
             downloadCheckedMode = (int) m;
+            downloadCheckedParts = picked;
             downloadCheckedAt = now;
-            downloadMegabytes = ai::downloadMegabytesFor (m);
+            downloadMegabytes = ai::downloadMegabytesFor (m, parts);
         }
         const int mb = downloadMegabytes;
         return mb > 0 ? "  First use downloads " + juce::String (mb) + " MB once." : juce::String ("  Ready - works offline.");
@@ -498,7 +500,14 @@ void StemsPage::timerCallback()
             note = juce::String ("6-part AI model (vocals, drums, bass, guitar, piano, other).")
                  + (id == 3 ? " Max has no guitar / piano models, so it uses this one." : "");
         else if (mode == ai::Mode::fourStemsMax)
-            note = "Four specialised AI models, one per part - the cleanest vocals and music, about 4x slower.";
+        {
+            // (a pick of single parts only runs their specialists)
+            const int specialists = (int) ai::modelsFor (mode, parts).size();
+            note = specialists >= 4 ? juce::String ("Four specialised AI models, one per part - the cleanest vocals and music, about 4x slower.")
+                 : specialists == 1 ? juce::String ("The AI model that specialises in this part - the cleanest, and no slower than AI Studio.")
+                                    : juce::String (specialists) + " specialised AI models, one per part you picked - the cleanest, about "
+                                          + juce::String (specialists) + "x slower.";
+        }
         else
             note = "Studio-quality AI, runs right here on your computer.";
         note << dl (mode);

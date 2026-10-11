@@ -28,6 +28,7 @@
 #include <thread>
 #include <set>
 #include <atomic>
+#include <stdexcept>
 
 using namespace snag;
 
@@ -957,6 +958,14 @@ static void testStemParts()
     CHECK (actions::aiModeFor (actions::Engine::ai, { "drums" }) == ai::Mode::fourStems, "drums alone uses the 4-part model");
     CHECK (actions::aiModeFor (actions::Engine::aiMax, { "drums", "bass" }) == ai::Mode::fourStemsMax, "Max uses the fine-tuned models");
     CHECK (actions::aiModeFor (actions::Engine::aiMax, { "vocals", "music" }) == ai::Mode::fourStemsMax, "Max builds the music from all four specialists too");
+    CHECK (ai::modelsFor (ai::Mode::fourStemsMax, { "vocals", "music" }).size() == 4 && ai::modelsFor (ai::Mode::fourStemsMax).size() == 4,
+           "  ...which takes all four models");
+    {
+        const auto drumsOnly = ai::modelsFor (ai::Mode::fourStemsMax, { "drums" });
+        const auto two = ai::modelsFor (ai::Mode::fourStemsMax, { "vocals", "bass" });
+        CHECK (drumsOnly.size() == 1 && drumsOnly[0] == ai::ModelId::ftDrums && two.size() == 2,
+               "Max with single parts picked only runs their specialists (it ran all four for one drum stem)");
+    }
     CHECK (actions::aiModeFor (actions::Engine::ai, { "vocals", "piano" }) == ai::Mode::sixStems, "guitar / piano use the 6-part model");
 
     SnaggerProcessor p;
@@ -2208,6 +2217,109 @@ static void testNetwork()
 }
 
 //==============================================================================
+#if SNAGGER_BUILTIN_AI
+/** The built-in AI without its model: how the audio is cut up for the network and put back together. */
+static void testAiWindows()
+{
+    std::cout << "\n[built-in AI: how the audio is cut up]\n";
+
+    // every sample is looked at, neighbours share enough to cross-fade, and no look is wasted
+    bool planned = true;
+    for (int n : { 1, 999, 1000, 1001, 1850, 2700, 8500, 123457 })
+    {
+        const int segment = 1000, overlap = 150;
+        const auto starts = snagai::planWindows (n, segment, overlap);
+        planned = planned && ! starts.empty() && starts.front() <= 0 && starts.back() + segment >= n;
+        for (size_t i = 1; i < starts.size(); ++i)
+            planned = planned && starts[i] > starts[i - 1] && starts[i] <= starts[i - 1] + segment - overlap;
+        const int needed = n <= segment ? 1 : (int) std::ceil ((double) (n - overlap) / (double) (segment - overlap));
+        planned = planned && (int) starts.size() == needed;
+    }
+    CHECK (planned, "the audio is covered by overlapping looks, with no more of them than it takes");
+
+    const int realSegment = (int) (7.8 * 44100.0), realOverlap = (int) (1.2 * 44100.0);
+    const int looks = (int) snagai::planWindows (60 * 44100, realSegment, realOverlap).size();
+    CHECK (looks == 9, "a minute of audio takes " + juce::String (looks) + " runs of the network (it took 20: two for every six seconds)");
+
+    // A "network" that hands back what it was given: the parts must come out as the audio went in,
+    // whatever the length, through the scaling and the cross-fades, on several threads.
+    std::atomic<int> runs { 0 };
+    auto echo = [&runs]() -> snagai::WindowFn
+    {
+        return [&runs] (const std::vector<float>& l, const std::vector<float>& r, std::vector<std::vector<float>>& parts,
+                        const std::function<void (float)>& progress)
+        {
+            ++runs;
+            for (size_t c = 0; c < parts.size(); ++c)
+                parts[c] = (c % 2 == 0) ? l : r;
+            progress (1.0f);
+        };
+    };
+    juce::Random rng (11);
+    double worst = 0.0;
+    bool ran = true, counted = true;
+    for (int n : { 37, 1000, 1001, 2333, 9100 })
+    {
+        std::vector<float> l ((size_t) n), r ((size_t) n);
+        for (int i = 0; i < n; ++i)
+        {
+            const bool gap = i >= 3000 && i < 6500;   // digital silence, longer than a look
+            l[(size_t) i] = gap ? 0.0f : 0.1f + 0.4f * std::sin ((float) i * 0.05f) + 0.05f * (rng.nextFloat() - 0.5f);
+            r[(size_t) i] = gap ? 0.0f : 0.1f + 0.3f * std::sin ((float) i * 0.031f);
+        }
+        std::vector<std::vector<float>> out;
+        std::string err;
+        snagai::SeparateOptions opts;
+        opts.numThreads = 3;
+        runs = 0;
+        ran = ran && snagai::separateWith (4, 1000, 150, echo, l.data(), r.data(), n, out, opts, err) && out.size() == 8;
+        if (! ran) break;
+        for (size_t c = 0; c < out.size(); ++c)
+            for (int i = 0; i < n; ++i)
+                worst = juce::jmax (worst, (double) std::abs (out[c][(size_t) i] - (c % 2 == 0 ? l : r)[(size_t) i]));
+        const int windows = (int) snagai::planWindows (n, 1000, 150).size();
+        counted = counted && (n < 9000 ? runs == windows : runs < windows);   // (the look that falls inside the silent gap isn't run)
+    }
+    CHECK (ran && worst < 1.0e-4, "what the network returns is put back together exactly (worst error " + juce::String (worst, 7) + ")");
+    CHECK (counted, "  ...one run of the network per look, none for a look at digital silence");
+
+    {
+        std::vector<float> nothing (5000, 0.0f);
+        std::vector<std::vector<float>> out;
+        std::string err;
+        runs = 0;
+        const bool ok = snagai::separateWith (4, 1000, 150, echo, nothing.data(), nothing.data(), 5000, out, {}, err);
+        bool silent = ok && out.size() == 8;
+        for (auto& channel : out)
+            for (auto v : channel)
+                silent = silent && v == 0.0f;
+        CHECK (silent && runs == 0, "pure silence comes back as silence, without running the network");
+    }
+    {
+        std::vector<float> tone (5000);
+        for (size_t i = 0; i < tone.size(); ++i) tone[i] = std::sin ((float) i * 0.1f);
+        std::vector<std::vector<float>> out;
+        std::string err;
+        snagai::SeparateOptions opts;
+        opts.numThreads = 2;
+        opts.shouldCancel = [&runs] { return runs.load() >= 2; };
+        runs = 0;
+        const bool cancelled = ! snagai::separateWith (4, 1000, 150, echo, tone.data(), tone.data(), 5000, out, opts, err) && err == "Cancelled" && out.empty();
+        auto broken = []() -> snagai::WindowFn
+        {
+            return [] (const std::vector<float>&, const std::vector<float>&, std::vector<std::vector<float>>&, const std::function<void (float)>&)
+            {
+                throw std::runtime_error ("boom");
+            };
+        };
+        opts.shouldCancel = nullptr;
+        err.clear();
+        const bool failed = ! snagai::separateWith (4, 1000, 150, broken, tone.data(), tone.data(), 5000, out, opts, err) && juce::String (err).contains ("boom");
+        CHECK (cancelled && failed, "a cancelled or failing run stops cleanly, on every thread (" + juce::String (err) + ")");
+    }
+}
+#endif
+
 static void testBuiltinAi()
 {
     std::cout << "\n[built-in AI stems - downloads the models]\n";
@@ -2255,6 +2367,20 @@ static void testBuiltinAi()
                 CHECK (bestLag (*demo.mix, *stems[1].audio, 32) == 0, "music lines up with the original to the sample");
             }
         }
+    }
+
+    // How fast it is (the models are on disk by now), noted on the CI run so it can be compared.
+    {
+        auto longer = makeDemoMix (44100.0, 30.0, 92.0);
+        Job job ("ai", nullptr, nullptr);
+        std::vector<ai::Stem> stems;
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        const bool ok = ai::separate (*longer.mix, ai::Mode::fourStems, job, {}, stems);
+        const double secs = (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0;
+        const auto line = "AI speed: 30 s of audio into 4 stems in " + juce::String (secs, 1) + " s on " + juce::String (ai::defaultThreadCount())
+                          + " threads (" + juce::String (30.0 / juce::jmax (0.1, secs), 2) + "x real time)";
+        CHECK (ok && stems.size() == 4, line);
+        ciAnnotate ("notice", line);
     }
 
     // Digital silence in the sample (a track's tail, the gap before a grab starts): the engine scales
@@ -3096,6 +3222,9 @@ int main (int argc, char** argv)
     testAuditEngine();
     testAuditKnobs();
     testAuditSecondPass();
+   #if SNAGGER_BUILTIN_AI
+    testAiWindows();
+   #endif
     testAuditStems (tmp);
     snag::StudioPageTester::runAudit();
     testProcessor();

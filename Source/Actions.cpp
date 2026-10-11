@@ -541,14 +541,14 @@ void separate (SnaggerProcessor& p, Clip::Ptr clip, Engine engine, const juce::S
     {
         const auto mode = aiModeFor (engine, parts);
         const auto baseUrl = p.getSettings().getString ("aiModelBaseUrl");
-        const int downloadMB = ai::downloadMegabytesFor (mode);
+        const int downloadMB = ai::downloadMegabytesFor (mode, parts);
         if (downloadMB > 0)
             notify (p, "First time: downloading the AI model (" + juce::String (downloadMB) + " MB). After that it works offline.");
 
         p.jobs.start ("AI Split", [audio, mode, baseUrl, parts, makeStem] (Job& job)
         {
             std::vector<ai::Stem> stems;
-            if (! ai::separate (*audio, mode, job, baseUrl, stems))
+            if (! ai::separate (*audio, mode, job, baseUrl, stems, parts))
                 return;
             std::vector<std::pair<juce::String, AudioData::Ptr>> raw;
             for (auto& st : stems)

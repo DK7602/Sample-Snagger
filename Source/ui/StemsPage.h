@@ -93,6 +93,7 @@ private:
 
     // the "first use downloads N MB" note: when the model files were last looked at
     int downloadCheckedMode = -1, downloadMegabytes = 0;
+    juce::String downloadCheckedParts;
     juce::uint32 downloadCheckedAt = 0;
 };
 
