@@ -3,6 +3,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
 #include <juce_graphics/juce_graphics.h>
+#include <cmath>
 #include <vector>
 #include "SoundSettings.h"
 
@@ -67,9 +68,50 @@ struct Clip final : juce::ReferenceCountedObject
                 && std::abs (lowCut - o.lowCut) < 0.01f && std::abs (highCut - o.highCut) < 0.01f;
         }
         bool operator!= (const Adjust& o) const noexcept { return ! (*this == o); }
+
+        juce::String toString() const
+        {
+            return juce::String (semitones, 3) + " " + juce::String (length, 6) + " " + (formants ? "1" : "0") + " " + (tape ? "1" : "0")
+                 + " " + juce::String (gainDb, 3) + " " + juce::String (lowCut, 2) + " " + juce::String (highCut, 2);
+        }
+        static Adjust fromString (const juce::String& s)
+        {
+            Adjust a;
+            const auto t = juce::StringArray::fromTokens (s, " ", {});
+            if (t.size() < 7)
+                return a;
+            // (a damaged "nan" would never compare equal to itself, and the clip would render for ever)
+            const auto num = [&t] (int i, double lo, double hi, double fallback)
+            {
+                const double v = t[i].getDoubleValue();
+                return std::isfinite (v) ? juce::jlimit (lo, hi, v) : fallback;
+            };
+            a.semitones = (float) num (0, -24.0, 24.0, 0.0);
+            a.length    = num (1, 0.5, 2.0, 1.0);
+            a.formants  = t[2] == "1";
+            a.tape      = t[3] == "1";
+            a.gainDb    = (float) num (4, -24.0, 24.0, 0.0);
+            a.lowCut    = (float) num (5, 0.0, 20000.0, 0.0);
+            a.highCut   = (float) num (6, 0.0, 20000.0, 0.0);
+            return a;
+        }
     };
     Adjust adjust;
     AudioData::Ptr adjustBase;
+
+    /** The knob settings `audio` was actually rendered with. It lags behind `adjust` while a render
+        is still running (or was cancelled), which is how STUDIO knows it has to render again. */
+    Adjust audioAdjust;
+    bool renderIsCurrent() const noexcept   { return adjustBase == nullptr || audioAdjust == adjust; }
+
+    /** The tempo you hear: `bpm` is stored for the original, the LENGTH knob (or TAPE pitch) moves it. */
+    double bpmWith (const Adjust& a) const noexcept
+    {
+        if (bpm <= 0.0 || adjustBase == nullptr)
+            return bpm;
+        return a.tape ? bpm * std::pow (2.0, a.semitones / 12.0) : bpm / juce::jmax (0.01, a.length);
+    }
+    double heardBpm() const noexcept        { return bpmWith (audioAdjust); }
 
     /** Per-chop pad settings (index = chop; missing = default), the FX rack, and the key. */
     std::vector<PadParams> pads;
@@ -86,6 +128,39 @@ struct Clip final : juce::ReferenceCountedObject
     }
 
     juce::File cacheFile;       // where the session keeps this clip on disk
+    AudioData::Ptr cachedAudio; // the audio that cacheFile holds
+    juce::File baseCacheFile;   // ... and `adjustBase` (the original the knobs work from), while there is one
+    AudioData::Ptr cachedBase;  // the audio that baseCacheFile holds
+
+    /** Re-homes the per-pad settings after the chop markers changed, so every chop keeps its own
+        sound. `oldPositionOf` maps the start of a new chop to where that audio was before the
+        change, or returns -1 for a chop that should start clean. */
+    template <typename PositionMap>
+    void remapPads (const std::vector<int>& oldSlices, PositionMap&& oldPositionOf)
+    {
+        if (pads.empty())
+            return;
+        const auto oldPads = pads;
+        const auto b = sliceBoundaries();
+        std::vector<PadParams> fresh;
+        for (size_t i = 0; i + 1 < b.size(); ++i)
+        {
+            const int oldPos = oldPositionOf (b[i]);
+            PadParams p;
+            if (oldPos >= 0)
+            {
+                size_t oldIndex = 0;
+                for (auto s : oldSlices)
+                    if (s > 0 && s <= oldPos) ++oldIndex;
+                if (oldIndex < oldPads.size())
+                    p = oldPads[oldIndex];
+            }
+            fresh.push_back (p);
+        }
+        while (! fresh.empty() && fresh.back().isDefault())
+            fresh.pop_back();
+        pads = std::move (fresh);
+    }
 
     bool isStem() const noexcept { return parentId.isNotEmpty(); }
 
@@ -99,11 +174,12 @@ struct Clip final : juce::ReferenceCountedObject
         AudioData::Ptr adjustBase;
         std::vector<PadParams> pads;
         FxSettings fx;
+        Adjust audioAdjust;
     };
 
     void pushUndo (const juce::String& label)
     {
-        undoStack.push_back ({ audio, slices, label, adjust, adjustBase, pads, fx });
+        undoStack.push_back ({ audio, slices, label, adjust, adjustBase, pads, fx, audioAdjust });
         if (undoStack.size() > 30)
             undoStack.erase (undoStack.begin());
         redoStack.clear();
@@ -117,13 +193,14 @@ struct Clip final : juce::ReferenceCountedObject
         if (undoStack.empty()) return {};
         auto s = undoStack.back();
         undoStack.pop_back();
-        redoStack.push_back ({ audio, slices, s.label, adjust, adjustBase, pads, fx });
+        redoStack.push_back ({ audio, slices, s.label, adjust, adjustBase, pads, fx, audioAdjust });
         audio = s.audio;
         slices = s.slices;
         adjust = s.adjust;
         adjustBase = s.adjustBase;
         pads = s.pads;
         fx = s.fx;
+        audioAdjust = s.audioAdjust;
         return s.label;
     }
 
@@ -132,13 +209,14 @@ struct Clip final : juce::ReferenceCountedObject
         if (redoStack.empty()) return {};
         auto s = redoStack.back();
         redoStack.pop_back();
-        undoStack.push_back ({ audio, slices, s.label, adjust, adjustBase, pads, fx });
+        undoStack.push_back ({ audio, slices, s.label, adjust, adjustBase, pads, fx, audioAdjust });
         audio = s.audio;
         slices = s.slices;
         adjust = s.adjust;
         adjustBase = s.adjustBase;
         pads = s.pads;
         fx = s.fx;
+        audioAdjust = s.audioAdjust;
         return s.label;
     }
 

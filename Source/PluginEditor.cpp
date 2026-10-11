@@ -68,8 +68,22 @@ SnaggerEditor::SnaggerEditor (SnaggerProcessor& p)
 
     setResizable (true, true);
     setResizeLimits (1040, 700, 2600, 1700);
-    const int w = processor.uiState.getProperty ("w", 1280);
-    const int h = processor.uiState.getProperty ("h", 820);
+    // The size comes from the saved project, which may have been made on a bigger screen (or be
+    // nonsense): keep it inside the limits and on the largest screen there is, so the resize corner
+    // can always be reached.
+    int w = juce::jlimit (1040, 2600, (int) processor.uiState.getProperty ("w", 1280));
+    int h = juce::jlimit (700, 1700, (int) processor.uiState.getProperty ("h", 820));
+    int screenW = 0, screenH = 0;
+    for (auto& d : juce::Desktop::getInstance().getDisplays().displays)
+    {
+        screenW = juce::jmax (screenW, d.userArea.getWidth());
+        screenH = juce::jmax (screenH, d.userArea.getHeight());
+    }
+    if (screenW > 0 && screenH > 0)
+    {
+        w = juce::jmin (w, juce::jmax (1040, screenW));
+        h = juce::jmin (h, juce::jmax (700, screenH - 40));   // (leave room for the host's title bar)
+    }
     setSize (w, h);
     setWantsKeyboardFocus (true);
 
@@ -207,6 +221,15 @@ void SnaggerEditor::timerCallback()
 
     if (processor.jobs.isBusy())
         repaint (hudArea);
+
+    // A project from another computer (or a cleaned-out cache) comes back without some of its clips:
+    // say so, instead of a tray that is silently shorter.
+    if (const int missing = processor.session.takeMissingClipCount(); missing > 0)
+        toast (juce::String (missing) + (missing == 1 ? " clip of this project has" : " clips of this project have")
+               + " lost the audio and couldn't be brought back. (The tray's samples are kept on this computer, in Sample Snagger's Sessions folder.)", true);
+
+    if (processor.session.takeFailedWriteCount() > 0)
+        toast ("Couldn't write a sample to Sample Snagger's Sessions folder - is the disk full? Until that works, a saved project won't bring this sample back: SAVE it to your library to be safe.", true);
 }
 
 void SnaggerEditor::changeListenerCallback (juce::ChangeBroadcaster*)

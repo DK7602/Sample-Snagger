@@ -73,11 +73,11 @@ QuickSplit::Result QuickSplit::separate (const AudioData& input, bool fourStems,
     const bool mono = isEffectivelyMono (input);
     if (mono && ! fourStems)
     {
-        result.error = "This source is mono, so Quick Split can't find the vocal. Use AI Split (Settings -> Install AI Stems) or choose 4 stems for drums / bass / melodic.";
+        result.error = "This sample is mono, and Quick Split finds the vocal by where it sits between left and right. Pick AI Studio instead - it works on mono too.";
         return result;
     }
     if (mono)
-        result.note = "Mono source: vocals can't be isolated in Quick mode (try AI Split).";
+        result.note = "the sample is mono, so Quick Split can't pull out the vocal (AI Studio can)";
 
     const double sr = input.sampleRate;
     const int chans = 2;

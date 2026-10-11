@@ -90,6 +90,10 @@ private:
     juce::String clawClipId;
     juce::StringArray stemIdsBeforeSplit;
     bool updatingClaw = false;
+
+    // the "first use downloads N MB" note: when the model files were last looked at
+    int downloadCheckedMode = -1, downloadMegabytes = 0;
+    juce::uint32 downloadCheckedAt = 0;
 };
 
 } // namespace snag

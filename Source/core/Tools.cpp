@@ -199,7 +199,7 @@ void ToolManager::refresh()
             switch (t)
             {
                 case Tool::ffmpeg:
-                    code = ProcessRunner::runAndCapture ({ s.path.getFullPathName(), "-hide_banner", "-version" }, out, 15000, stop);
+                    code = ProcessRunner::runAndCapture ({ s.path.getFullPathName(), "-hide_banner", "-version" }, out, 60000, stop);
                     s.version = out.upToFirstOccurrenceOf ("\n", false, false).fromFirstOccurrenceOf ("version ", false, false).upToFirstOccurrenceOf (" ", false, false);
                     break;
                 case Tool::ytdlp:
@@ -207,7 +207,7 @@ void ToolManager::refresh()
                     s.version = out.trim().fromLastOccurrenceOf ("\n", false, false);
                     break;
                 case Tool::deno:
-                    code = ProcessRunner::runAndCapture ({ s.path.getFullPathName(), "--version" }, out, 15000, stop);
+                    code = ProcessRunner::runAndCapture ({ s.path.getFullPathName(), "--version" }, out, 60000, stop);
                     s.version = out.upToFirstOccurrenceOf ("\n", false, false).fromFirstOccurrenceOf ("deno ", false, false).upToFirstOccurrenceOf (" ", false, false);
                     break;
                 case Tool::aiModels:
@@ -227,6 +227,36 @@ void ToolManager::refresh()
             s.found = (code == 0);
             if (! s.found && s.detail.isEmpty())
                 s.detail = "Found but failed to run";
+
+            // A file picked with LOCATE that doesn't run (the wrong one, most likely) is let go, so
+            // Sample Snagger's own copy - or the next INSTALL - can take over instead of being stuck behind it.
+            const auto located = settings.getToolOverride (displayName (t));
+            if (! s.found && code != -2 /* slow or stopped isn't "wrong" */ && ! shuttingDown && t != Tool::ai
+                && located.isNotEmpty() && juce::File (located) == s.path)
+            {
+                settings.setToolOverride (displayName (t), {});
+                Status again;
+                again.path = locate (t);
+                again.detail = "The file you located didn't run, so it isn't used any more";
+                if (again.path.existsAsFile())
+                {
+                    juce::String said;
+                    const bool ff = t == Tool::ffmpeg;
+                    const int ok = ProcessRunner::runAndCapture (ff ? juce::StringArray { again.path.getFullPathName(), "-hide_banner", "-version" }
+                                                                    : juce::StringArray { again.path.getFullPathName(), "--version" },
+                                                                 said, 60000, stop);
+                    if (ok == 0)
+                    {
+                        again.found = true;
+                        again.detail = {};
+                        const auto first = said.upToFirstOccurrenceOf ("\n", false, false);
+                        again.version = ff ? first.fromFirstOccurrenceOf ("version ", false, false).upToFirstOccurrenceOf (" ", false, false)
+                                      : t == Tool::deno ? first.fromFirstOccurrenceOf ("deno ", false, false).upToFirstOccurrenceOf (" ", false, false)
+                                                        : said.trim().fromLastOccurrenceOf ("\n", false, false);
+                    }
+                }
+                s = again;
+            }
         }
         fresh[t] = s;
     }
@@ -240,8 +270,49 @@ void ToolManager::refresh()
 }
 
 //==============================================================================
+/** Downloads of one and the same file wait for each other (INSTALL ALL next to a first AI split,
+    two plug-in windows...): the second one then finds the file already there. */
+struct DownloadsInFlight
+{
+    juce::CriticalSection lock;
+    juce::StringArray paths;
+
+    static DownloadsInFlight& get() { static DownloadsInFlight d; return d; }
+
+    struct Claim
+    {
+        explicit Claim (const juce::String& p) : path (p) {}
+        ~Claim() { auto& d = get(); const juce::ScopedLock sl (d.lock); d.paths.removeString (path); }
+        juce::String path;
+    };
+};
+
 bool ToolManager::download (const juce::String& url, const juce::File& dest, Job& job, float p0, float p1)
 {
+    auto& inFlight = DownloadsInFlight::get();
+    const auto key = dest.getFullPathName();
+    const auto askedAt = juce::Time::getCurrentTime();
+    bool waited = false;
+    for (;;)
+    {
+        {
+            const juce::ScopedLock sl (inFlight.lock);
+            if (! inFlight.paths.contains (key))
+            {
+                inFlight.paths.add (key);
+                break;
+            }
+        }
+        if (job.isCancelled())
+            return false;
+        waited = true;
+        job.setStatus ("Waiting for the same download to finish");
+        juce::Thread::sleep (200);
+    }
+    const DownloadsInFlight::Claim claim (key);
+    if (waited && dest.existsAsFile() && dest.getLastModificationTime() > askedAt - juce::RelativeTime::seconds (5))
+        return true;   // the other one fetched it while we waited
+
     int status = 0;
     juce::StringPairArray headers;
     auto stream = juce::URL (url).createInputStream (juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
@@ -256,9 +327,21 @@ bool ToolManager::download (const juce::String& url, const juce::File& dest, Job
         return false;
     }
 
-    auto tmp = dest.getSiblingFile (dest.getFileName() + ".part");
-    tmp.deleteFile();
+    // (its own name every time: another Sample Snagger - the app next to the plug-in - may be
+    //  fetching the same file, and two writers in one ".part" left a broken tool or AI model behind)
+    auto tmp = dest.getSiblingFile (dest.getFileName() + "." + juce::String::toHexString (juce::Random::getSystemRandom().nextInt()) + ".part");
     dest.getParentDirectory().createDirectory();
+    for (auto& stale : dest.getParentDirectory().findChildFiles (juce::File::findFiles, false, dest.getFileName() + ".*part"))
+        if (stale.getLastModificationTime() < juce::Time::getCurrentTime() - juce::RelativeTime::hours (6))
+            stale.deleteFile();   // left behind by a download that was cut off
+
+    // Removes the unfinished file on every way out - after the stream below has let go of it
+    // (Windows won't delete a file that is still open).
+    struct Unfinished
+    {
+        juce::File file;
+        ~Unfinished() { file.deleteFile(); }
+    } unfinished { tmp };
 
     {
         juce::FileOutputStream out (tmp);
@@ -276,14 +359,16 @@ bool ToolManager::download (const juce::String& url, const juce::File& dest, Job
         {
             if (job.isCancelled())
             {
-                out.flush();
-                tmp.deleteFile();
                 return false;
             }
             const int n = stream->read (buf.get(), 1 << 16);
             if (n <= 0)
                 break;
-            out.write (buf.get(), (size_t) n);
+            if (! out.write (buf.get(), (size_t) n))
+            {
+                job.fail ("Couldn't write the download - is the disk full? (" + dest.getParentDirectory().getFullPathName() + ")");
+                return false;
+            }
             got += n;
 
             if (total > 0)
@@ -297,19 +382,18 @@ bool ToolManager::download (const juce::String& url, const juce::File& dest, Job
             }
         }
 
-        if (total > 0 && got < total)
+        out.flush();
+        if ((total > 0 && got < total) || got == 0 || out.getStatus().failed())
         {
-            out.flush();
-            tmp.deleteFile();
-            job.fail ("Download was interrupted");
+            job.fail (out.getStatus().failed() ? "Couldn't write the download - is the disk full?" : "Download was interrupted");
             return false;
         }
     }
 
-    dest.deleteFile();
-    if (! tmp.moveFileTo (dest))
+    if (! tmp.replaceFileIn (dest))
     {
-        job.fail ("Can't move download into place: " + dest.getFullPathName());
+        tmp.deleteFile();
+        job.fail ("Can't put the download in place (is " + dest.getFileName() + " in use?): " + dest.getFullPathName());
         return false;
     }
     return true;
@@ -368,8 +452,13 @@ bool ToolManager::installFfmpeg (Job& job)
         }
     }
     gz.deleteFile();
-    dest.deleteFile();
-    tmp.moveFileTo (dest);
+    if (! tmp.replaceFileIn (dest))
+    {
+        // (an FFmpeg that is running right now can't be replaced: say so, instead of "FFmpeg is ready")
+        tmp.deleteFile();
+        job.fail ("Couldn't replace FFmpeg - it may be in use. Wait for imports and downloads to finish, then try again.");
+        return false;
+    }
     makeRunnable (dest);
     return dest.existsAsFile();
 }
@@ -430,13 +519,20 @@ bool ToolManager::installDeno (Job& job)
             auto* e = zip.getEntry (i);
             if (e != nullptr && juce::File::createFileWithoutCheckingPath (e->filename).getFileName() == exeName ("deno"))
             {
+                // unpack next to it first: a cut-off archive must not replace a Deno that works
                 std::unique_ptr<juce::InputStream> in (zip.createStreamForEntry (i));
                 auto dest = paths::toolsDir().getChildFile (exeName ("deno"));
-                dest.deleteFile();
-                juce::FileOutputStream out (dest);
-                ok = in != nullptr && out.openedOk() && out.writeFromInputStream (*in, -1) > 1000000;
-                out.flush();
+                auto fresh = dest.getSiblingFile (dest.getFileName() + ".new");
+                fresh.deleteFile();
+                {
+                    juce::FileOutputStream out (fresh);
+                    ok = in != nullptr && out.openedOk() && out.writeFromInputStream (*in, -1) > 1000000;
+                    out.flush();
+                    ok = ok && ! out.getStatus().failed();
+                }
+                ok = ok && fresh.replaceFileIn (dest);
                 if (ok) makeRunnable (dest);
+                else fresh.deleteFile();
                 break;
             }
         }
@@ -562,6 +658,20 @@ bool ToolManager::installAiModels (Job& job)
 
 bool ToolManager::install (Tool t, Job& job)
 {
+    {
+        const juce::ScopedLock sl (lock);
+        if (! installing.insert (t).second)
+        {
+            job.fail (displayName (t) + " is already being installed.");
+            return false;
+        }
+    }
+    struct Done
+    {
+        ToolManager& owner; Tool tool;
+        ~Done() { const juce::ScopedLock sl (owner.lock); owner.installing.erase (tool); }
+    } done { *this, t };
+
     bool ok = false;
     switch (t)
     {
@@ -573,6 +683,11 @@ bool ToolManager::install (Tool t, Job& job)
     }
     if (ok)
     {
+        // INSTALL means "use Sample Snagger's own copy": a copy picked earlier with LOCATE (maybe the
+        // wrong file, which is why they are installing) would otherwise stay in charge for good.
+        if (t == Tool::ffmpeg || t == Tool::ytdlp || t == Tool::deno)
+            settings.setToolOverride (displayName (t), {});
+
         job.setStatus ("Verifying");
         refresh();
         if (! getStatus (t).found)

@@ -574,14 +574,16 @@ void BrowsePage::toggleInputRec()
 {
     if (proc.isRecordingInput())
     {
-        auto clip = proc.stopInputRecording();
+        bool hitLimit = false;
+        auto clip = proc.stopInputRecording (&hitLimit);
         if (clip == nullptr || edit::peakLevel (*clip->audio) < 1.0e-4f)
             ctx.toast ("The input was silent. Check your input device (standalone: gear > Audio Settings).", true);
         else
         {
             proc.session.add (clip, true);
             proc.setSamplerClip (clip);
-            ctx.toast ("Recorded " + formatTime (clip->audio->lengthSeconds(), true) + "s from the input.");
+            ctx.toast ("Recorded " + formatTime (clip->audio->lengthSeconds(), true) + "s from the input."
+                       + (hitLimit ? " REC INPUT stops at 20 minutes." : ""));
         }
     }
     else
@@ -604,11 +606,22 @@ void BrowsePage::timerCallback()
     if (capture != nullptr)
         meter.setLevel (capture->isArmed() ? capture->getLevel() : 0.0f);
 
+    // A recording that has reached its longest length is stopped and kept, rather than leaving the
+    // button counting (LIVE REC) or the rest of the take going nowhere (REC INPUT).
+    if (capture != nullptr && capture->isRecording() && capture->getRecordedSeconds() >= WebCapture::maxRecordSeconds - 0.5)
+    {
+        const int clipsBefore = proc.session.getClips().size();
+        toggleLiveRec();
+        if (proc.session.getClips().size() > clipsBefore)   // (a silent take says so itself)
+            ctx.toast ("LIVE REC stops at 15 minutes. What you recorded is in the tray.");
+    }
+    if (proc.isRecordingInput() && proc.inputRecordingIsFull())
+        toggleInputRec();
+
     updateCaptureUi();
 
     // keep the address bar in sync with single-page sites like YouTube
-    static int counter = 0;
-    if (pageVisible && ++counter % 10 == 0 && ! urlField.hasKeyboardFocus (true) && hasEmbeddedBrowser())
+    if (pageVisible && ++urlSyncCounter % 10 == 0 && ! urlField.hasKeyboardFocus (true) && hasEmbeddedBrowser())
     {
         evaluate ("location.href", [this] (const juce::var& v)
         {

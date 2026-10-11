@@ -13,7 +13,8 @@
 
 //==============================================================================
 class SnaggerProcessor final : public juce::AudioProcessor,
-                               private juce::Timer
+                               private juce::Timer,
+                               private juce::ChangeListener
 {
 public:
     SnaggerProcessor();
@@ -71,9 +72,14 @@ public:
 
     //==============================================================================
     // Preview player -- message thread
-    /** withFx: run it through the sampler clip's FX rack (STUDIO playback), not for stems / library. */
-    void preview (std::vector<snag::AudioData::Ptr> layers, int start, int end, bool loop, bool withFx = false);
-    void previewClip (const snag::Clip& clip, int start = 0, int end = -1, bool loop = false, bool withFx = false);
+    /** withFx: run it through the sampler clip's FX rack (STUDIO playback), not for stems / library.
+        gains: one level per layer (the STEMS mix with its mutes); without it every layer plays at
+        full level, whatever an earlier preview left in layerGains. */
+    void preview (std::vector<snag::AudioData::Ptr> layers, int start, int end, bool loop, bool withFx = false,
+                  const std::vector<float>* gains = nullptr, int playFrom = -1);
+    /** playFrom: where in [start, end) to begin (a loop still goes round the whole range); -1 = at start. */
+    void previewClip (const snag::Clip& clip, int start = 0, int end = -1, bool loop = false, bool withFx = false,
+                      int playFrom = -1);
     void stopPreview();
     bool isPreviewing() const noexcept              { return previewPlaying.load(); }
     double getPreviewPosition() const noexcept      { return previewPos.load(); }   // in source samples
@@ -84,7 +90,9 @@ public:
     // Input recording
     bool hasAudioInput() const;
     bool startInputRecording (juce::String& error);
-    snag::Clip::Ptr stopInputRecording();
+    /** hitLimit: set when the recording ran into the longest length that can be loaded (20 minutes). */
+    snag::Clip::Ptr stopInputRecording (bool* hitLimit = nullptr);
+    bool inputRecordingIsFull() const noexcept      { return recordedSamples.load() >= maxRecordSamples.load(); }
     bool isRecordingInput() const noexcept          { return activeWriter.load() != nullptr; }
     double getInputRecordSeconds() const;
     std::atomic<float> inputLevel { 0.0f }, outputLevel { 0.0f };
@@ -102,6 +110,7 @@ public:
 private:
     static BusesProperties makeBuses();
     void timerCallback() override;
+    void changeListenerCallback (juce::ChangeBroadcaster*) override;
 
     //==============================================================================
     struct SamplerState final : juce::ReferenceCountedObject
@@ -119,7 +128,7 @@ private:
     {
         using Ptr = juce::ReferenceCountedObjectPtr<PreviewState>;
         std::vector<snag::AudioData::Ptr> layers;
-        int start = 0, end = 0;
+        int start = 0, end = 0, from = 0;
         bool loop = false, stop = false, fx = false;
         juce::uint32 serial = 0;
     };
@@ -147,7 +156,7 @@ private:
 
     // FX rack on the pads + STUDIO playback
     snag::FxChain fxChain;
-    juce::AudioBuffer<float> fxBus;
+    juce::AudioBuffer<float> fxBus, dryBus;   // always stereo, mixed down to the output at the end
     bool fxWasOn = false;
 
     // preview (audio thread state)
@@ -170,7 +179,7 @@ private:
     juce::CriticalSection writerLock;
     std::atomic<juce::AudioFormatWriter::ThreadedWriter*> activeWriter { nullptr };
     juce::File recordingFile;
-    std::atomic<juce::int64> recordedSamples { 0 };
+    std::atomic<juce::int64> recordedSamples { 0 }, maxRecordSamples { 0 };
 
     double currentSampleRate = 44100.0;
     std::shared_ptr<std::atomic<bool>> aliveFlag = std::make_shared<std::atomic<bool>> (true);

@@ -59,10 +59,11 @@ public:
     {
         auto st = owner.getProcessor().getTools().getStatus (tool);
         const bool refreshing = owner.getProcessor().getTools().isRefreshing();
-        installBtn.setButtonText (installing ? "INSTALLING..." : (st.found ? (tool == ToolManager::Tool::ytdlp ? "UPDATE" : "REINSTALL") : "INSTALL"));
-        installBtn.setEnabled (! installing);
+        const bool busy = installing || owner.getProcessor().getTools().isInstalling (tool);   // (also one started from another window)
+        installBtn.setButtonText (busy ? "INSTALLING..." : (st.found ? (tool == ToolManager::Tool::ytdlp ? "UPDATE" : "REINSTALL") : "INSTALL"));
+        installBtn.setEnabled (! busy);
         setStyle (installBtn, st.found ? "gold" : "red");
-        status = installing ? "Installing..." : (refreshing && ! st.found ? "Checking..." : (st.found ? "Ready" + (st.version.isNotEmpty() ? "  -  " + st.version : juce::String()) : (st.detail.isNotEmpty() ? st.detail : "Not installed")));
+        status = busy ? "Installing..." : (refreshing && ! st.found ? "Checking..." : (st.found ? "Ready" + (st.version.isNotEmpty() ? "  -  " + st.version : juce::String()) : (st.detail.isNotEmpty() ? st.detail : "Not installed")));
         found = st.found;
         repaint();
     }
@@ -137,9 +138,17 @@ SettingsPanel::SettingsPanel (EditorContext& c) : ctx (c), proc (c.getProcessor(
     installAllBtn.setTooltip ("Install everything that's missing (FFmpeg, yt-dlp, Deno and the AI stem models)");
     installAllBtn.onClick = [this]
     {
+        // Until the first check has finished nothing counts as "found" yet, and everything that is
+        // already installed would be downloaded again.
+        if (proc.getTools().isRefreshing())
+        {
+            ctx.toast ("Still checking what's already installed - try again in a moment.");
+            return;
+        }
         int n = 0;
         for (auto* r : rows)
-            if (r->tool != ToolManager::Tool::ai && ! proc.getTools().getStatus (r->tool).found)
+            if (r->tool != ToolManager::Tool::ai && ! r->installing && ! proc.getTools().isInstalling (r->tool)
+                && ! proc.getTools().getStatus (r->tool).found)
             {
                 r->installing = true;
                 r->update();
@@ -337,7 +346,7 @@ void SettingsPanel::paint (juce::Graphics& g)
 
     g.setColour (col::textFaint);
     g.setFont (ui (10.5f));
-    g.drawFittedText ("Everything runs on your computer. Helper tools are downloaded from their official GitHub releases into Sample Snagger's own folder. "
+    g.drawFittedText ("Everything runs on your computer. Helper tools are downloaded from their projects' release pages (the AI models from Hugging Face) into Sample Snagger's own folder. "
                       "Only sample material you have the rights to use - clear samples before releasing music.",
                       card.reduced (24, 16).removeFromBottom (32).withTrimmedRight (110), juce::Justification::centredLeft, 2);
 }

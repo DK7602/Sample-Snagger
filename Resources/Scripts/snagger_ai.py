@@ -93,16 +93,30 @@ def cmd_install(args):
     venv = os.path.abspath(args.venv)
     py = venv_python(venv)
 
-    if not os.path.exists(py):
+    def pip_works():
+        if not os.path.exists(py):
+            return False
+        try:
+            return subprocess.run([py, "-m", "pip", "--version"], stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=180).returncode == 0
+        except Exception:  # noqa
+            return False
+
+    # An environment that was left half-made (an install that was cancelled, or a Python without
+    # its "venv" part, as on Debian / Ubuntu) has a python but no pip. It used to be taken as
+    # finished, and every later install then failed at "Updating pip". So it is made again.
+    hint = " On Debian / Ubuntu: sudo apt install python3-venv, then click Install again." \
+        if sys.platform.startswith("linux") else ""
+    if not pip_works():
         say("STATUS", "Creating a private Python environment")
         say("PROGRESS", "2")
         import venv as venvmod
         try:
             venvmod.EnvBuilder(with_pip=True, clear=True).create(venv)
         except Exception as e:  # noqa
-            fail(f"Could not create the Python environment: {e}")
-    if not os.path.exists(py):
-        fail("Python environment was not created correctly")
+            fail(f"Could not create the Python environment: {e}.{hint}")
+    if not pip_works():
+        fail("The Python environment was not created correctly (it has no pip)." + hint)
 
     run_step([py, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], 3, 8, "Updating pip")
 

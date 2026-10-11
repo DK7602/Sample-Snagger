@@ -3,6 +3,7 @@
 #include <juce_core/juce_core.h>
 #include <atomic>
 #include <functional>
+#include <thread>
 
 namespace snag
 {
@@ -37,6 +38,31 @@ public:
         // JUCE's POSIX implementation uses fread(), which blocks until the buffer is full,
         // so keep reads small to get timely progress lines.
         char buf[64];
+
+        // Reading the output blocks for as long as the program stays quiet. So the time limit and
+        // the cancel check are watched from the side: a program that prints nothing and never ends
+        // (the wrong file picked with LOCATE, a stuck download) is still stopped on time.
+        std::atomic<bool> finished { false };
+        std::thread watchdog;
+        if (timeoutMs > 0 || shouldCancel)
+            watchdog = std::thread ([&]
+            {
+                while (! finished.load())
+                {
+                    if ((shouldCancel && shouldCancel())
+                        || (timeoutMs > 0 && (int) (juce::Time::getMillisecondCounter() - startTime) > timeoutMs))
+                    {
+                        cancel();
+                        return;
+                    }
+                    juce::Thread::sleep (25);
+                }
+            });
+        struct JoinWatchdog
+        {
+            std::atomic<bool>& done; std::thread& thread;
+            ~JoinWatchdog() { done = true; if (thread.joinable()) thread.join(); }
+        } joinWatchdog { finished, watchdog };
 
         auto flushLines = [&] (bool all)
         {
@@ -98,6 +124,7 @@ public:
             }
         }
 
+        finished = true;   // the program is done (or stopped): from here on nothing may cancel it any more
         flushLines (true);
 
         const juce::ScopedLock sl (lock);

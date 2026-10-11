@@ -3,6 +3,8 @@
 #include "Settings.h"
 #include "Jobs.h"
 #include <juce_events/juce_events.h>
+#include <map>
+#include <set>
 
 namespace snag
 {
@@ -37,6 +39,7 @@ public:
     juce::File getPath (Tool) const;          // empty File if not available
     bool isAvailable (Tool t) const          { return getPath (t).existsAsFile(); }
     bool isRefreshing() const noexcept       { return refreshing; }
+    bool isInstalling (Tool t) const         { const juce::ScopedLock sl (lock); return installing.count (t) > 0; }
 
     /** Re-detects everything (runs version commands). Call from a background thread. */
     void refresh();
@@ -64,6 +67,7 @@ private:
     Settings& settings;
     mutable juce::CriticalSection lock;
     std::map<Tool, Status> statuses;
+    std::set<Tool> installing;      // one install per tool at a time, whoever asks
     std::atomic<bool> refreshing { false }, shuttingDown { false };
 
     struct RefreshThread : juce::Thread

@@ -48,7 +48,12 @@ double FxSettings::tailSeconds (double bpm) const
         tail = juce::jmin (12.0, t * (repeats + 1.0));
     }
     if (reverbOn && reverbMix > 0.001f)
-        tail = juce::jmax (tail, 0.8 + 5.0 * size) + (delayOn ? 1.0 : 0.0);
+    {
+        // the time the longest comb (36.7 ms) takes to fade by 60 dB: about 2 s at SIZE 50%, 10 s at 100%
+        const double feedback = 0.7 + 0.28 * (0.35 + 0.63 * juce::jlimit (0.0f, 1.0f, size));
+        const double rt60 = -3.0 * 0.0367 / std::log10 (feedback);
+        tail = juce::jmax (tail, juce::jmin (12.0, juce::jmax (0.8 + 5.0 * size, rt60))) + (delayOn ? 1.0 : 0.0);
+    }
     if (lofiOn)
         tail += 0.01;
     return tail;
@@ -75,6 +80,8 @@ void FxChain::reset()
     wowPhase = flutterPhase = 0.0;
     rng.setSeed (20260929);
     reverb.reset();
+    lofiWasOn = driveWasOn = delayWasOn = reverbWasOn = false;
+    justReset = true;
 }
 
 void FxChain::process (float* L, float* R, int n, const FxSettings& fx, double bpm) noexcept
@@ -82,6 +89,29 @@ void FxChain::process (float* L, float* R, int n, const FxSettings& fx, double b
     if (n <= 0 || dBuf[0].empty())
         return;
     const float fs = (float) sr;
+
+    // A section that was off kept whatever it last heard. Switched back on (while another section
+    // kept the rack running) it must not play that back: old echoes, a frozen reverb, a stale tone.
+    const bool clean = std::exchange (justReset, false);   // everything was cleared a moment ago: not twice
+    if (fx.lofiOn && ! lofiWasOn && ! clean)
+    {
+        for (auto& b : wowBuf) std::fill (b.begin(), b.end(), 0.0f);
+        wowWrite = 0;
+        holdL = holdR = 0; holdPhase = 1.0f;
+        clickEnv = hissLp = lpL = lpR = hpL = hpR = hpInL = hpInR = 0.0f;
+    }
+    if (fx.driveOn && ! driveWasOn)
+        toneL = toneR = 0.0f;
+    if (fx.delayOn && ! delayWasOn && ! clean)
+    {
+        for (auto& b : dBuf) std::fill (b.begin(), b.end(), 0.0f);
+        dWrite = 0;
+        dTime = -1.0;
+        dampL = dampR = 0.0f;
+    }
+    if (fx.reverbOn && ! reverbWasOn && ! clean)
+        reverb.reset();
+    lofiWasOn = fx.lofiOn; driveWasOn = fx.driveOn; delayWasOn = fx.delayOn; reverbWasOn = fx.reverbOn;
 
     //---------------------------------------------------------------- LO-FI
     if (fx.lofiOn)
@@ -176,7 +206,12 @@ void FxChain::process (float* L, float* R, int n, const FxSettings& fx, double b
     {
         const int len = (int) dBuf[0].size();
         const double beats = delayDivisions()[(size_t) juce::jlimit (0, (int) delayDivisions().size() - 1, fx.division)].beats;
-        const double target = juce::jlimit (1.0, (double) len - 4.0, beats * 60.0 / (bpm > 0 ? bpm : 120.0) * sr);
+        // (a time too long for the buffer - a bar below 53 bpm - is halved, so the echo stays on the grid)
+        // (the limits also keep a damaged tempo from a project file out of the loop below)
+        double wanted = beats * 60.0 / juce::jlimit (20.0, 999.0, bpm > 0 ? bpm : 120.0) * sr;
+        while (wanted > (double) len - 4.0)
+            wanted *= 0.5;
+        const double target = juce::jmax (1.0, wanted);
         if (dTime < 0) dTime = target;
         const double glide = 1.0 - std::exp (-1.0 / (0.05 * sr));      // 50 ms glide when the tempo changes
         const float fb = juce::jlimit (0.0f, 0.9f, fx.feedback);
@@ -206,8 +241,10 @@ void FxChain::process (float* L, float* R, int n, const FxSettings& fx, double b
         juce::Reverb::Parameters p;
         p.roomSize = 0.35f + 0.63f * fx.size;
         p.damping = 0.45f;
-        p.wetLevel = fx.reverbMix * 0.8f;
-        p.dryLevel = 1.0f - 0.45f * fx.reverbMix;
+        // juce::Reverb doubles dryLevel (and triples wetLevel), so 0.5 is "the sound as it is". Without the
+        // halves, switching REVERB on made everything 5 - 6 dB louder, enough to clip a 16 / 24-bit drag.
+        p.wetLevel = fx.reverbMix * 0.4f;
+        p.dryLevel = 0.5f * (1.0f - 0.45f * fx.reverbMix);
         p.width = 1.0f;
         reverb.setParameters (p);
         reverb.processStereo (L, R, n);

@@ -31,8 +31,14 @@ namespace paths
 
     juce::File dragExportDir()
     {
-        auto d = tempDir().getChildFile ("Drag");
-        d.createDirectory();
+        // A DAW usually keeps pointing at a dropped file where it lies. So these live with the
+        // user's other samples (not in a temp folder) and are never cleaned up behind their back.
+        auto d = defaultLibraryDir().getSiblingFile ("Dragged to DAW");
+        if (d.createDirectory().failed())
+        {
+            d = appDataDir().getChildFile ("Dragged to DAW");
+            d.createDirectory();
+        }
         return d;
     }
 
@@ -44,12 +50,47 @@ namespace paths
 
     juce::String safeFileName (const juce::String& name, int maxLen)
     {
-        auto s = juce::File::createLegalFileName (name.trim()).replaceCharacters ("\\/:*?\"<>|", "_________");
-        s = s.retainCharacters ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 _-().,&'!#+=[]")
-             .trim();
-        if (s.isEmpty())
-            s = "Sample";
-        return s.substring (0, maxLen).trim();
+        // Keep the name as it reads - accents, Japanese, Cyrillic and all - and only take out what
+        // a file system can't have: path characters, control characters, leading / trailing dots.
+        juce::String s;
+        for (auto t = name.getCharPointer(); ! t.isEmpty();)
+        {
+            const auto c = t.getAndAdvance();
+            if (c < 32 || c == 127 || (c >= 0xd800 && c <= 0xdfff) || c > 0x10ffff)
+                continue;   // control characters, and broken text that no file system takes
+            s << (juce::String ("\\/:*?\"<>|").containsChar (c) ? (juce::juce_wchar) '_' : c);
+        }
+
+        auto tidy = [] (juce::String t)
+        {
+            t = t.trim();
+            while (t.startsWithChar ('.'))                        t = t.substring (1).trimStart();   // no hidden files
+            while (t.endsWithChar ('.') || t.endsWithChar (' '))  t = t.dropLastCharacters (1);      // Windows refuses these
+            return t;
+        };
+        s = tidy (s);
+
+        // A long name keeps its ending too: that's where " - Vocals", " - chop 3" or " (cut)" is.
+        maxLen = juce::jmax (16, maxLen);
+        if (s.length() > maxLen)
+        {
+            const int tail = juce::jmin (24, maxLen / 3);
+            s = tidy (s.substring (0, maxLen - tail - 2)) + ".." + tidy (s.substring (s.length() - tail));
+        }
+        while (s.getNumBytesAsUTF8() > 200 && s.length() > 1)     // most file systems allow 255 bytes
+            s = tidy (s.substring (0, s.length() / 2 - 1) + s.substring (s.length() / 2 + 1));
+
+        // names Windows keeps for devices ("con.wav" can't be made there)
+        const auto stem = s.upToFirstOccurrenceOf (".", false, false).trim().toUpperCase();
+        for (auto* reserved : { "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+                                "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9" })
+            if (stem == reserved)
+            {
+                s = "_" + s;
+                break;
+            }
+
+        return s.isEmpty() ? juce::String ("Sample") : s;
     }
 }
 

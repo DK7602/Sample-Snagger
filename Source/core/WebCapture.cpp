@@ -1,4 +1,5 @@
 #include "WebCapture.h"
+#include "EditOps.h"
 #include "SnaggerBinaryData.h"
 
 namespace snag
@@ -99,6 +100,8 @@ void WebCapture::startRecording()
 {
     recL.clear();
     recR.clear();
+    recEarlier.clear();
+    recEarlierSeconds = 0.0;
     recording = true;
     if (! armed)
         setArmed (true);
@@ -117,20 +120,60 @@ AudioData::Ptr WebCapture::stopRecording()
 
     if (onStateChanged) onStateChanged();
 
-    if (recL.empty() || sampleRate <= 0)
-        return nullptr;
+    auto takeBuffer = [] (std::vector<float>& l, std::vector<float>& r)
+    {
+        juce::AudioBuffer<float> b (2, (int) l.size());
+        if (! l.empty())
+        {
+            b.copyFrom (0, 0, l.data(), (int) l.size());
+            b.copyFrom (1, 0, r.data(), (int) r.size());
+        }
+        l.clear(); l.shrink_to_fit();
+        r.clear(); r.shrink_to_fit();
+        return b;
+    };
 
-    juce::AudioBuffer<float> b (2, (int) recL.size());
-    b.copyFrom (0, 0, recL.data(), (int) recL.size());
-    b.copyFrom (1, 0, recR.data(), (int) recR.size());
-    recL.clear(); recL.shrink_to_fit();
-    recR.clear(); recR.shrink_to_fit();
-    return AudioData::make (std::move (b), sampleRate);
+    auto earlier = std::move (recEarlier);
+    recEarlier.clear();
+    recEarlierSeconds = 0.0;
+    auto last = takeBuffer (recL, recR);
+    if (sampleRate <= 0 || (earlier.empty() && last.getNumSamples() == 0))
+        return nullptr;
+    if (earlier.empty())
+        return AudioData::make (std::move (last), sampleRate);
+
+    // The rate changed along the way (another page, or the switch between the page's own audio and
+    // the browser's output): every part is brought to the rate the take ended with, once, here.
+    std::vector<AudioData::Ptr> parts;
+    juce::int64 total = last.getNumSamples();
+    for (auto& part : earlier)
+    {
+        const double rate = part.rate;
+        auto audio = AudioData::make (takeBuffer (part.l, part.r), rate);
+        parts.push_back (std::abs (rate - sampleRate) > 0.5 ? edit::resample (*audio, sampleRate) : audio);
+        total += parts.back()->getNumSamples();
+    }
+    total = juce::jmin (total, (juce::int64) ((maxRecordSeconds + 1.0) * sampleRate));
+
+    juce::AudioBuffer<float> all (2, (int) total);
+    int at = 0;
+    auto append = [&all, &at] (const juce::AudioBuffer<float>& b)
+    {
+        const int n = juce::jmin (b.getNumSamples(), all.getNumSamples() - at);
+        for (int ch = 0; ch < 2 && n > 0; ++ch)
+            all.copyFrom (ch, at, b, juce::jmin (ch, b.getNumChannels() - 1), 0, n);
+        at += juce::jmax (0, n);
+    };
+    for (auto& part : parts)
+        append (part->buffer);
+    append (last);
+    all.setSize (2, at, true);
+    return at > 0 ? AudioData::make (std::move (all), sampleRate) : nullptr;
 }
 
 double WebCapture::getRecordedSeconds() const
 {
-    return sampleRate > 0 ? (double) recL.size() / sampleRate : 0.0;
+    return recEarlierSeconds + (sampleRate > 0 ? (double) recL.size() / sampleRate : 0.0);
 }
 
 double WebCapture::getAvailableHindsight() const
@@ -167,11 +210,22 @@ void WebCapture::pushFrames (const float* interleaved, int numFrames, double sr)
 
     if (std::abs (sr - sampleRate) > 0.5 || ring.getNumSamples() == 0)
     {
+        // Another page, or the switch between the page's own audio and the browser's output, can
+        // run at another rate. Hindsight starts over, but a LIVE REC that is running keeps what it
+        // has (it used to be thrown away while the button kept counting): that part is set aside
+        // at its own rate and stopRecording() joins the parts.
+        if (recording && ! recL.empty() && sampleRate > 0)
+        {
+            recEarlierSeconds += (double) recL.size() / sampleRate;
+            recEarlier.push_back ({ std::move (recL), std::move (recR), sampleRate });
+        }
+        recL.clear();
+        recR.clear();
+
         sampleRate = sr;
         ring.setSize (2, (int) (hindsightSeconds * sr));
         ring.clear();
         ringWrite = ringFilled = 0;
-        recL.clear(); recR.clear();
     }
 
     const int size = ring.getNumSamples();
@@ -185,14 +239,17 @@ void WebCapture::pushFrames (const float* interleaved, int numFrames, double sr)
     }
     ringFilled = juce::jmin (size, ringFilled + numFrames);
 
-    if (recording && (double) recL.size() < maxRecordSeconds * sr)
+    if (recording && recEarlierSeconds + (double) recL.size() / sr < maxRecordSeconds)
     {
-        recL.reserve (recL.size() + (size_t) numFrames);
-        recR.reserve (recR.size() + (size_t) numFrames);
+        // (resize grows the storage in big steps; reserving the exact size on every poll made a
+        //  copy of the whole recording each time, which stalled the window on long takes)
+        const size_t old = recL.size();
+        recL.resize (old + (size_t) numFrames);
+        recR.resize (old + (size_t) numFrames);
         for (int i = 0; i < numFrames; ++i)
         {
-            recL.push_back (interleaved[2 * i]);
-            recR.push_back (interleaved[2 * i + 1]);
+            recL[old + (size_t) i] = interleaved[2 * i];
+            recR[old + (size_t) i] = interleaved[2 * i + 1];
         }
     }
 }
@@ -206,9 +263,13 @@ void WebCapture::ingest (const juce::var& result)
     if (! obj.isObject())
         return;
 
+    // Everything in here comes from the web page, which can be anything: nothing is taken on trust.
     const bool viaProcess = isUsingProcessAudio();
     if (! viaProcess)
-        level    = (float) (double) obj.getProperty ("lvl", 0.0);
+    {
+        const double lvl = (double) obj.getProperty ("lvl", 0.0);
+        level = std::isfinite (lvl) ? (float) juce::jlimit (0.0, 4.0, lvl) : 0.0f;
+    }
     mediaPlaying = (bool) obj.getProperty ("playing", false);
     numTaps      = (int) obj.getProperty ("taps", 0);
     blocked      = (int) obj.getProperty ("blocked", 0);
@@ -217,19 +278,25 @@ void WebCapture::ingest (const juce::var& result)
     if (viaProcess)
         return;   // the browser's own audio is recorded directly - the page's copy isn't needed
 
-    const int n = (int) obj.getProperty ("n", 0);
+    const double claimed = (double) obj.getProperty ("n", 0.0);
     const double sr = (double) obj.getProperty ("sr", 0.0);
     const auto b64 = obj.getProperty ("b64", "").toString();
 
-    if (n > 0 && sr > 0 && b64.isNotEmpty())
+    // A sane rate, and no more frames than the tap ever queues (10 s; a huge count used to overflow
+    // the size check below and read far past the decoded data).
+    if (sr >= 8000.0 && sr <= 384000.0 && claimed >= 1.0 && claimed <= sr * 30.0 && b64.isNotEmpty())
     {
+        const auto n = (size_t) claimed;
         juce::MemoryOutputStream mo;
-        if (juce::Base64::convertFromBase64 (mo, b64) && (int) mo.getDataSize() >= n * 2 * (int) sizeof (float))
+        if (juce::Base64::convertFromBase64 (mo, b64) && mo.getDataSize() / (2 * sizeof (float)) >= n)
         {
             // copy to guarantee alignment
-            std::vector<float> frames ((size_t) n * 2);
+            std::vector<float> frames (n * 2);
             std::memcpy (frames.data(), mo.getData(), frames.size() * sizeof (float));
-            pushFrames (frames.data(), n, sr);
+            for (auto& v : frames)
+                if (! std::isfinite (v))
+                    v = 0.0f;
+            pushFrames (frames.data(), (int) n, sr);
         }
     }
 }

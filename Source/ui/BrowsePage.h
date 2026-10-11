@@ -80,6 +80,7 @@ private:
     bool urlEditedByUser = false;   // typed / pasted into the address bar since it was last set
     double markIn = -1.0, markOut = -1.0;
     bool pageVisible = false;
+    int urlSyncCounter = 0;
     juce::uint32 liveRecStarted = 0;
 
     juce::Rectangle<int> navArea, captureBarArea, browserArea;

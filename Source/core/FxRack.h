@@ -41,6 +41,10 @@ private:
 
     // reverb
     juce::Reverb reverb;
+
+    // which sections ran in the last block: one that is switched back on starts clean
+    bool lofiWasOn = false, driveWasOn = false, delayWasOn = false, reverbWasOn = false;
+    bool justReset = false;
 };
 
 /** Renders a sound through the FX rack; with `withTail` the echoes / reverb ring out after it. */

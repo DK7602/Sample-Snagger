@@ -56,11 +56,13 @@ public:
 
         g.setFont (ui (11.0f, true));
         g.setColour (col::goldPale);
-        g.drawText (formatTime (e.seconds, true), len, juce::Justification::centredRight);
+        if (! e.isMidi)
+            g.drawText (formatTime (e.seconds, true), len, juce::Justification::centredRight);
         g.setColour (col::textDim);
-        g.drawText (e.file.getFileExtension().substring (1).toUpperCase() + "  " + juce::String (e.sampleRate / 1000.0, 1) + "k  "
-                    + (e.channels > 1 ? "ST" : "MONO"), fmt, juce::Justification::centredRight);
-        g.drawText (e.file.getLastModificationTime().formatted ("%d %b %Y  %H:%M"), date, juce::Justification::centredRight);
+        g.drawText (e.isMidi ? juce::String ("MIDI NOTES")
+                             : e.file.getFileExtension().substring (1).toUpperCase() + "  " + juce::String (e.sampleRate / 1000.0, 1) + "k  "
+                                   + (e.channels > 1 ? "ST" : "MONO"), fmt, juce::Justification::centredRight);
+        g.drawText (e.modified.formatted ("%d %b %Y  %H:%M"), date, juce::Justification::centredRight);
     }
 
     void mouseEnter (const juce::MouseEvent&) override { repaint(); }
@@ -141,37 +143,91 @@ LibraryPage::LibraryPage (EditorContext& c) : ctx (c), proc (c.getProcessor())
     list.setOutlineThickness (0);
     addAndMakeVisible (list);
 
-    refresh();
+    // (the folder is read when the page is first shown - not every time the plug-in window opens)
+    folderLabel.setText (proc.getSettings().getLibraryDir().getFullPathName(), juce::dontSendNotification);
 }
 
-LibraryPage::~LibraryPage() = default;
-
-void LibraryPage::refresh()
+LibraryPage::~LibraryPage()
 {
-    auto dir = proc.getSettings().getLibraryDir();
-    folderLabel.setText (dir.getFullPathName(), juce::dontSendNotification);
+    ++*scanGeneration;   // tells a scan that is still running to stop; the pool then waits for it
+}
 
-    all.clear();
+std::vector<LibraryPage::Entry> LibraryPage::scanFolder (const juce::File& dir, const std::function<bool()>& keepGoing, bool& hitLimit)
+{
+    hitLimit = false;
+    std::vector<Entry> found;
+
+    // Every file is looked at by name here (the wildcard search is case-sensitive on Linux, so
+    // "KICK.WAV" was missing), hidden files are skipped (the "._name.wav" twins macOS leaves on
+    // USB drives), and a link that leads back to a parent folder is not followed round in circles.
+    static const juce::StringArray audioTypes { ".wav", ".aif", ".aiff", ".flac", ".mp3", ".ogg" };
+    for (const auto& entry : juce::RangedDirectoryIterator (dir, true, "*", juce::File::findFiles | juce::File::ignoreHiddenFiles,
+                                                            juce::File::FollowSymlinks::noCycles))
+    {
+        if (keepGoing && ! keepGoing())
+            return {};
+        const auto f = entry.getFile();
+        const auto ext = f.getFileExtension().toLowerCase();
+        const bool midi = ext == ".mid" || ext == ".midi";
+        if (f.getFileName().startsWith ("._") || ! (midi || audioTypes.contains (ext)))
+            continue;
+        if ((int) found.size() >= maxEntries)
+        {
+            hitLimit = true;
+            break;
+        }
+        Entry e;
+        e.file = f;
+        e.isMidi = midi;
+        e.modified = entry.getModificationTime();
+        found.push_back (e);
+    }
+
+    std::sort (found.begin(), found.end(), [] (const Entry& a, const Entry& b) { return a.modified > b.modified; });
+
     juce::AudioFormatManager fm;
     fm.registerBasicFormats();
-
-    int count = 0;
-    for (const auto& entry : juce::RangedDirectoryIterator (dir, true, "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg", juce::File::findFiles))
+    for (auto& e : found)
     {
-        if (++count > 3000) break;
-        Entry e;
-        e.file = entry.getFile();
+        if (keepGoing && ! keepGoing())
+            return {};
+        if (e.isMidi)
+            continue;
         if (std::unique_ptr<juce::AudioFormatReader> r { fm.createReaderFor (e.file) })
         {
             e.sampleRate = r->sampleRate;
             e.channels = (int) r->numChannels;
             e.seconds = r->sampleRate > 0 ? (double) r->lengthInSamples / r->sampleRate : 0.0;
         }
-        all.push_back (e);
     }
-    std::sort (all.begin(), all.end(), [] (const Entry& a, const Entry& b)
-               { return a.file.getLastModificationTime() > b.file.getLastModificationTime(); });
-    applyFilter();
+    return found;
+}
+
+void LibraryPage::refresh()
+{
+    auto dir = proc.getSettings().getLibraryDir();
+    folderLabel.setText (dir.getFullPathName(), juce::dontSendNotification);
+
+    const int generation = ++*scanGeneration;
+    scanning = true;
+    countLabel.setText (all.empty() ? "LOOKING..." : countLabel.getText(), juce::dontSendNotification);
+
+    auto current = scanGeneration;
+    juce::Component::SafePointer<LibraryPage> safe (this);
+    scanner.addJob ([dir, generation, current, safe]
+    {
+        bool hitLimit = false;
+        auto found = scanFolder (dir, [&] { return current->load() == generation; }, hitLimit);
+        juce::MessageManager::callAsync ([safe, generation, current, hitLimit, found = std::move (found)]() mutable
+        {
+            if (safe == nullptr || current->load() != generation)
+                return;   // the window went away, or a newer scan is on its way
+            safe->all = std::move (found);
+            safe->tooMany = hitLimit;
+            safe->scanning = false;
+            safe->applyFilter();
+        });
+    });
 }
 
 void LibraryPage::applyFilter()
@@ -181,7 +237,8 @@ void LibraryPage::applyFilter()
     for (auto& e : all)
         if (q.isEmpty() || e.file.getFileName().containsIgnoreCase (q))
             shown.push_back (e);
-    countLabel.setText (juce::String ((int) shown.size()) + " SAMPLES", juce::dontSendNotification);
+    countLabel.setText (juce::String ((int) shown.size()) + (tooMany && q.isEmpty() ? "+ SAMPLES (FIRST " + juce::String (maxEntries) + ")" : " SAMPLES"),
+                        juce::dontSendNotification);
     list.updateContent();
     list.repaint();
     repaint();
@@ -209,6 +266,12 @@ void LibraryPage::previewRow (int row)
 {
     if (row < 0 || row >= (int) shown.size()) return;
     auto f = shown[(size_t) row].file;
+    if (shown[(size_t) row].isMidi)
+    {
+        proc.stopPreview();
+        ctx.toast ("That's a MIDI file (notes, not sound). Drag it onto a MIDI or instrument track in your DAW.");
+        return;
+    }
     if (f != previewFile || previewAudio == nullptr)
     {
         if (f.getSize() > 200 * 1024 * 1024) { ctx.toast ("That file is too big to audition here - double-click to load it.", true); return; }
@@ -217,13 +280,17 @@ void LibraryPage::previewRow (int row)
         previewAudio = r.audio;
         previewFile = f;
     }
-    for (auto& g : proc.layerGains) g = 1.0f;
     proc.preview ({ previewAudio }, 0, -1, false);
 }
 
 void LibraryPage::importRow (int row)
 {
     if (row < 0 || row >= (int) shown.size()) return;
+    if (shown[(size_t) row].isMidi)
+    {
+        ctx.toast ("That's a MIDI file. Drag it onto a MIDI or instrument track in your DAW.");
+        return;
+    }
     actions::importFiles (proc, { shown[(size_t) row].file.getFullPathName() });
 }
 
@@ -231,19 +298,22 @@ void LibraryPage::showRowMenu (int row)
 {
     if (row < 0 || row >= (int) shown.size()) return;
     auto f = shown[(size_t) row].file;
+    const bool midi = shown[(size_t) row].isMidi;
     juce::PopupMenu m;
-    m.addItem (1, "Load into tray");
+    m.addItem (1, "Load into tray", ! midi);
     m.addItem (2, "Show in folder");
     m.addSeparator();
     m.addItem (3, "Move to trash");
-    m.showMenuAsync (juce::PopupMenu::Options().withMousePosition(), [this, f, row] (int r)
+    // (by file, not by row: the list can have been reloaded while the menu was open)
+    m.showMenuAsync (juce::PopupMenu::Options().withMousePosition(), [safe = juce::Component::SafePointer<LibraryPage> (this), f] (int r)
     {
-        if (r == 1) importRow (row);
+        if (safe == nullptr) return;
+        if (r == 1) actions::importFiles (safe->proc, { f.getFullPathName() });
         else if (r == 2) f.revealToUser();
         else if (r == 3)
         {
-            if (f.moveToTrash()) { ctx.toast ("Moved " + f.getFileName() + " to the trash"); refresh(); }
-            else ctx.toast ("Couldn't delete " + f.getFileName(), true);
+            if (f.moveToTrash()) { safe->ctx.toast ("Moved " + f.getFileName() + " to the trash"); safe->refresh(); }
+            else safe->ctx.toast ("Couldn't delete " + f.getFileName(), true);
         }
     });
 }
@@ -286,7 +356,7 @@ void LibraryPage::paint (juce::Graphics& g)
     if (shown.empty())
     {
         auto c = listArea.withSizeKeepingCentre (juce::jmin (560.0f, listArea.getWidth() - 40), 120.0f);
-        goldText (g, all.empty() ? "Your library is empty" : "No matches", c.removeFromTop (32.0f), display (22.0f, true), juce::Justification::centred);
+        goldText (g, scanning && all.empty() ? "Reading your library..." : all.empty() ? "Your library is empty" : "No matches", c.removeFromTop (32.0f), display (22.0f, true), juce::Justification::centred);
         g.setColour (col::textDim);
         g.setFont (ui (13.0f));
         g.drawFittedText (all.empty() ? "Hit SAVE in STUDIO or STEMS and your samples land here - a normal folder you can use in any DAW."

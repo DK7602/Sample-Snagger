@@ -336,17 +336,24 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
         menu.addItem (4, "Zoom to selection", hasSelection());
         menu.addItem (5, "Zoom to fit");
         juce::Component::SafePointer<WaveformView> safe (this);
+        // (the menu belongs to the sample it was opened on: by the time something is picked, an
+        //  import or a finished stem split may have put another one on screen)
+        const Clip::Ptr menuClip = clip;
+        const int markerPos = m >= 0 && m < (int) clip->slices.size() ? clip->slices[(size_t) m] : -1;
         menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(),
-                            [safe, s, m] (int r)
+                            [safe, s, markerPos, menuClip] (int r)
         {
-            if (safe == nullptr || safe->clip == nullptr) return;
+            if (safe == nullptr || safe->clip == nullptr || safe->clip != menuClip) return;
             auto& c = *safe->clip;
+            const auto before = c.slices;
+            const auto marker = std::find (c.slices.begin(), c.slices.end(), markerPos);
             if (r == 1)      { c.pushUndo ("Add marker"); c.slices.push_back (s); std::sort (c.slices.begin(), c.slices.end()); }
-            else if (r == 2) { c.pushUndo ("Delete marker"); c.slices.erase (c.slices.begin() + m); }
-            else if (r == 3) { c.pushUndo ("Clear markers"); c.slices.clear(); }
+            else if (r == 2) { if (markerPos < 0 || marker == c.slices.end()) return; c.pushUndo ("Delete marker"); c.slices.erase (marker); }
+            else if (r == 3) { c.pushUndo ("Clear markers"); c.slices.clear(); c.pads.clear(); }
             else if (r == 4) { safe->zoomToSelection(); return; }
             else if (r == 5) { safe->zoomToFit(); return; }
             else return;
+            c.remapPads (before, [] (int pos) { return pos; });   // every chop keeps its own pad sound
             safe->repaint();
             if (safe->onSlicesChanged) safe->onSlicesChanged();
         });
@@ -365,9 +372,15 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
     const int m = markerAt ((float) e.x);
     if (m >= 0 && ! e.mods.isShiftDown())
     {
-        clip->pushUndo ("Move marker");
+        // (the undo step is only made once the marker really moves: a plain click on one - or the
+        //  clicks of a double-click - used to cost an undo level each and wipe the redo list)
         drag = Drag::marker;
         dragMarker = m;
+        markerMoved = false;
+        markerStartPos = clip->slices[(size_t) m];
+        slicesBeforeDrag = clip->slices;
+        dragClip = clip;
+        dragAudio = clip->audio.get();
         return;
     }
 
@@ -381,8 +394,10 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
     if (e.mods.isAltDown())
     {
         clip->pushUndo ("Add marker");
+        const auto before = clip->slices;
         clip->slices.push_back (edit::snapToZeroCrossing (*clip->audio, s, 64));
         std::sort (clip->slices.begin(), clip->slices.end());
+        clip->remapPads (before, [] (int pos) { return pos; });   // both halves keep the chop's pad sound
         repaint();
         if (onSlicesChanged) onSlicesChanged();
         return;
@@ -405,8 +420,26 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
     repaint();
 }
 
+/** The sample changed under a marker that was being dragged: the marker stays where it got to (in
+    order), but its pad sound isn't re-homed with positions that no longer mean anything. */
+void WaveformView::dropMarkerDrag()
+{
+    drag = Drag::none;
+    if (dragClip != nullptr && markerMoved)
+    {
+        auto& sl = dragClip->slices;
+        std::sort (sl.begin(), sl.end());
+        sl.erase (std::unique (sl.begin(), sl.end()), sl.end());
+        if (dragClip == clip && onSlicesChanged)
+            onSlicesChanged();
+    }
+    dragClip = nullptr;
+}
+
 void WaveformView::mouseDrag (const juce::MouseEvent& e)
 {
+    if (drag == Drag::marker && ! markerDragStillValid())
+        dropMarkerDrag();
     if (clip == nullptr) return;
     const int n = numSamples();
     const int s = juce::jlimit (0, n, (int) xToSample ((float) e.x));
@@ -433,7 +466,16 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
             break;
         case Drag::marker:
             if (dragMarker >= 0 && dragMarker < (int) clip->slices.size())
-                clip->slices[(size_t) dragMarker] = juce::jlimit (1, n - 1, s);
+            {
+                const int to = juce::jlimit (1, juce::jmax (1, n - 1), s);
+                if (to != clip->slices[(size_t) dragMarker])
+                {
+                    if (! markerMoved)
+                        clip->pushUndo ("Move marker");
+                    markerMoved = true;
+                    clip->slices[(size_t) dragMarker] = to;
+                }
+            }
             break;
         case Drag::scrub:
             cursor = s;
@@ -447,13 +489,22 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
 
 void WaveformView::mouseUp (const juce::MouseEvent& e)
 {
+    if (drag == Drag::marker && ! markerDragStillValid())
+        dropMarkerDrag();
+    dragClip = nullptr;
     if (clip == nullptr) { drag = Drag::none; return; }
 
     if (drag == Drag::marker)
     {
-        std::sort (clip->slices.begin(), clip->slices.end());
-        clip->slices.erase (std::unique (clip->slices.begin(), clip->slices.end()), clip->slices.end());
-        if (onSlicesChanged) onSlicesChanged();
+        if (markerMoved && dragMarker >= 0 && dragMarker < (int) clip->slices.size())
+        {
+            const int from = markerStartPos, to = clip->slices[(size_t) dragMarker];
+            std::sort (clip->slices.begin(), clip->slices.end());
+            clip->slices.erase (std::unique (clip->slices.begin(), clip->slices.end()), clip->slices.end());
+            // the pad sound travels with its marker, also when it was dragged past a neighbour
+            clip->remapPads (slicesBeforeDrag, [from, to] (int pos) { return pos == to ? from : pos; });
+            if (onSlicesChanged) onSlicesChanged();
+        }
     }
     else if (drag == Drag::select && ! hasSelection())
     {
@@ -476,10 +527,12 @@ void WaveformView::mouseDoubleClick (const juce::MouseEvent& e)
 {
     if (clip == nullptr) return;
     const int m = markerAt ((float) e.x);
-    if (m >= 0)
+    if (m >= 0 && m < (int) clip->slices.size())
     {
         clip->pushUndo ("Delete marker");
+        const auto before = clip->slices;
         clip->slices.erase (clip->slices.begin() + m);
+        clip->remapPads (before, [] (int pos) { return pos; });   // the chops after it keep their own pad sound
         repaint();
         if (onSlicesChanged) onSlicesChanged();
         return;

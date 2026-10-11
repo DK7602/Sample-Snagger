@@ -1,6 +1,7 @@
 #include "Session.h"
 #include "AudioFileIO.h"
 #include "Settings.h"
+#include <cmath>
 
 namespace snag
 {
@@ -18,8 +19,46 @@ Session::~Session()
 
 void Session::flushWrites()
 {
-    for (int i = 0; i < 400 && writer.getNumJobs() > 0; ++i)
+    // Losing a queued write means a saved project that has lost its audio, so be patient:
+    // a long stereo clip is a few hundred MB and stems come several at a time.
+    for (int i = 0; i < 4800 && writer.getNumJobs() > 0; ++i)
         juce::Thread::sleep (25);
+}
+
+juce::File Session::freshCacheFile (const Clip& clip, const juce::String& tag) const
+{
+    if (adoptRestoredFolder)
+        return dir.getChildFile (clip.id + "." + tag + "wav");   // the standalone app: one file per clip
+
+    // A new name for every version of the audio: a file that a saved project points at is never
+    // written over, so closing a project without saving can't leave it with newer audio than its chops.
+    for (;;)
+    {
+        auto f = dir.getChildFile (clip.id + "." + tag + juce::String::toHexString (juce::Random::getSystemRandom().nextInt()) + ".wav");
+        if (! f.exists())
+            return f;
+    }
+}
+
+bool Session::mayDelete (const juce::File& f, const juce::File& ownFolder) const
+{
+    if (f == juce::File() || ! f.isAChildOf (ownFolder))
+        return false;   // another instance's (or an earlier run's) file: not ours to remove
+    const juce::ScopedLock sl (savedLock);
+    return ! savedFiles.contains (f.getFullPathName());
+}
+
+void Session::retire (const juce::File& f)
+{
+    if (! mayDelete (f, dir))
+        return;
+
+    // Asked again when its turn comes: a save that happened in between keeps the file.
+    writer.addJob ([this, f, folder = dir]
+    {
+        if (mayDelete (f, folder))
+            f.deleteFile();
+    });
 }
 
 void Session::add (Clip::Ptr clip, bool shouldSelect)
@@ -55,10 +94,17 @@ void Session::remove (Clip* clip)
 
     for (auto& c : toRemove)
     {
-        auto f = c->cacheFile;
         clips.removeObject (c.get());
-        if (f != juce::File())
-            writer.addJob ([f] { f.deleteFile(); });
+        juce::File audioFile, baseFile;
+        {
+            const juce::ScopedLock sl (savedLock);   // a host may be saving on its own thread
+            audioFile = std::exchange (c->cacheFile, juce::File());
+            baseFile = std::exchange (c->baseCacheFile, juce::File());
+            c->cachedAudio = nullptr;
+            c->cachedBase = nullptr;
+        }
+        retire (audioFile);
+        retire (baseFile);
         if (selected == c)
             selected = nullptr;
     }
@@ -112,17 +158,71 @@ void Session::clipChanged (Clip* clip, bool audioChanged)
     sendChangeMessage();
 }
 
+/** Writes to a temporary file first, so an interrupted write never leaves half a clip behind. */
+static bool writeCacheFile (const AudioData& audio, const juce::File& file)
+{
+    auto tmp = file.getSiblingFile (file.getFileName() + ".tmp");
+    if (audioio::writeWav (audio, tmp, 32))
+        for (int attempt = 0; attempt < 6; ++attempt)   // a virus scanner may hold the new file for a moment
+        {
+            if (tmp.replaceFileIn (file))
+                return true;
+            juce::Thread::sleep (150);
+        }
+
+    tmp.deleteFile();
+    return false;
+}
+
+void Session::queueWrite (AudioData::Ptr audio, const juce::File& file, const juce::File& replaces)
+{
+    writer.addJob ([this, audio, file, replaces, folder = dir]
+    {
+        if (audio == nullptr)
+            return;
+
+        if (! writeCacheFile (*audio, file))
+        {
+            ++failedWrites;   // the editor tells the user; the version before this one stays on disk
+            return;
+        }
+        if (replaces != file && mayDelete (replaces, folder))
+            replaces.deleteFile();
+    });
+}
+
 void Session::persist (Clip::Ptr clip)
 {
     dir.createDirectory();
-    clip->cacheFile = dir.getChildFile (clip->id + ".wav");
-    auto audio = clip->audio;
-    auto file = clip->cacheFile;
-    writer.addJob ([audio, file]
+
+    // Only audio that isn't on disk yet: undoing a marker or a pad setting comes through here too.
+    if (clip->audio != clip->cachedAudio || clip->cacheFile == juce::File())
     {
-        if (audio != nullptr)
-            audioio::writeWav (*audio, file, 32);
-    });
+        juce::File oldFile, file;
+        {
+            const juce::ScopedLock sl (savedLock);   // a host may be saving on its own thread
+            oldFile = clip->cacheFile;
+            file = clip->cacheFile = freshCacheFile (*clip, {});
+            clip->cachedAudio = clip->audio;
+        }
+        queueWrite (clip->audio, file, oldFile);
+    }
+
+    // the original that the PITCH & TIME / TONE knobs work from, so they still do after a reload
+    if (clip->adjustBase != clip->cachedBase || (clip->adjustBase != nullptr && clip->baseCacheFile == juce::File()))
+    {
+        juce::File oldBase, baseFile;
+        {
+            const juce::ScopedLock sl (savedLock);
+            oldBase = clip->baseCacheFile;
+            clip->cachedBase = clip->adjustBase;
+            baseFile = clip->baseCacheFile = clip->adjustBase != nullptr ? freshCacheFile (*clip, "base.") : juce::File();
+        }
+        if (clip->adjustBase != nullptr)
+            queueWrite (clip->adjustBase, baseFile, oldBase);
+        else
+            retire (oldBase);
+    }
 }
 
 //==============================================================================
@@ -142,8 +242,31 @@ juce::ValueTree Session::toValueTree() const
         ct.setProperty ("parent", c->parentId, nullptr);
         ct.setProperty ("stem", c->stemName, nullptr);
         ct.setProperty ("bpm", c->bpm, nullptr);
-        ct.setProperty ("file", c->cacheFile.getFullPathName(), nullptr);
         ct.setProperty ("created", c->created.toMilliseconds(), nullptr);
+
+        // The files this state points at are kept from here on. Naming them and marking them is
+        // one step, so a change to the clip on the message thread can't delete one in between.
+        juce::File audioFile, baseFile;
+        {
+            const juce::ScopedLock lock (savedLock);
+            audioFile = c->cacheFile;
+            baseFile = c->adjustBase != nullptr ? c->baseCacheFile : juce::File();
+            if (! adoptRestoredFolder)
+            {
+                savedFiles.addIfNotAlreadyThere (audioFile.getFullPathName());
+                if (baseFile != juce::File())
+                    savedFiles.addIfNotAlreadyThere (baseFile.getFullPathName());
+            }
+        }
+        ct.setProperty ("file", audioFile.getFullPathName(), nullptr);
+
+        // the knobs, the audio they were last rendered with, and the original they work from
+        if (baseFile != juce::File())
+        {
+            ct.setProperty ("adjust", c->adjust.toString(), nullptr);
+            ct.setProperty ("rendered", c->audioAdjust.toString(), nullptr);
+            ct.setProperty ("base", baseFile.getFullPathName(), nullptr);
+        }
 
         juce::StringArray sl;
         for (auto s : c->slices) sl.add (juce::String (s));
@@ -162,6 +285,39 @@ juce::ValueTree Session::toValueTree() const
     return t;
 }
 
+/** A cache file named in a saved state, wherever the app's data folder is today. */
+static juce::File findSavedFile (const juce::String& path, const juce::File& savedDir, const juce::String& oldStyleName)
+{
+    if (juce::File::isAbsolutePath (path))
+        if (const juce::File f (path); f.existsAsFile())
+            return f;
+
+    // The data folder moved (a new user name, a restored backup, another computer or system):
+    // what still holds is the end of the path, <session folder>/<file>, under today's Sessions folder.
+    auto parts = juce::StringArray::fromTokens (path, "/\\", {});
+    parts.removeEmptyStrings();
+    const auto name = parts.isEmpty() ? juce::String() : juce::File::createLegalFileName (parts[parts.size() - 1]);
+    if (name.isNotEmpty() && ! name.startsWithChar ('.'))
+    {
+        if (parts.size() >= 2)
+        {
+            const auto folder = juce::File::createLegalFileName (parts[parts.size() - 2]);
+            if (folder.isNotEmpty() && ! folder.startsWithChar ('.'))
+                if (auto f = paths::sessionsDir().getChildFile (folder).getChildFile (name); f.existsAsFile())
+                    return f;
+        }
+        if (savedDir != juce::File())
+            if (auto f = savedDir.getChildFile (name); f.existsAsFile())
+                return f;
+    }
+
+    // a state saved before files carried a version in their name
+    if (savedDir != juce::File() && oldStyleName.isNotEmpty())
+        if (auto f = savedDir.getChildFile (juce::File::createLegalFileName (oldStyleName)); f.existsAsFile())
+            return f;
+    return {};
+}
+
 void Session::restore (const juce::ValueTree& t)
 {
     if (! t.hasType ("SESSION"))
@@ -169,21 +325,33 @@ void Session::restore (const juce::ValueTree& t)
 
     clips.clear();
     selected = nullptr;
+    missingClips = 0;
 
-    sessionId = t.getProperty ("id", juce::Uuid().toString()).toString();
-    dir = paths::sessionsDir().getChildFile (sessionId);
+    // Where the saved clips used to live. Only the standalone app keeps working in that folder:
+    // several plug-in instances can restore one and the same state (a duplicated track, a copy of
+    // the project), so each writes its own changes to its own folder and never touches these files.
+    const auto savedId = t.getProperty ("id").toString();
+    const auto savedDir = savedId.isNotEmpty() ? paths::sessionsDir().getChildFile (savedId) : juce::File();
+    if (adoptRestoredFolder && savedId.isNotEmpty())
+    {
+        sessionId = savedId;
+        dir = savedDir;
+    }
+    else
+    {
+        sessionId = juce::Uuid().toString();
+        dir = paths::sessionsDir().getChildFile (sessionId);
+    }
 
     for (auto ct : t)
     {
-        juce::File f (ct.getProperty ("file").toString());
-        if (! f.existsAsFile())
-            f = dir.getChildFile (ct.getProperty ("id").toString() + ".wav");
-        if (! f.existsAsFile())
-            continue;
-
-        auto loaded = audioio::loadFile (f, {});
+        const auto f = findSavedFile (ct.getProperty ("file").toString(), savedDir, ct.getProperty ("id").toString() + ".wav");
+        auto loaded = f.existsAsFile() ? audioio::loadFile (f, {}) : audioio::LoadResult();
         if (loaded.audio == nullptr)
+        {
+            ++missingClips;
             continue;
+        }
 
         Clip::Ptr c (new Clip());
         c->id       = ct.getProperty ("id").toString();
@@ -193,9 +361,12 @@ void Session::restore (const juce::ValueTree& t)
         c->parentId = ct.getProperty ("parent").toString();
         c->stemName = ct.getProperty ("stem").toString();
         c->bpm      = (double) ct.getProperty ("bpm", 0.0);
+        if (! (c->bpm > 0.0 && c->bpm < 2000.0))   // also catches a damaged (not-a-number) value
+            c->bpm = 0.0;
         c->created  = juce::Time ((juce::int64) ct.getProperty ("created", juce::Time::currentTimeMillis()));
         c->audio    = loaded.audio;
         c->cacheFile = f;
+        c->cachedAudio = loaded.audio;
 
         for (auto& s : juce::StringArray::fromTokens (ct.getProperty ("slices").toString(), ",", {}))
             if (s.isNotEmpty())
@@ -214,6 +385,43 @@ void Session::restore (const juce::ValueTree& t)
             c->keyTonic = juce::jlimit (-1, 11, k.getIntValue());
             c->keyMinor = k.containsChar ('m');
             c->keyManual = k.containsChar ('!');
+        }
+
+        if (ct.hasProperty ("adjust"))
+        {
+            const auto adjust   = Clip::Adjust::fromString (ct.getProperty ("adjust").toString());
+            const auto rendered = Clip::Adjust::fromString (ct.getProperty ("rendered", ct.getProperty ("adjust")).toString());
+            const auto bf = findSavedFile (ct.getProperty ("base").toString(), savedDir, {});
+            auto base = bf.existsAsFile() ? audioio::loadFile (bf, {}) : audioio::LoadResult();
+
+            if (base.audio != nullptr)
+            {
+                c->adjust = adjust;
+                c->audioAdjust = rendered;
+                c->adjustBase = base.audio;
+                c->cachedBase = base.audio;
+                c->baseCacheFile = bf;
+            }
+            else
+            {
+                // The original is gone, so what's left is the sound as it was rendered: from here on
+                // that is the sample, and its tempo and key are the ones you hear.
+                if (c->bpm > 0.0)
+                    c->bpm = rendered.tape ? c->bpm * std::pow (2.0, rendered.semitones / 12.0)
+                                           : c->bpm / juce::jmax (0.01, rendered.length);
+                const int shift = juce::roundToInt (rendered.semitones);
+                if (c->keyTonic >= 0 && ! rendered.tape && std::abs (rendered.semitones - (float) shift) < 0.05f)
+                    c->keyTonic = ((c->keyTonic + shift) % 12 + 12) % 12;
+            }
+        }
+
+        // these are what the saved state points at: keep them as they are
+        if (! adoptRestoredFolder)
+        {
+            const juce::ScopedLock sl (savedLock);
+            savedFiles.addIfNotAlreadyThere (c->cacheFile.getFullPathName());
+            if (c->baseCacheFile != juce::File())
+                savedFiles.addIfNotAlreadyThere (c->baseCacheFile.getFullPathName());
         }
 
         clips.add (c);

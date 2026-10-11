@@ -30,6 +30,8 @@ SnaggerProcessor::SnaggerProcessor()
     for (auto& g : layerGains)
         g = 1.0f;
 
+    session.setAdoptsRestoredFolder (wrapperType == wrapperType_Standalone);
+    session.addChangeListener (this);
     writerThread.startThread();
     startTimer (1000);
 }
@@ -38,6 +40,7 @@ SnaggerProcessor::~SnaggerProcessor()
 {
     aliveFlag->store (false);
     stopTimer();
+    session.removeChangeListener (this);
     jobs.cancelAll();
     stopInputRecording();
     writerThread.stopThread (2000);
@@ -70,6 +73,7 @@ void SnaggerProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     pRunning = false;
     fxChain.prepare (currentSampleRate);
     fxBus.setSize (2, juce::jmax (1024, samplesPerBlock * 2), false, true, false);
+    dryBus.setSize (2, fxBus.getNumSamples(), false, true, false);
     fxWasOn = false;
 }
 
@@ -96,7 +100,7 @@ void SnaggerProcessor::setSamplerClip (Clip::Ptr clip, int selStart, int selEnd)
         }
         s->pads = clip->pads;
         s->fx = clip->fx;
-        s->bpm = clip->bpm;
+        s->bpm = clip->heardBpm();   // what the delay locks to without a host tempo
     }
     samplerShared.publish (s);
 }
@@ -113,8 +117,14 @@ void SnaggerProcessor::sendUiNote (int note, float velocity)
 }
 
 //==============================================================================
-void SnaggerProcessor::preview (std::vector<AudioData::Ptr> layers, int start, int end, bool loop, bool withFx)
+void SnaggerProcessor::preview (std::vector<AudioData::Ptr> layers, int start, int end, bool loop, bool withFx,
+                                const std::vector<float>* gains, int playFrom)
 {
+    // Every preview sets its own layer levels. (They used to be left as the last STEMS mix had
+    // them, so a muted first stem made everything played afterwards silent.)
+    for (size_t i = 0; i < layerGains.size(); ++i)
+        layerGains[i] = gains != nullptr ? (i < gains->size() ? (*gains)[i] : 0.0f) : 1.0f;
+
     layers.erase (std::remove (layers.begin(), layers.end(), nullptr), layers.end());
     if (layers.empty())
     {
@@ -132,17 +142,18 @@ void SnaggerProcessor::preview (std::vector<AudioData::Ptr> layers, int start, i
         p->start = 0;
         p->end = n;
     }
+    p->from = playFrom < 0 ? p->start : juce::jlimit (p->start, juce::jmax (p->start, p->end - 1), playFrom);
     p->loop = loop;
     p->fx = withFx;
     p->serial = ++previewSerial;
     previewPlaying = true;
-    previewPos = (double) p->start;
+    previewPos = (double) p->from;
     previewShared.publish (p);
 }
 
-void SnaggerProcessor::previewClip (const Clip& clip, int start, int end, bool loop, bool withFx)
+void SnaggerProcessor::previewClip (const Clip& clip, int start, int end, bool loop, bool withFx, int playFrom)
 {
-    preview ({ clip.audio }, start, end, loop, withFx);
+    preview ({ clip.audio }, start, end, loop, withFx, nullptr, playFrom);
 }
 
 void SnaggerProcessor::stopPreview()
@@ -270,7 +281,7 @@ void SnaggerProcessor::renderPreview (juce::AudioBuffer<float>& dry, juce::Audio
         else
         {
             pRunning = true;
-            pPos = latest->start;
+            pPos = latest->from;
             pEnv = 0.0f;
         }
     }
@@ -282,11 +293,10 @@ void SnaggerProcessor::renderPreview (juce::AudioBuffer<float>& dry, juce::Audio
     }
 
     auto& p = *activePreview;
-    auto& out = p.fx ? wet : dry;
+    auto& out = p.fx ? wet : dry;   // both are stereo buses
     const double rate = p.layers.front()->sampleRate / currentSampleRate;
     const float attack = 1.0f / (float) juce::jmax (1.0, currentSampleRate * 0.003);
     const int fadeLen = (int) juce::jmax (8.0, currentSampleRate * 0.005);
-    const int outCh = out.getNumChannels();
 
     float gains[8];
     for (size_t l = 0; l < 8; ++l)
@@ -322,8 +332,7 @@ void SnaggerProcessor::renderPreview (juce::AudioBuffer<float>& dry, juce::Audio
         }
 
         out.addSample (0, i, l * amp);
-        if (outCh > 1)
-            out.addSample (1, i, r * amp);
+        out.addSample (1, i, r * amp);
         pPos += rate;
     }
 
@@ -337,6 +346,7 @@ void SnaggerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     juce::ScopedNoDenormals noDenormals;
     const int numSamples = buffer.getNumSamples();
     const int numIn = getTotalNumInputChannels();
+    const int numOut = getTotalNumOutputChannels();   // (the buffer can be wider: it carries the input bus too)
 
     // Host tempo
     if (auto* ph = getPlayHead())
@@ -352,19 +362,26 @@ void SnaggerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             pk = juce::jmax (pk, buffer.getMagnitude (c, 0, numSamples));
         inputLevel = juce::jmax (pk, inputLevel.load() * 0.9f);
 
-        const juce::ScopedLock sl (writerLock);
-        if (auto* w = activeWriter.load())
-        {
-            const float* chans[2] = { buffer.getReadPointer (0), buffer.getReadPointer (juce::jmin (1, numIn - 1)) };
-            w->write (chans, numSamples);
-            recordedSamples += numSamples;
-        }
+        // never wait on the audio thread: the lock is only ever held for the instant REC starts / stops
+        const juce::ScopedTryLock sl (writerLock);
+        if (sl.isLocked())
+            if (auto* w = activeWriter.load())
+                if (recordedSamples.load() < maxRecordSamples.load())   // stop at the longest length that can be loaded
+                {
+                    const float* chans[2] = { buffer.getReadPointer (0), buffer.getReadPointer (juce::jmin (1, numIn - 1)) };
+                    if (w->write (chans, numSamples))
+                        recordedSamples += numSamples;
+                }
     }
 
     buffer.clear();   // instrument: never pass input through (avoids feedback)
-    if (fxBus.getNumSamples() < numSamples)
+    if (fxBus.getNumSamples() < numSamples || dryBus.getNumSamples() < numSamples)
+    {
         fxBus.setSize (2, numSamples, false, false, true);   // (only if the host sends a bigger block than promised)
+        dryBus.setSize (2, numSamples, false, false, true);
+    }
     fxBus.clear (0, numSamples);
+    dryBus.clear (0, numSamples);
 
     auto state = samplerShared.read();
 
@@ -386,6 +403,8 @@ void SnaggerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     int pos = 0;
     for (const auto meta : midi)
     {
+        if (meta.numBytes > 3)
+            continue;   // SysEx and the like: nothing for us (and turning it into a message would allocate)
         const auto m = meta.getMessage();
         const int t = juce::jlimit (0, numSamples, meta.samplePosition);
         if (t > pos)
@@ -403,7 +422,7 @@ void SnaggerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     if (pos < numSamples)
         renderVoices (fxBus, pos, numSamples - pos);
 
-    renderPreview (buffer, fxBus, numSamples);
+    renderPreview (dryBus, fxBus, numSamples);
 
     // FX rack (pads + STUDIO playback), synced to the host's tempo, else the sample's
     const bool fxOn = state != nullptr && state->fx.anyOn();
@@ -415,19 +434,24 @@ void SnaggerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         fxChain.process (fxBus.getWritePointer (0), fxBus.getWritePointer (1), numSamples, state->fx, bpm);
     }
     fxWasOn = fxOn;
-    if (buffer.getNumChannels() > 1)
+
+    // A mono output gets both sides, also when a stereo input bus makes the buffer two channels wide.
+    for (auto* bus : { &dryBus, &fxBus })
     {
-        buffer.addFrom (0, 0, fxBus, 0, 0, numSamples);
-        buffer.addFrom (1, 0, fxBus, 1, 0, numSamples);
-    }
-    else if (buffer.getNumChannels() == 1)
-    {
-        buffer.addFrom (0, 0, fxBus, 0, 0, numSamples, 0.5f);
-        buffer.addFrom (0, 0, fxBus, 1, 0, numSamples, 0.5f);
+        if (numOut > 1 && buffer.getNumChannels() > 1)
+        {
+            buffer.addFrom (0, 0, *bus, 0, 0, numSamples);
+            buffer.addFrom (1, 0, *bus, 1, 0, numSamples);
+        }
+        else if (buffer.getNumChannels() > 0)
+        {
+            buffer.addFrom (0, 0, *bus, 0, 0, numSamples, 0.5f);
+            buffer.addFrom (0, 0, *bus, 1, 0, numSamples, 0.5f);
+        }
     }
 
     float pk = 0;
-    for (int c = 0; c < buffer.getNumChannels(); ++c)
+    for (int c = 0; c < juce::jmin (numOut, buffer.getNumChannels()); ++c)
         pk = juce::jmax (pk, buffer.getMagnitude (c, 0, numSamples));
     outputLevel = juce::jmax (pk, outputLevel.load() * 0.9f);
 }
@@ -472,8 +496,11 @@ bool SnaggerProcessor::startInputRecording (juce::String& error)
 
     if (auto writer = wav.createWriterFor (stream, options))
     {
-        threadedWriter = std::make_unique<juce::AudioFormatWriter::ThreadedWriter> (writer.release(), writerThread, 1 << 15);
+        // room for a few seconds, so a busy disk doesn't punch holes in the take (also at 192 kHz)
+        const int fifoSamples = juce::jmax (1 << 16, (int) (currentSampleRate * 4.0));
+        threadedWriter = std::make_unique<juce::AudioFormatWriter::ThreadedWriter> (writer.release(), writerThread, fifoSamples);
         recordedSamples = 0;
+        maxRecordSamples = (juce::int64) (audioio::maxSeconds * currentSampleRate);
         const juce::ScopedLock sl (writerLock);
         activeWriter = threadedWriter.get();
         return true;
@@ -483,8 +510,10 @@ bool SnaggerProcessor::startInputRecording (juce::String& error)
     return false;
 }
 
-Clip::Ptr SnaggerProcessor::stopInputRecording()
+Clip::Ptr SnaggerProcessor::stopInputRecording (bool* hitLimit)
 {
+    if (hitLimit != nullptr)
+        *hitLimit = false;
     {
         const juce::ScopedLock sl (writerLock);
         activeWriter = nullptr;
@@ -496,6 +525,8 @@ Clip::Ptr SnaggerProcessor::stopInputRecording()
 
     auto loaded = audioio::loadFile (recordingFile, {});
     recordingFile.deleteFile();
+    if (hitLimit != nullptr)
+        *hitLimit = loaded.truncated || inputRecordingIsFull();
     if (loaded.audio == nullptr || loaded.audio->getNumSamples() < 64)
         return nullptr;
 
@@ -517,6 +548,14 @@ void SnaggerProcessor::timerCallback()
 {
     samplerShared.collectGarbage();
     previewShared.collectGarbage();
+}
+
+void SnaggerProcessor::changeListenerCallback (juce::ChangeBroadcaster*)
+{
+    // The sampler must never keep playing (and holding in memory) a clip that has left the session:
+    // after Remove or CLEAR, MIDI notes would still trigger a sample that is nowhere to be seen.
+    if (samplerClip != nullptr && ! session.getClips().contains (samplerClip))
+        setSamplerClip (session.getSelected());
 }
 
 //==============================================================================
@@ -545,10 +584,12 @@ void SnaggerProcessor::setStateInformation (const void* data, int sizeInBytes)
     if (! root.hasType ("SAMPLESNAGGER"))
         return;
 
-    midiMode   = (int) root.getProperty ("midiMode", 0);
+    // (a state can come from anywhere: keep every value in a range the audio thread can live with)
+    midiMode   = juce::jlimit (0, 1, (int) root.getProperty ("midiMode", 0));
     oneShot    = (bool) root.getProperty ("oneShot", true);
-    rootNote   = (int) root.getProperty ("rootNote", 60);
-    masterGain = (float) root.getProperty ("gain", 1.0f);
+    rootNote   = juce::jlimit (0, 127, (int) root.getProperty ("rootNote", 60));
+    const float gain = (float) root.getProperty ("gain", 1.0f);
+    masterGain = std::isfinite (gain) ? juce::jlimit (0.0f, 4.0f, gain) : 1.0f;
 
     auto alive = aliveFlag;
     auto restore = [this, root, alive]
@@ -559,8 +600,7 @@ void SnaggerProcessor::setStateInformation (const void* data, int sizeInBytes)
         auto ui = root.getChildWithName ("UI");
         if (ui.isValid())
             uiState.copyPropertiesAndChildrenFrom (ui, nullptr);
-        if (auto sel = session.getSelected())
-            setSamplerClip (sel);
+        setSamplerClip (session.getSelected());   // (nothing selected = an empty session: nothing to play)
     };
 
     if (juce::MessageManager::getInstance()->isThisTheMessageThread())

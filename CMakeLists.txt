@@ -10,6 +10,11 @@ if(APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 endif()
 
+# Windows: build the C / C++ runtime into the plug-in and the app. With the default (the runtime as
+# separate DLLs) they only load on a PC that already has the "Visual C++ Redistributable" - on one
+# that hasn't, the DAW just doesn't list the plug-in and the app asks for VCRUNTIME140_1.dll.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # ------------------------------------------------------------------------------------------------
 # Options
 # ------------------------------------------------------------------------------------------------
@@ -227,6 +232,9 @@ if(SNAGGER_BUILTIN_AI)
     # (std::vector etc.) for the whole plug-in, which would crash hosts on older CPUs.
     if(MSVC)
         target_compile_options(snagger_demucs PRIVATE /bigobj /EHsc /W0 "$<$<NOT:$<CONFIG:Debug>>:/O2;/Ob2;/fp:fast>")
+        # demucs.cpp opens model files with fopen(), which can't read a path with non-ASCII letters
+        # on Windows (C:\Users\<name>\AppData\...). This header points those calls at a UTF-8 version.
+        target_compile_options(snagger_demucs PRIVATE "/FI${CMAKE_CURRENT_SOURCE_DIR}/Source/ai/Utf8Fopen.h")
     else()
         target_compile_options(snagger_demucs PRIVATE -O3 -fno-math-errno -w)
     endif()
